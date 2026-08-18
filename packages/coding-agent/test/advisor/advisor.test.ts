@@ -5509,7 +5509,7 @@ describe("advisor", () => {
 			).toBe("steer");
 		});
 
-		it("routes interrupting notes to the aside queue during immune turns without overriding preservation", () => {
+		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
@@ -5519,6 +5519,15 @@ describe("advisor", () => {
 					interruptImmuneTurnActive: true,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("steer");
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
