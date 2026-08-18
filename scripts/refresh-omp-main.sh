@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Restore the caller's starting branch on every exit path, so running this
+# script never leaves the user on the default branch.
+start_branch="$(git branch --show-current)"
+restore() {
+	[[ -n "$start_branch" ]] && git switch --quiet "$start_branch" 2>/dev/null || true
+}
+trap restore EXIT
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
