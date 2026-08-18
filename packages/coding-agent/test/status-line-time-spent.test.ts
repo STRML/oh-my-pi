@@ -68,6 +68,7 @@ function createCtx(activeMs: number): SegmentContext {
 		worktree: null,
 		git: { branch: null, status: null, pr: null },
 		usage: null,
+		advisorUsage: null,
 	};
 }
 
