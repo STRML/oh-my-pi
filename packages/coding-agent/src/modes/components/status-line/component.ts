@@ -1884,9 +1884,16 @@ export class StatusLineComponent implements Component {
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
+		// Segments shed by line 1's size budget move to the overflow line instead
+		// of being lost. Collected here in pop/drop order (right-to-left), then
+		// reversed back to reading order when assembling the second line.
+		const overflowLeft: string[] = [];
+		const overflowRight: string[] = [];
+
 		if (topFillWidth > 0) {
 			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
+				const popped = right.pop();
+				if (popped !== undefined) overflowRight.push(popped);
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
@@ -1935,6 +1942,7 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				overflowLeft.push(left[dropIdx]);
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
@@ -1965,21 +1973,32 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
 
-		if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
-			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		// Line 1 is the primary bar, kept-set exactly as before the two-line work.
+		let line1: string;
+		if (!leftGroup && !rightGroup) {
+			line1 = "";
+		} else if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
+			line1 = leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		} else {
+			const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+			const sessionName =
+				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			const accentHex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+			const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+			line1 = leftGroup + gapFill + rightGroup;
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
-		const sessionName =
-			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
-		const accentHex = sessionName
-			? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-			: undefined;
-		const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
-		const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
-		return leftGroup + gapFill + rightGroup;
+		// Line 2: overflowed segments kept in original reading order — left group
+		// first, then right group — joined by the dot separator. Each part is
+		// already self-contained ANSI from renderSegment, so no bg group or
+		// powerline caps are needed; the editor frames/pads this row.
+		const overflowParts = [...overflowLeft.reverse(), ...overflowRight.reverse()];
+		if (overflowParts.length === 0) return line1;
+		return `${line1}\n${overflowParts.join(theme.sep.dot)}`;
 	}
 
 	getTopBorder(width: number): { content: string; width: number; revision: number } {
@@ -1989,9 +2008,16 @@ export class StatusLineComponent implements Component {
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
 			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
+		// With a two-line overflow the reported width is the widest line, which is
+		// what the editor budgets per row. A single-line bar keeps today's value.
+		let borderWidth = 0;
+		for (const line of content.split("\n")) {
+			const lineWidth = visibleWidth(line);
+			if (lineWidth > borderWidth) borderWidth = lineWidth;
+		}
 		return {
 			content,
-			width: visibleWidth(content),
+			width: borderWidth,
 			revision: this.#widthEpochRevision,
 		};
 	}
