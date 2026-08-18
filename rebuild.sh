@@ -85,7 +85,17 @@ if (( no_build )); then
 	printf 'dry run — build skipped\n'
 	exit 0
 fi
+step_label="clean stale native"
+native_version="$(package_version packages/natives/package.json)"
+release_version="$(package_version packages/coding-agent/package.json)"
+[[ "$native_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$native_version" == "$release_version" ]] ||
+	die "native/coding-agent versions disagree (native=$native_version coding-agent=$release_version)"
+native_addon="packages/natives/native/pi_natives.darwin-arm64.node"
+binary_output="packages/coding-agent/binaries/omp-darwin-arm64"
+printf 'clean stale native (%s): %s %s\n' "$native_version" "$native_addon" "$binary_output"
+rm -f -- "$native_addon" "$binary_output"
 step_label="bun install"; bun install
+step_label="build darwin-arm64 native"; bun --cwd=packages/natives run build
 step_label="build darwin-arm64 binary"; bun run ci:release:build-binaries --targets=darwin-arm64
 step_label="install binary"; mkdir -p "$HOME/.local/bin"
 install -m 755 packages/coding-agent/binaries/omp-darwin-arm64 "$HOME/.local/bin/omp"
