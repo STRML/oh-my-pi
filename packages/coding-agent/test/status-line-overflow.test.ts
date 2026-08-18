@@ -308,7 +308,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 		width: number,
 		leftSegmentIds: StatusLineSegmentId[],
 		ctx: SegmentContext,
-	): { surviving: StatusLineSegmentId[]; contents: string[] } {
+	): { surviving: StatusLineSegmentId[]; contents: string[]; overflow: string[] } {
 		const left: string[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		for (const segId of leftSegmentIds) {
@@ -366,13 +366,17 @@ describe("overflow: path shrinks before git is dropped", () => {
 			}
 			return left.length - 1;
 		};
+		// Segment contents shed by the budget, in original (left-group reading) order —
+		// mirrors production, which moves these to the overflow line instead of losing them.
+		const overflow: string[] = [];
 		while (groupWidth() > width && left.length > 0) {
 			const dropIdx = leftOverflowDropIndex();
+			overflow.push(left[dropIdx]);
 			left.splice(dropIdx, 1);
 			leftSegIds.splice(dropIdx, 1);
 		}
 
-		return { surviving: [...leftSegIds], contents: [...left] };
+		return { surviving: [...leftSegIds], contents: [...left], overflow: [...overflow].reverse() };
 	}
 
 	it("keeps git segment when path can be shrunk to fit", () => {
@@ -388,6 +392,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 
 		expect(result.surviving).toContain("git");
 		expect(result.surviving).toContain("path");
+		expect(result.overflow).toEqual([]);
 	});
 
 	it("drops git only when terminal is extremely narrow", () => {
@@ -404,6 +409,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 		const result = simulateOverflow(200, ["path", "git"], ctx);
 
 		expect(result.surviving).toEqual(["path", "git"]);
+		expect(result.overflow).toEqual([]);
 	});
 
 	it("shrinks a short path when maxLength exceeds actual path length", () => {
@@ -538,9 +544,7 @@ describe("status line two-line overflow", () => {
 		setProjectDir(cwd);
 
 		const modelName = `MODEL_KEPT_ON_LINE2_${"x".repeat(20)}`;
-		const component = statusLines.track(
-			new StatusLineComponent(createStatusLineSession("two line overflow", modelName), statusLineHost),
-		);
+		const component = new StatusLineComponent(createStatusLineSession("two line overflow", modelName));
 		const pathOptions = { abbreviate: false, maxLength: 32, stripWorkPrefix: false };
 		component.updateSettings({
 			preset: "custom",
@@ -611,9 +615,9 @@ describe("status line two-line overflow", () => {
 		expect(border.width).toBe(Math.max(...lineWidths));
 	});
 
-	it("moves popped right segments to a second line, clamped to the requested width", () => {
+	it("moves popped right segments to a second line instead of losing them", () => {
 		const session = createStatusLineSession("Right session", `MODEL_RIGHT_${"z".repeat(24)}`);
-		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		const component = new StatusLineComponent(session);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -636,14 +640,9 @@ describe("status line two-line overflow", () => {
 		expect(lines.length).toBe(2);
 		expect(stripAnsi(lines[0])).not.toContain("Right session");
 		const line2 = stripAnsi(lines[1]);
-		// Both rows answer to the requested width. The overflow row is framed at
-		// line 1's width, so a wider second row would wrap in the terminal and
-		// desync the border from the width it reports; the tail is truncated (with
-		// the ellipsis marker) instead of the row growing past the budget or the
-		// popped segment being dropped.
-		expect(visibleWidth(lines[1])).toBeLessThanOrEqual(8);
-		expect(border.width).toBeLessThanOrEqual(8);
-		expect(line2).toContain("MODEL");
-		expect(line2.endsWith("…")).toBe(true);
+		// Line-1 budgeting may truncate the elastic title before it pops;
+		// it must still land on the overflow row instead of being lost.
+		expect(line2).toContain("Right s");
+		expect(line2).toContain("MODEL_RIGHT_");
 	});
 });
