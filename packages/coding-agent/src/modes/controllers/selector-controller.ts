@@ -231,7 +231,7 @@ export class SelectorController {
 					getStatusLinePreview: () => {
 						// Return the rendered status line for inline preview
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+						return this.ctx.statusLine.getTopBorder(availableWidth).content.split("\n")[0];
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());

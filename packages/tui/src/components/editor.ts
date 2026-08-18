@@ -387,9 +387,11 @@ export interface EditorTheme {
 }
 
 export interface EditorTopBorder {
-	/** The status content (already styled) */
+	/** The status content (already styled). May contain at most one `\n`: line 1 is the
+	 * primary bar (exactly as today), line 2 holds overflow/substrate segments. */
 	content: string;
-	/** Visible width of the content */
+	/** Visible width of the content. For multi-line content this is the MAX visibleWidth
+	 * across lines; the component re-derives per-row widths when it splits on `\n`. */
 	width: number;
 	/** Optional logical revision that changes independently of available width. */
 	revision?: number;
@@ -949,17 +951,32 @@ export class Editor implements Component, Focusable {
 				topBorder = this.#topBorderContent;
 			}
 			if (topBorder) {
-				const { content, width: statusWidth } = topBorder;
-				if (statusWidth <= topFillWidth) {
-					// Status fits - add fill after it
-					const fillWidth = topFillWidth - statusWidth;
-					result.push(topLeft + content + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+				// Render one framed border row per line of content. Single-line
+				// content keeps the historical `width`-based fit/truncate math
+				// verbatim; content with one `\n` (overflow/substrate segments on
+				// line 2) gets each row framed independently against its measured
+				// width, so the second row renders as another border row directly
+				// below the first and the frame naturally grows one row taller.
+				const renderRow = (lineText: string, lineWidth: number): void => {
+					if (lineWidth <= topFillWidth) {
+						// Row fits - add fill after it
+						const fillWidth = topFillWidth - lineWidth;
+						result.push(topLeft + lineText + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+					} else {
+						// Row too long - truncate it
+						const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth - 1));
+						const truncatedWidth = visibleWidth(truncated);
+						const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+						result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+					}
+				};
+				const lines = topBorder.content.split("\n");
+				if (lines.length <= 1) {
+					renderRow(topBorder.content, topBorder.width);
 				} else {
-					// Status too long - truncate it
-					const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
-					const truncatedWidth = visibleWidth(truncated);
-					const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
-					result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+					for (const line of lines) {
+						renderRow(line, visibleWidth(line));
+					}
 				}
 			} else {
 				result.push(topLeft + horizontal.repeat(topFillWidth) + topRight);
