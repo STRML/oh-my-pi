@@ -1994,6 +1994,12 @@ export class StatusLineComponent implements Component {
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
+		// Segments shed by line 1's size budget move to the overflow line instead
+		// of being lost. Collected here in pop/drop order (right-to-left), then
+		// reversed back to reading order when assembling the second line.
+		const overflowLeft: string[] = [];
+		const overflowRight: string[] = [];
+
 		if (topFillWidth > 0) {
 			// Truncate the session-name segment before dropping right segments —
 			// the title is the only elastic one on the right, and dropping it
@@ -2012,7 +2018,8 @@ export class StatusLineComponent implements Component {
 				}
 			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
+				const popped = right.pop();
+				if (popped !== undefined) overflowRight.push(popped);
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
@@ -2061,6 +2068,7 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				overflowLeft.push(left[dropIdx]);
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
@@ -2091,18 +2099,18 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
-
-		if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
-			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
-		}
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
-		if (plain) {
-			// Standalone composers: no gauge line between the groups, just air.
-			return leftGroup + padding(gapWidth) + rightGroup;
-		}
-		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+		const primaryBar = plain
+			? leftGroup + padding(gapWidth) + rightGroup
+			: leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+		// Line 2: overflowed segments kept in original reading order — left group
+		// first, then right group — joined by the dot separator. Each part is
+		// already self-contained ANSI from renderSegment, so no bg group or
+		// powerline caps are needed; the editor frames/pads this row.
+		const overflowParts = [...overflowLeft.reverse(), ...overflowRight.reverse()];
+		if (overflowParts.length === 0) return primaryBar;
+		return `${primaryBar}\n${overflowParts.join(theme.sep.dot)}`;
 	}
 
 	/**
@@ -2261,9 +2269,16 @@ export class StatusLineComponent implements Component {
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
 			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
+		// With a two-line overflow the reported width is the widest line, which is
+		// what the editor budgets per row. A single-line bar keeps today's value.
+		let borderWidth = 0;
+		for (const line of content.split("\n")) {
+			const lineWidth = visibleWidth(line);
+			if (lineWidth > borderWidth) borderWidth = lineWidth;
+		}
 		return {
 			content,
-			width: visibleWidth(content),
+			width: borderWidth,
 			revision: this.#widthEpochRevision,
 		};
 	}
