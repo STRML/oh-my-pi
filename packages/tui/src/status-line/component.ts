@@ -568,6 +568,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null = null;
+	// Advisor-scoped share of the same provider reports: the advisor's own
+	// provider/identity, independent of the primary model's. Fetching both from
+	// one report array keeps a single 5-min refresh cycle.
+	#cachedAdvisorUsage: {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
+	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
@@ -1621,7 +1628,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// so switching models must drop the previous model's cached scope instead
 		// of showing it for the rest of the TTL.
 		const activeModelId = session.state.model?.id ?? session.model?.id ?? "";
-		return `${this.#formatUsageContextKey(activeProvider, identity)}\0${activeModelId}`;
+		const parts = [`${this.#formatUsageContextKey(activeProvider, identity)}\0${activeModelId}`];
+		// The advisor share of the same reports is keyed to the advisor's own
+		// accounts; rotation must invalidate the cache the same way the primary's
+		// does. Order is the stable roster order, so the key is render-stable.
+		for (const account of this.host.getAdvisorUsageAccounts(session)) {
+			const accountIdentity = this.host.activeAccount(session, account.provider);
+			parts.push(this.#formatUsageContextKey(account.provider, accountIdentity));
+		}
+		return parts.join("\u001e");
 	}
 
 	/**
@@ -1634,6 +1649,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usageContextKey = this.#getUsageContextKey(session);
 		if (this.#cachedUsageContextKey !== usageContextKey) {
 			this.#cachedUsage = null;
+			this.#cachedAdvisorUsage = null;
 			this.#usageFetchedAt = 0;
 			this.#cachedUsageContextKey = usageContextKey;
 		}
@@ -1686,10 +1702,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			modelId: activeModelId,
 			identity: activeIdentity,
 		});
+		const advisorUsage = this.#normalizeAdvisorUsage(
+			reports,
+			this.host.getAdvisorUsageAccounts(session),
+			session,
+		);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
-		const usageChanged = this.#cachedUsage !== normalized;
+		const usageChanged = this.#cachedUsage !== normalized || this.#cachedAdvisorUsage !== advisorUsage;
 		this.#cachedUsage = normalized;
+		this.#cachedAdvisorUsage = advisorUsage;
 		this.#usageFetchedAt = Date.now();
 		// Usage fetch is async; without a repaint the top border stays blank until
 		// some unrelated event (git resolve, keystroke, …) rebuilds it.
@@ -1971,6 +1993,106 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	/**
+	 * Advisor-scoped usage windows from the same account-wide fetch. The advisor
+	 * often runs on a different provider/account than the primary model, so the
+	 * match is keyed to each live advisor's own provider + OAuth identity (the
+	 * same derivation the runtime uses to pick the advisor's API key). The
+	 * rendered percent is the worst across the roster — one shared quota pool,
+	 * and the operative number for status. Untiered windows win over tiered
+	 * within a provider, mirroring {@link #normalizeUsageReports}.
+	 *
+	 * Identity comes from the host, never from pi-tui: `activeAccount` is bound
+	 * to the session generic here, so an advisor's own `providerSessionId` is not
+	 * threaded through it (the host resolves the session's account for that
+	 * provider). That makes the identity account-invariant per provider, and an
+	 * unresolved identity keeps matching permissive, exactly as a missing
+	 * `getOAuthAccountIdentity` did before the status line moved into pi-tui.
+	 */
+	#normalizeAdvisorUsage(
+		reports: unknown,
+		accounts: readonly { provider: string; providerSessionId?: string }[],
+		session: TSession,
+	): {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
+	} | null {
+		if (!Array.isArray(reports) || accounts.length === 0) return null;
+		const now = Date.now();
+		const fiveHour: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
+		const sevenDay: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
+		let fiveHourUntiered = false;
+		let sevenDayUntiered = false;
+		const revise = (bucket: typeof fiveHour, percent: number, resetsAt: number | undefined): void => {
+			if (percent <= bucket.percent) return;
+			bucket.percent = percent;
+			if (typeof resetsAt === "number") {
+				bucket.resetMinutes = Math.max(0, Math.round((resetsAt - now) / 60_000));
+				bucket.resetHours = Math.max(0, Math.round((resetsAt - now) / 3_600_000));
+			}
+		};
+		for (const report of reports) {
+			if (!report || typeof report !== "object") continue;
+			const provider = (report as { provider?: unknown }).provider;
+			const limits = (report as { limits?: unknown }).limits;
+			if (!Array.isArray(limits) || typeof provider !== "string") continue;
+			if (!accounts.some(a => a.provider === provider)) continue;
+			const usageReport = report as UsageReport;
+			for (const account of accounts.filter(a => a.provider === provider)) {
+				const identity = this.host.activeAccount(session, account.provider);
+				for (const limit of limits) {
+					if (!limit || typeof limit !== "object") continue;
+					if (identity && !this.host.limitMatchesActiveAccount(usageReport, limit as UsageLimit, identity))
+						continue;
+					const l = limit as {
+						scope?: { windowId?: string; tier?: string };
+						window?: { resetsAt?: number; durationMs?: number };
+						amount?: { usedFraction?: number };
+					};
+					const windowClass = this.#advisorUsageWindowClass(l);
+					if (!windowClass) continue;
+					const fraction = l.amount?.usedFraction;
+					if (typeof fraction !== "number") continue;
+					const untiered = !l.scope?.tier;
+					if (windowClass === "5h") {
+						if (untiered) fiveHourUntiered = true;
+						if (fiveHourUntiered && !untiered) continue;
+						revise(fiveHour, fraction * 100, l.window?.resetsAt);
+					} else {
+						if (untiered) sevenDayUntiered = true;
+						if (sevenDayUntiered && !untiered) continue;
+						revise(sevenDay, fraction * 100, l.window?.resetsAt);
+					}
+				}
+			}
+		}
+		const result: {
+			fiveHour?: { percent: number; resetMinutes?: number };
+			sevenDay?: { percent: number; resetHours?: number };
+		} = {};
+		if (fiveHour.percent >= 0) result.fiveHour = { percent: fiveHour.percent, resetMinutes: fiveHour.resetMinutes };
+		if (sevenDay.percent >= 0) result.sevenDay = { percent: sevenDay.percent, resetHours: sevenDay.resetHours };
+		return result.fiveHour || result.sevenDay ? result : null;
+	}
+
+	/**
+	 * Map a reported limit onto the 5h/7d subscription windows. Canonical window
+	 * ids win; a duration within tolerance falls back so cache rows written
+	 * before a provider was canonicalized still map (same tolerance the primary
+	 * normalization uses).
+	 */
+	#advisorUsageWindowClass(l: {
+		scope?: { windowId?: string };
+		window?: { durationMs?: number };
+	}): "5h" | "7d" | undefined {
+		const windowId = l.scope?.windowId;
+		if (windowId === "5h" || windowId === "7d") return windowId;
+		const durationMs = l.window?.durationMs;
+		if (durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000) return "5h";
+		if (durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000) return "7d";
+		return undefined;
+	}
+
+	/**
 	 * Used-tokens / context-window totals for the status-line context% segment,
 	 * memoized so the per-event redraw stays O(1) when nothing changed.
 	 *
@@ -2143,6 +2265,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			advisorUsage: this.#cachedAdvisorUsage,
 		};
 	}
 
