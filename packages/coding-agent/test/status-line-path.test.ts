@@ -70,6 +70,7 @@ function createPathContext(): SegmentContext {
 			pr: null,
 		},
 		usage: null,
+		advisorUsage: null,
 	};
 }
 

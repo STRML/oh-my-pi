@@ -83,6 +83,7 @@ function createCtx(overrides?: {
 			pr: null,
 		},
 		usage: null,
+		advisorUsage: null,
 	};
 }
 
