@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
+import type { SegmentContext, StatusLineSegmentId } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 beforeAll(async () => {
@@ -18,7 +18,13 @@ afterAll(() => {
 
 function makeComponent(
 	reports: unknown,
-	options: { provider?: string; activeIdentity?: { accountId?: string; email?: string; projectId?: string } } = {},
+	options: {
+		provider?: string;
+		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+		advisorCost?: number;
+		advisorAccounts?: { provider: string; providerSessionId?: string }[];
+		rightSegments?: StatusLineSegmentId[];
+	} = {},
 ): StatusLineComponent {
 	const component = new StatusLineComponent({
 		state: { messages: [], model: { contextWindow: 1000, provider: options.provider } },
@@ -39,18 +45,21 @@ function makeComponent(
 		},
 		fetchUsageReports: async () => reports,
 		modelRegistry: {
+			isUsingOAuth: () => false,
 			authStorage: {
 				getOAuthAccountIdentity: (provider: string) =>
 					provider === options.provider ? options.activeIdentity : undefined,
 			},
 		},
+		getAdvisorCost: () => options.advisorCost ?? 0,
+		getAdvisorUsageAccounts: () => options.advisorAccounts ?? [],
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		getContextUsage: () => undefined,
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: [],
-		rightSegments: ["usage"],
+		rightSegments: options.rightSegments ?? ["usage"],
 		sessionAccent: false,
 	});
 	return component;
@@ -62,6 +71,21 @@ async function flushUsageRefresh(): Promise<void> {
 	await timer.promise;
 	await Promise.resolve();
 	await Promise.resolve();
+}
+
+async function renderCost(options: {
+	reports: unknown;
+	advisorCost?: number;
+	advisorAccounts?: { provider: string; providerSessionId?: string }[];
+}): Promise<string> {
+	const component = makeComponent(options.reports, {
+		advisorCost: options.advisorCost,
+		advisorAccounts: options.advisorAccounts,
+		rightSegments: ["cost"],
+	});
+	component.refreshUsageInBackground();
+	await flushUsageRefresh();
+	return stripVTControlCharacters(component.getTopBorder(200).content);
 }
 
 describe("usage status-line segment", () => {
@@ -548,5 +572,74 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("5h");
 		expect(content).toContain("24%");
 		expect(content).not.toContain("7d");
+	});
+});
+
+describe("advisor usage in the cost segment", () => {
+	const now = Date.now();
+
+	it("shows advisor 5h/7d limits instead of the imputed dollar amount", async () => {
+		const content = await renderCost({
+			reports: [
+				{
+					provider: "anthropic",
+					limits: [
+						{
+							scope: { windowId: "5h" },
+							window: { resetsAt: now + 30 * 60_000 },
+							amount: { usedFraction: 0.42 },
+						},
+						{
+							scope: { windowId: "7d" },
+							window: { resetsAt: now + 141 * 3_600_000 },
+							amount: { usedFraction: 0.63 },
+						},
+					],
+				},
+			],
+			advisorCost: 250.86,
+			advisorAccounts: [{ provider: "anthropic" }],
+		});
+
+		expect(content).toContain("5h 42%");
+		expect(content).toContain("(30m)");
+		expect(content).toContain("7d 63%");
+		expect(content).toContain("(5d 21h)");
+		expect(content).toContain("(adv)");
+		expect(content).not.toContain("$");
+	});
+
+	it("still shows advisor limits when the imputed cost is zero", async () => {
+		const content = await renderCost({
+			reports: [
+				{
+					provider: "anthropic",
+					limits: [
+						{
+							scope: { windowId: "5h" },
+							window: { resetsAt: now + 10 * 60_000 },
+							amount: { usedFraction: 0.12 },
+						},
+					],
+				},
+			],
+			advisorCost: 0,
+			advisorAccounts: [{ provider: "anthropic" }],
+		});
+
+		expect(content).toContain("5h 12%");
+		expect(content).toContain("(10m)");
+		expect(content).toContain("(adv)");
+		expect(content).not.toContain("$");
+	});
+
+	it("falls back to the dollar amount for advisors with no quota endpoint", async () => {
+		const content = await renderCost({
+			reports: [],
+			advisorCost: 42.5,
+			advisorAccounts: [{ provider: "openai" }],
+		});
+
+		expect(content).toContain("$42.50 (adv)");
 	});
 });

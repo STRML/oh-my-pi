@@ -453,12 +453,14 @@ const costSegment: StatusLineSegment = {
 	render(ctx) {
 		const { cost, premiumRequests } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
+		const advisorUsage = ctx.advisorUsage;
+		const hasAdvisorLimits = Boolean(advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay));
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 		const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
+		if (!cost && !advisorCost && !hasAdvisorLimits && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
 		}
 
@@ -471,9 +473,33 @@ const costSegment: StatusLineSegment = {
 			);
 		}
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-		if (advisorCost) {
-			const prefix = billingParts.length ? "+ " : "";
-			billingParts.push(`${prefix}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
+		// The advisor's dollar figure is imputed from token counts at list price
+		// and is meaningless on a subscription; the real gate is the account's
+		// provider-reported usage windows. Show the 5h/7d limits when the
+		// advisor's provider reports them, falling back to the token-derived
+		// amount only for providers with no quota endpoint (so non-quota
+		// advisors don't silently drop their only cost signal).
+		if (advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay)) {
+			const limitParts: string[] = [];
+			if (advisorUsage.fiveHour) {
+				const pct = advisorUsage.fiveHour.percent;
+				const reset =
+					advisorUsage.fiveHour.resetMinutes !== undefined
+						? theme.fg("muted", ` (${formatUsageReset(advisorUsage.fiveHour.resetMinutes, "m")})`)
+						: "";
+				limitParts.push(`5h ${theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`)}${reset}`);
+			}
+			if (advisorUsage.sevenDay) {
+				const pct = advisorUsage.sevenDay.percent;
+				const reset =
+					advisorUsage.sevenDay.resetHours !== undefined
+						? theme.fg("muted", ` (${formatUsageReset(advisorUsage.sevenDay.resetHours, "h")})`)
+						: "";
+				limitParts.push(`7d ${theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`)}${reset}`);
+			}
+			billingParts.push(`${billingParts.length ? "+ " : ""}${limitParts.join(theme.sep.dot)} (adv)`);
+		} else if (advisorCost) {
+			billingParts.push(`${billingParts.length ? "+ " : ""}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
 		}
 		if (billingParts.length === 0) return { content: "", visible: false };
 
