@@ -460,17 +460,17 @@ const costSegment: StatusLineSegment = {
 				const pct = advisorUsage.fiveHour.percent;
 				const reset =
 					advisorUsage.fiveHour.resetMinutes !== undefined
-						? theme.fg("muted", ` (${formatUsageReset(advisorUsage.fiveHour.resetMinutes, "m")})`)
+						? ` (${formatUsageReset(advisorUsage.fiveHour.resetMinutes, "m")})`
 						: "";
-				limitParts.push(`5h ${theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`)}${reset}`);
+				limitParts.push(`5h ${usagePercent(pct)}${reset}`);
 			}
 			if (advisorUsage.sevenDay) {
 				const pct = advisorUsage.sevenDay.percent;
 				const reset =
 					advisorUsage.sevenDay.resetHours !== undefined
-						? theme.fg("muted", ` (${formatUsageReset(advisorUsage.sevenDay.resetHours, "h")})`)
+						? ` (${formatUsageReset(advisorUsage.sevenDay.resetHours, "h")})`
 						: "";
-				limitParts.push(`7d ${theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`)}${reset}`);
+				limitParts.push(`7d ${usagePercent(pct)}${reset}`);
 			}
 			billingParts.push(`${billingParts.length ? "+ " : ""}${limitParts.join(theme.sep.dot)} (adv)`);
 		} else if (advisorCost) {
@@ -643,10 +643,18 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
-function pickUsageColor(percent: number): "muted" | "warning" | "error" {
+function pickUsageColor(percent: number): "warning" | "error" | undefined {
 	if (percent >= 80) return "error";
 	if (percent >= 50) return "warning";
-	return "muted";
+	return undefined;
+}
+
+/** Percent display: inherits the segment color (bright) until 50%, then
+ *  warning, then error at 80%. `floor` matches provider dashboard flooring. */
+function usagePercent(percent: number, floor = false): string {
+	const text = `${floor ? Math.floor(percent) : Math.round(percent)}%`;
+	const color = pickUsageColor(percent);
+	return color ? theme.fg(color, text) : text;
 }
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {
@@ -678,33 +686,30 @@ const usageSegment: StatusLineSegment = {
 		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
 				u.fiveHour.resetMinutes !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
+					? ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`
 					: "";
-			parts.push(`5h ${pctText}${reset}`);
+			parts.push(`5h ${usagePercent(pct)}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
 				u.sevenDay.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
+					? ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`
 					: "";
-			parts.push(`7d ${pctText}${reset}`);
+			parts.push(`7d ${usagePercent(pct)}${reset}`);
 		}
 		if (u.monthly) {
 			const pct = u.monthly.percent;
 			// Cursor and OpenCode Go (normalize gates monthly to those providers).
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
 			const reset =
 				u.monthly.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
+					? ` (${formatUsageReset(u.monthly.resetHours, "h")})`
 					: "";
-			parts.push(`mo ${pctText}${reset}`);
+			parts.push(`mo ${usagePercent(pct, true)}${reset}`);
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };

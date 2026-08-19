@@ -388,7 +388,8 @@ export interface EditorTheme {
 
 export interface EditorTopBorder {
 	/** The status content (already styled). May contain at most one `\n`: line 1 is the
-	 * primary bar (exactly as today), line 2 holds overflow/substrate segments. */
+	 * primary bar (exactly as today), line 2 holds overflow/substrate segments. The
+	 * second row renders with vertical sides so the frame reads as one box. */
 	content: string;
 	/** Visible width of the content. For multi-line content this is the MAX visibleWidth
 	 * across lines; the component re-derives per-row widths when it splits on `\n`. */
@@ -951,31 +952,42 @@ export class Editor implements Component, Focusable {
 				topBorder = this.#topBorderContent;
 			}
 			if (topBorder) {
-				// Render one framed border row per line of content. Single-line
-				// content keeps the historical `width`-based fit/truncate math
-				// verbatim; content with one `\n` (overflow/substrate segments on
-				// line 2) gets each row framed independently against its measured
-				// width, so the second row renders as another border row directly
-				// below the first and the frame naturally grows one row taller.
-				const renderRow = (lineText: string, lineWidth: number): void => {
-					if (lineWidth <= topFillWidth) {
-						// Row fits - add fill after it
-						const fillWidth = topFillWidth - lineWidth;
-						result.push(topLeft + lineText + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
-					} else {
-						// Row too long - truncate it
-						const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth - 1));
-						const truncatedWidth = visibleWidth(truncated);
-						const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
-						result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
-					}
-				};
+				// Multi-line status content (line 2 = overflow/substrate segments)
+				// frames as one box: line 1 keeps the historical cornered row
+				// exactly, following rows render with vertical sides so the corner
+				// columns line up (`╭╮` on line 1, `││` below, `╰╯` closes on the
+				// editor's last row). Single-line content is byte-identical to the
+				// old fit/truncate math.
 				const lines = topBorder.content.split("\n");
-				if (lines.length <= 1) {
-					renderRow(topBorder.content, topBorder.width);
-				} else {
-					for (const line of lines) {
-						renderRow(line, visibleWidth(line));
+				for (let i = 0; i < lines.length; i++) {
+					const lineText = lines[i]!;
+					const lineWidth = visibleWidth(lineText);
+					if (i === 0) {
+						if (lineWidth <= topFillWidth) {
+							// Row fits - add fill after it
+							const fillWidth = topFillWidth - lineWidth;
+							result.push(topLeft + lineText + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+						} else {
+							// Row too long - truncate it
+							const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth - 1));
+							const truncatedWidth = visibleWidth(truncated);
+							const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+							result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+						}
+					} else {
+						const sideLeft = this.borderColor(`${box.vertical}${padding(paddingX)}`);
+						const sideRight = this.borderColor(`${padding(paddingX)}${box.vertical}`);
+						if (lineWidth <= topFillWidth) {
+							// Row fits - pad the gap inside the sides
+							const fillWidth = topFillWidth - lineWidth;
+							result.push(sideLeft + lineText + padding(fillWidth) + sideRight);
+						} else {
+							// Row too long - truncate it
+							const truncated = truncateToWidth(lineText, Math.max(0, topFillWidth));
+							const truncatedWidth = visibleWidth(truncated);
+							const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+							result.push(sideLeft + truncated + padding(fillWidth) + sideRight);
+						}
 					}
 				}
 			} else {

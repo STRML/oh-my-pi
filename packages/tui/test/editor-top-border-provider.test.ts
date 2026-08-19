@@ -106,11 +106,18 @@ describe("Editor lazy top-border provider (#4145)", () => {
 		const frame = editor.render(40).map(line => stripVTControlCharacters(line));
 		expect(frame[0]).toContain(primary);
 		expect(frame[1]).toContain(overlay);
-		// Both rows are full-width framed border rows of the content area.
+		// Both rows are full-width rows of the content area; the first keeps the
+		// cornered top row and the second uses vertical sides, so the corner
+		// columns line up as one box.
 		expect(visibleWidth(frame[0])).toBe(40);
 		expect(visibleWidth(frame[1])).toBe(40);
 		expect(frame[0]).toMatch(/^\+.*\+$/);
-		expect(frame[1]).toMatch(/^\+.*\+$/);
+		expect(frame[1]).toMatch(/^\|.*\|$/);
+		// The second row's sides occupy the same columns as the top row's corners.
+		expect(frame[1][0]).toBe("|");
+		expect(frame[1][frame[1].length - 1]).toBe("|");
+		expect(frame[0][0]).toBe("+");
+		expect(frame[0][frame[0].length - 1]).toBe("+");
 		// The frame grows exactly one row taller than the single-line frame.
 		const single = new Editor(defaultEditorTheme);
 		single.setTopBorderProvider(() => ({ content: primary, width: primary.length }));
@@ -127,7 +134,7 @@ describe("Editor lazy top-border provider (#4145)", () => {
 		expect(frame[0]).toContain("short");
 		expect(visibleWidth(frame[0])).toBe(40);
 		// The oversized second row is truncated (with fill) to the full width.
-		expect(frame[1]).toMatch(/^\+.*\+$/);
+		expect(frame[1]).toMatch(/^\|.*\|$/);
 		expect(visibleWidth(frame[1])).toBe(40);
 		expect(frame[1]).not.toContain(long);
 	});

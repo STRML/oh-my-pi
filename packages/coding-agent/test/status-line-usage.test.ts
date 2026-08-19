@@ -496,6 +496,11 @@ describe("usage status-line segment", () => {
 		expect(low.visible).toBe(true);
 		expect(stripVTControlCharacters(highWithoutValue)).toBe(stripVTControlCharacters(lowWithoutValue));
 		expect(highWithoutValue).not.toBe(lowWithoutValue);
+		// A low value carries no color of its own: it inherits the segment color
+		// (bright with the label) instead of dimming to muted.
+		expect(/\x1b\[[0-9;]*m24%/.test(low.content)).toBe(false);
+		// The eighty-percent value is wrapped in its own error color.
+		expect(/\x1b\[[0-9;]*m80%/.test(high.content)).toBe(true);
 	});
 
 	it("maps non-canonical window ids onto subscription windows by reported span", async () => {
