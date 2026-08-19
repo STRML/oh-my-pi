@@ -687,17 +687,12 @@ const usageSegment: StatusLineSegment = {
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
 			const reset =
-				u.fiveHour.resetMinutes !== undefined
-					? ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`
-					: "";
+				u.fiveHour.resetMinutes !== undefined ? ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})` : "";
 			parts.push(`5h ${usagePercent(pct)}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
-			const reset =
-				u.sevenDay.resetHours !== undefined
-					? ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`
-					: "";
+			const reset = u.sevenDay.resetHours !== undefined ? ` (${formatUsageReset(u.sevenDay.resetHours, "h")})` : "";
 			parts.push(`7d ${usagePercent(pct)}${reset}`);
 		}
 		if (u.monthly) {
@@ -705,10 +700,7 @@ const usageSegment: StatusLineSegment = {
 			// Cursor and OpenCode Go (normalize gates monthly to those providers).
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
-			const reset =
-				u.monthly.resetHours !== undefined
-					? ` (${formatUsageReset(u.monthly.resetHours, "h")})`
-					: "";
+			const reset = u.monthly.resetHours !== undefined ? ` (${formatUsageReset(u.monthly.resetHours, "h")})` : "";
 			parts.push(`mo ${usagePercent(pct, true)}${reset}`);
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
