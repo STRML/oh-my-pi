@@ -79,7 +79,11 @@ else
 	rebase_base=origin/main
 fi
 step_label="rebase onto $rebase_base"
-if ! git rebase "$rebase_base"; then
+# --no-fork-point: the default fork-point heuristic reads upstream's reflog
+# and can misclassify an ancestor base as a large divergence, replaying the
+# whole drift backwards onto it. Pure DAG ancestry is deterministic: an
+# ancestor base is a no-op.
+if ! git rebase --no-fork-point "$rebase_base"; then
 	printf 'Rebase failed. Resolve the rebase in place, then rerun rebuild.sh.\n' >&2
 	exit 1
 fi
