@@ -1549,4 +1549,52 @@ describe("Settings", () => {
 			});
 		});
 	});
+
+	describe("live settings reload", () => {
+		it("reloadFromDisk applies a global config edit to the live instance", async () => {
+			await writeSettings({ autoResume: true });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("autoResume")).toBe(true);
+
+			await writeSettings({ autoResume: false });
+			await settings.reloadFromDisk();
+
+			expect(settings.get("autoResume")).toBe(false);
+		});
+
+		it("reloadFromDisk fires onModelRolesChanged only when modelRoles changed on disk", async () => {
+			await writeSettings({ autoResume: true, modelRoles: { default: "provider/model-a" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("modelRoles")).toEqual({ default: "provider/model-a" });
+
+			const onRoles = vi.fn();
+			const unsubscribe = onModelRolesChanged(onRoles);
+			try {
+				// Unrelated key edited: reload must not fire the roles signal.
+				await writeSettings({ autoResume: false, modelRoles: { default: "provider/model-a" } });
+				await settings.reloadFromDisk();
+				expect(onRoles).not.toHaveBeenCalled();
+
+				// modelRoles edited: reload must fire it exactly once.
+				await writeSettings({ autoResume: false, modelRoles: { default: "provider/model-b" } });
+				await settings.reloadFromDisk();
+				expect(onRoles).toHaveBeenCalledTimes(1);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("reloadFromDisk preserves runtime overrides while swapping disk layers", async () => {
+			await writeSettings({ autoResume: true });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.override("autoResume", true);
+
+			await writeSettings({ autoResume: false });
+			await settings.reloadFromDisk();
+
+			// Runtime override still wins over the refreshed global layer.
+			expect(settings.get("autoResume")).toBe(true);
+		});
+
+		});
 });
