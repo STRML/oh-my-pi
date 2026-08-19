@@ -68,14 +68,18 @@ if git remote get-url upstream >/dev/null 2>&1; then
 fi
 step_label="check main refs"
 git rev-parse --verify --quiet origin/main >/dev/null || die "origin/main is unavailable"
-if (( upstream_exists )) && git rev-parse --verify --quiet upstream/main >/dev/null \
-	&& git merge-base --is-ancestor origin/main upstream/main \
-	&& [[ "$(git rev-parse origin/main)" != "$(git rev-parse upstream/main)" ]]; then
-	lag_count="$(git rev-list --count origin/main..upstream/main)"
-	printf 'WARNING: origin/main lags upstream/main by %s commit(s); building the fork main as requested.\n' "$lag_count"
+# The fork tracks upstream, so rebase the current branch onto the newest
+# upstream tip when an upstream remote is present; fall back to origin/main
+# only without one. Rebasing onto a stale origin/main would replay the whole
+# upstream drift backwards onto it (mass conflicts) whenever the current branch
+# is already based on upstream/main.
+if (( upstream_exists )) && git rev-parse --verify --quiet upstream/main >/dev/null; then
+	rebase_base=upstream/main
+else
+	rebase_base=origin/main
 fi
-step_label="rebase onto origin/main"
-if ! git rebase origin/main; then
+step_label="rebase onto $rebase_base"
+if ! git rebase "$rebase_base"; then
 	printf 'Rebase failed. Resolve the rebase in place, then rerun rebuild.sh.\n' >&2
 	exit 1
 fi
