@@ -93,6 +93,28 @@ if (( no_build )); then
 	printf 'dry run — build skipped\n'
 	exit 0
 fi
+# Keep the fork's main current so origin/main never rots behind upstream again.
+# Advance local main to upstream/main (ancestor-checked fast-forward only) and
+# push it. A refused push (origin/main diverged) warns and still builds.
+step_label="sync fork main to upstream"
+upstream_sha="$(git rev-parse --verify --quiet upstream/main 2>/dev/null)" || upstream_sha=""
+if (( upstream_exists )) && [[ -n "$upstream_sha" ]] \
+	&& git rev-parse --verify --quiet main >/dev/null \
+	&& [[ "$(git rev-parse main)" != "$upstream_sha" ]] \
+	&& git merge-base --is-ancestor main upstream/main; then
+	lag_count="$(git rev-list --count main..upstream/main)"
+	printf 'syncing main: %s -> %s (%s commits behind upstream)\n' \
+		"$(git rev-parse --short main)" "${upstream_sha:0:8}" "$lag_count"
+	if [[ "$current_branch" != "main" ]]; then
+		# update-ref (not `git branch -f`) so main keeps tracking origin/main.
+		git update-ref refs/heads/main "$upstream_sha"
+	fi
+	if git push origin main 2>&1; then
+		printf 'origin/main advanced to %s\n' "${upstream_sha:0:8}"
+	else
+		printf 'WARNING: origin/main push failed (diverged or no push access); local main is current, remote is not.\n' >&2
+	fi
+fi
 step_label="clean stale native"
 native_version="$(package_version packages/natives/package.json)"
 release_version="$(package_version packages/coding-agent/package.json)"
