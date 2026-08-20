@@ -499,7 +499,9 @@ const costSegment: StatusLineSegment = {
 			}
 			billingParts.push(`${billingParts.length ? "+ " : ""}${limitParts.join(theme.sep.dot)} (adv)`);
 		} else if (advisorCost) {
-			billingParts.push(`${billingParts.length ? "+ " : ""}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
+			billingParts.push(
+				`${billingParts.length ? "+ " : ""}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`,
+			);
 		}
 		if (billingParts.length === 0) return { content: "", visible: false };
 

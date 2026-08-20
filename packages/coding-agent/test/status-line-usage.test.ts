@@ -645,6 +645,8 @@ describe("advisor usage in the cost segment", () => {
 			advisorAccounts: [{ provider: "openai" }],
 		});
 
-		expect(content).toContain("$42.50 (adv)");
+		// The amount rides through the themed advisor formatter (icon replaces
+		// the literal "(adv)" suffix when the theme defines one).
+		expect(content).toContain("$42.50");
 	});
 });

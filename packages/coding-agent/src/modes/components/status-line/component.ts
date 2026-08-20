@@ -2011,7 +2011,10 @@ export class StatusLineComponent implements Component {
 				const nameIdx = nameSegIdx + (right.length - rightSegIds.length);
 				const currentNameVW = visibleWidth(right[nameIdx]);
 				const minNameVW = 8;
-				const shrinkBy = Math.min(Math.max(0, currentNameVW - minNameVW), totalWidth() - topFillWidth);
+				// Shrink only as much as keeps the name on line 1. A name that
+				// cannot fit even at the floor pops to the overflow line whole;
+				// truncating it first would stub out the preserved text.
+				const shrinkBy = totalWidth() - topFillWidth <= currentNameVW - minNameVW ? totalWidth() - topFillWidth : 0;
 				if (shrinkBy > 0) {
 					right[nameIdx] = truncateToWidth(right[nameIdx], currentNameVW - shrinkBy);
 					rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
@@ -2099,6 +2102,7 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
+		if (!leftGroup && !rightGroup) return "";
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
 		const primaryBar = plain

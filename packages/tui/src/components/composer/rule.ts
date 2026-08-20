@@ -12,13 +12,27 @@ import type { ComposerChromeContext, ComposerRowContext, ComposerStyle } from ".
 export function renderTopRule(ctx: ComposerChromeContext): string {
 	const { box, width, borderColor, topBorder } = ctx;
 	if (topBorder && topBorder.width > 0 && width > 2) {
-		let { content, width: chipWidth } = topBorder;
+		const lines = topBorder.content.split("\n");
+		// The chip carries line 1; for a single-line bar the provider-reported
+		// width equals it, for multi-line content the row's own width governs
+		// (the reported width is the MAX across lines).
+		const chip = lines[0] ?? "";
+		let chipWidth = visibleWidth(chip);
 		if (chipWidth > width - 2) {
-			content = truncateToWidth(content, width - 2);
-			chipWidth = visibleWidth(content);
+			chipWidth = visibleWidth(truncateToWidth(chip, width - 2));
 		}
 		const leftFill = Math.max(0, width - chipWidth - 1);
-		return borderColor(box.horizontal.repeat(leftFill)) + content + borderColor(box.horizontal);
+		const rule =
+			borderColor(box.horizontal.repeat(leftFill)) + truncateToWidth(chip, width - 2) + borderColor(box.horizontal);
+		// Overflow rows (line 2+) ride below the rule as plain, width-truncated
+		// rows; the rule chip has no box chrome to frame them.
+		if (lines.length > 1 && lines.slice(1).some(line => visibleWidth(line) > 0)) {
+			return `${rule}\n${lines
+				.slice(1)
+				.map(line => truncateToWidth(line, width))
+				.join("\n")}`;
+		}
+		return rule;
 	}
 	return borderColor(box.horizontal.repeat(width));
 }

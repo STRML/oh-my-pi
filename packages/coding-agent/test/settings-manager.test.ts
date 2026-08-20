@@ -1595,6 +1595,5 @@ describe("Settings", () => {
 			// Runtime override still wins over the refreshed global layer.
 			expect(settings.get("autoResume")).toBe(true);
 		});
-
-		});
+	});
 });
