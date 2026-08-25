@@ -79,11 +79,8 @@ import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-<<<<<<< HEAD
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-=======
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
->>>>>>> 6a91c9144d (feat(coding-agent): add /reload-settings with live model catalog refresh)
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
