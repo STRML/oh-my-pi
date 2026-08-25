@@ -105,7 +105,12 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelScope,
+	toSessionScopedModels,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -5221,6 +5226,32 @@ export class AgentSession {
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.#models.setScopedModels(scopedModels);
+	}
+	/**
+	 * Re-resolves the `enabledModels` scope against the current registry and
+	 * installs it when the model set changed. Startup freezes the scoped list
+	 * after one resolution, so a reload that adds models to models.yml must
+	 * refresh it or the scoped `/switch` picker and Ctrl+P cycle keep serving
+	 * the stale array. A `--models` CLI scope cannot be reconstructed at reload
+	 * time and keeps its startup resolution.
+	 */
+	async refreshScopedModels(): Promise<void> {
+		const patterns = this.settings.get("enabledModels");
+		if (!patterns || patterns.length === 0) return;
+		const rebuilt = await resolveModelScope(
+			patterns,
+			this.#modelRegistry,
+			getModelMatchPreferences(this.settings),
+			this.settings,
+		);
+		const mapped = toSessionScopedModels(rebuilt, this.settings);
+		if (mapped.length === 0) return;
+		const current = this.scopedModels;
+		if (current.length === mapped.length) {
+			const keys = new Set(current.map(entry => `${entry.model.provider}/${entry.model.id}`));
+			if (mapped.every(entry => keys.has(`${entry.model.provider}/${entry.model.id}`))) return;
+		}
+		this.setScopedModels(mapped);
 	}
 
 	/** Prompt templates */

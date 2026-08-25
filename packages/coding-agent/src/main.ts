@@ -823,27 +823,7 @@ export async function resolveScopedModels(
 	await modelRegistry.refresh("online-if-uncached");
 	return await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 }
-
-/**
- * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
- * configured default thinking level for entries without an explicit `:level`
- * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
- */
-export function toSessionScopedModels(
-	scopedModels: readonly ScopedModel[],
-	activeSettings: Settings,
-): Array<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-	if (scopedModels.length === 0) return [];
-	const defaultThinkingLevel = concreteThinkingLevel(
-		parseConfiguredThinkingLevel(activeSettings.get("defaultThinkingLevel")),
-	);
-	return scopedModels.map(scopedModel => ({
-		model: scopedModel.model,
-		thinkingLevel: scopedModel.explicitThinkingLevel
-			? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
-			: defaultThinkingLevel,
-	}));
-}
+export { toSessionScopedModels } from "./config/model-resolver";
 
 /** Whether two scope lists reference the same set of models (order-independent). */
 function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
