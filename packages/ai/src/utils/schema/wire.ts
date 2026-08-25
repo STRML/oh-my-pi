@@ -37,10 +37,18 @@ function isArkJsonAst(value: unknown): boolean {
 	);
 }
 
-function parseArkObjectKey(key: string): { name: string; description?: string } {
+function parseArkObjectKey(key: string): { name: string; description?: string; optional?: boolean } {
 	const match = /^(.*?)\s*\/\*\*\s*([\s\S]*?)\s*\*\/\s*$/.exec(key);
-	if (!match) return { name: key };
-	return { name: match[1].trim(), description: match[2].trim() };
+	const withComment = match ? { name: match[1].trim(), description: match[2].trim() } : { name: key };
+	// A trailing `?` is ArkType's optional marker, not part of the property name.
+	// A live ArkType Type loses it in `toJsonSchema()`, but a definition that has
+	// been serialized and restored arrives as a plain object whose keys still
+	// carry it, and it then reaches the wire verbatim. Anthropic rejects any
+	// property key outside /^[a-zA-Z0-9_.-]{1,64}$/, so the whole request 400s.
+	if (withComment.name.endsWith("?") && withComment.name.length > 1) {
+		return { ...withComment, name: withComment.name.slice(0, -1), optional: true };
+	}
+	return withComment;
 }
 
 function withArkKeyDescription(schema: unknown, description: string | undefined): unknown {
@@ -275,8 +283,19 @@ function normalizeArkPropertyComments(node: unknown): void {
 			let propertySchema = properties[key];
 			if (parsed.description) {
 				propertySchema = withArkKeyDescription(propertySchema, parsed.description);
+			}
+			// Rename whenever the parsed name differs, not only when a comment was
+			// found. An optional marker changes the name with no description present,
+			// and the previous condition let that key through unrenamed.
+			if (targetKey !== key) {
 				delete properties[key];
 				properties[targetKey] = propertySchema;
+			}
+			// An ArkType optional is by definition not required. Mapping the marker
+			// off the name without this would promote `cwd?` to a required `cwd`.
+			if (parsed.optional && Array.isArray(obj.required)) {
+				obj.required = (obj.required as unknown[]).filter(name => name !== targetKey);
+				if ((obj.required as unknown[]).length === 0) delete obj.required;
 			}
 			normalizeArkPropertyComments(propertySchema);
 		}
