@@ -38,7 +38,7 @@ describe("/reload-settings slash command", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		clearCustomApis();
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		await tempDir?.remove();
