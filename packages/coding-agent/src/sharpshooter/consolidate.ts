@@ -260,6 +260,10 @@ function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
 		}
 		files.push({ name, content: redacted });
 	}
+	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
+	if (totalChars === 0) {
+		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
+	}
 	return files;
 }
 
