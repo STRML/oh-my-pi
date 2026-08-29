@@ -15,6 +15,7 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -27,6 +28,11 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	// loadIsolated tests below open an AgentStorage singleton in a per-test
+	// temp dir that their cleanup removes while the handle is live. Closing
+	// here retires the handle before the next file's AgentStorage.close()
+	// would checkpoint it from under a deleted directory (SQLITE_IOERR).
+	AgentStorage.close();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 });

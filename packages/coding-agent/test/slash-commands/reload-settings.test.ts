@@ -341,6 +341,7 @@ describe("/reload-settings slash command", () => {
 				invalidate: vi.fn(),
 				clearInlineImages: vi.fn(),
 				setResizeScrollback: vi.fn(),
+				resetDisplay: vi.fn(),
 			},
 			editor: {
 				setText: vi.fn(),
