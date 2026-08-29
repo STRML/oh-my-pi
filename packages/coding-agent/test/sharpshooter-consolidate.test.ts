@@ -228,6 +228,34 @@ describe("runSharpshooterConsolidation", () => {
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
 		expect(state.lastError?.message).toContain("all-empty");
 	});
+
+	it("treats an all-empty replacement as a no-op success when existing files are also empty", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-empty-nop-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(
+			harness.agentDir,
+			harness.cwd,
+			delta("session-a", 1, "Admission-law rejected content."),
+		);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			completion([
+				{ name: "architecture.md", content: "" },
+				{ name: "product.md", content: "" },
+				{ name: "style.md", content: "" },
+			]),
+		);
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		expect(result.ran).toBe(true);
+		expect(result.deltas).toBe(1);
+		for (const name of ["architecture.md", "product.md", "style.md"]) {
+			expect(await Bun.file(sharpshooterMemoryFilePath(harness.agentDir, harness.cwd, name)).text()).toBe("");
+		}
+		expect(await listSharpshooterDeltas(harness.agentDir, harness.cwd)).toHaveLength(0);
+		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
+		expect(state.lastError).toBeUndefined();
+	});
 });
 
 describe("renderSharpshooterSessions", () => {
