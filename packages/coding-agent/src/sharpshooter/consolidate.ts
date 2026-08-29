@@ -171,7 +171,10 @@ async function consolidateLocked(
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
 		}
 
-		const files = parseReplacementFiles(response.content);
+		const files = parseReplacementFiles(
+			response.content,
+			Object.values(currentFiles).map(content => ({ content })),
+		);
 		await applyReplacementFiles(bankDir, files);
 
 		const consumedFiles = groups.flatMap(group => group.deltas.map(item => item.file));
@@ -223,7 +226,10 @@ async function readProjectDocs(cwd: string): Promise<string> {
 	return truncateApproxTokens(blocks.join("\n\n"), PROJECT_DOC_TOKEN_LIMIT);
 }
 
-function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
+function parseReplacementFiles(
+	content: readonly unknown[],
+	currentFiles: readonly { content: string }[],
+): ReplacementFile[] {
 	const toolCalls = content.filter(
 		(block): block is { type: "toolCall"; name: string; arguments: unknown } =>
 			typeof block === "object" && block !== null && "type" in block && block.type === "toolCall",
@@ -259,6 +265,10 @@ function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
 			throw new Error(`${name} exceeds the ${SHARPSHOOTER_MAX_FILE_LINES}-line limit`);
 		}
 		files.push({ name, content: redacted });
+	}
+	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
+	if (totalChars === 0 && currentFiles.some(file => file.content.trim().length > 0)) {
+		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
 	}
 	return files;
 }
