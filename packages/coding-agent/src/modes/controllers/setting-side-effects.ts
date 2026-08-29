@@ -226,6 +226,12 @@ export function applySettingSideEffects(
 			ctx.rebuildChatFromMessages();
 			ctx.ui.resetDisplay();
 			break;
+		case "display.showTurnTime":
+			// Same as showTokenUsage: the prompt→yield delta lives in the same
+			// usage row, so toggling it must rebuild and retire committed rows.
+			ctx.rebuildChatFromMessages();
+			ctx.ui.resetDisplay();
+			break;
 		case "tui.tight":
 			setTuiTight(value as boolean);
 			ctx.ui.invalidate();
