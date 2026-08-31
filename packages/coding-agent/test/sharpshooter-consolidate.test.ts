@@ -225,6 +225,7 @@ describe("runSharpshooterConsolidation", () => {
 		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
 		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
 		expect(await Bun.file(path.join(bankDir, "style.md")).text()).toBe("old style");
+
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
 		expect(state.lastError?.message).toContain("all-empty");
 	});
