@@ -128,8 +128,18 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 						runtime.session.setServiceTierFamily(family, next);
 					}
 				}
+				// Workspace roots snapshot into SessionManager at construction
+				// (tools and the system prompt read the live list from it), so an
+				// on-disk edit to additionalDirectories must be pushed into the
+				// manager and the base prompt rebuilt — the same flow /add-dir
+				// and /remove-dir use.
+				const nextDirs = runtime.settings.get("workspace.additionalDirectories");
+				const currentDirs = runtime.sessionManager.getAdditionalDirectories();
+				if (!Bun.deepEquals(nextDirs, currentDirs)) {
+					await runtime.sessionManager.setAdditionalDirectories(nextDirs);
+					await runtime.session.refreshBaseSystemPrompt();
+				}
 			}
-
 			const changed: SettingPath[] = [];
 			for (const [key, previous] of before) {
 				if (!Bun.deepEquals(previous, runtime.settings.get(key))) {

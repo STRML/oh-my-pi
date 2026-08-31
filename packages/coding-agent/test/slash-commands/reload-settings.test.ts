@@ -109,7 +109,10 @@ describe("/reload-settings slash command", () => {
 		};
 		const runtime = {
 			session,
-			sessionManager: undefined,
+			sessionManager: {
+				getAdditionalDirectories: vi.fn(() => []),
+				setAdditionalDirectories: vi.fn(async () => {}),
+			},
 			settings,
 			cwd: projectDir,
 			output,
@@ -334,7 +337,11 @@ describe("/reload-settings slash command", () => {
 				setServiceTierFamily: vi.fn(),
 				agent: {},
 			},
-			sessionManager: { getCwd: () => projectDir },
+			sessionManager: {
+				getCwd: () => projectDir,
+				getAdditionalDirectories: vi.fn(() => []),
+				setAdditionalDirectories: vi.fn(async () => {}),
+			},
 			settings,
 			ui: {
 				requestRender: vi.fn(),
@@ -342,6 +349,7 @@ describe("/reload-settings slash command", () => {
 				clearInlineImages: vi.fn(),
 				setResizeScrollback: vi.fn(),
 				resetDisplay: vi.fn(),
+				setMaxInlineImages: vi.fn(),
 			},
 			editor: {
 				setText: vi.fn(),

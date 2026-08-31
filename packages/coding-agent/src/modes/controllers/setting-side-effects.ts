@@ -49,6 +49,7 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.tight",
 	"tui.resizeScrollback",
 	"tui.hyperlinks",
+	"tui.maxInlineImages",
 	"composer.shape",
 	"defaultThinkingLevel",
 	"personality",
@@ -253,6 +254,10 @@ export function applySettingSideEffects(
 			ctx.ui.invalidate();
 			ctx.statusLine.invalidate();
 			ctx.ui.requestRender();
+			break;
+
+		case "tui.maxInlineImages":
+			ctx.ui.setMaxInlineImages(typeof value === "number" ? value : Number(value));
 			break;
 
 		case "tui.renderMermaid":
