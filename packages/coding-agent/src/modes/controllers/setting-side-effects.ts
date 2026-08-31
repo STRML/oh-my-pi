@@ -9,6 +9,7 @@ import {
 	setImageProviderOrder,
 	setSearchProviderOrder,
 } from "../../tools";
+import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -47,6 +48,7 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.renderMermaid",
 	"tui.tight",
 	"tui.resizeScrollback",
+	"tui.hyperlinks",
 	"composer.shape",
 	"defaultThinkingLevel",
 	"personality",
@@ -244,6 +246,13 @@ export function applySettingSideEffects(
 			break;
 		case "tui.resizeScrollback":
 			ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);
+			break;
+
+		case "tui.hyperlinks":
+			applyHyperlinkSetting(value as "off" | "auto" | "always");
+			ctx.ui.invalidate();
+			ctx.statusLine.invalidate();
+			ctx.ui.requestRender();
 			break;
 
 		case "tui.renderMermaid":
