@@ -83,7 +83,14 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 			fiveHour: { percent: 32, resetMinutes: 71 },
 			sevenDay: { percent: 68, resetHours: 52 },
 		},
+<<<<<<< HEAD
 		advisorUsage: null,
+=======
+		advisorUsage: {
+			fiveHour: { percent: 21, resetMinutes: 71 },
+			sevenDay: { percent: 55, resetHours: 52 },
+		},
+>>>>>>> bb9e6083d4 (fix(coding-agent): add advisorUsage to gallery status-line fixture)
 	};
 }
 
