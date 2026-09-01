@@ -3845,8 +3845,7 @@ export function convertAnthropicMessages(
 				} else if (block.type === "thinking") {
 					if (
 						opts?.dropAllThinking ||
-						(block.thinkingSignature &&
-							opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
+						(block.thinkingSignature && opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
 					) {
 						continue;
 					}
