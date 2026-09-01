@@ -53,6 +53,8 @@ describe("/reload-settings slash command", () => {
 		notifyConfigChanged: Mock<() => void>;
 		refreshModels: Mock<() => Promise<void>>;
 		reapplyModelRoles: Mock<() => void>;
+		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
+		setMaxRunningJobs: Mock<(value: number) => void>;
 		setAdvisorEnabled: Mock<(enabled: boolean) => void>;
 		setSteeringMode: Mock<(mode: "all" | "one-at-a-time", persist?: boolean) => void>;
 		setServiceTierFamily: Mock<(family: "openai" | "anthropic" | "google", tier: unknown) => void>;
@@ -105,6 +107,8 @@ describe("/reload-settings slash command", () => {
 			serviceTierByFamily: {},
 			setServiceTierFamily,
 			agent: agentFields,
+			reconcileBashToolSettings: vi.fn(async () => true),
+			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
 		const runtime = {
@@ -129,6 +133,8 @@ describe("/reload-settings slash command", () => {
 			setAdvisorEnabled,
 			setSteeringMode,
 			setServiceTierFamily,
+			reconcileBashToolSettings: session.reconcileBashToolSettings as unknown as Mock<() => Promise<boolean>>,
+			setMaxRunningJobs: session.asyncJobManager.setMaxRunningJobs as unknown as Mock<(value: number) => void>,
 			agent: agentFields,
 		};
 	}
@@ -288,6 +294,42 @@ describe("/reload-settings slash command", () => {
 		});
 		expect(setServiceTierFamily).toHaveBeenCalledWith("openai", undefined);
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("tier.openai"));
+	});
+
+	it("reconciles the live bash tool when an async-execution setting changes", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, async: { enabled: false } });
+
+		const { reconcileBashToolSettings, output } = await runCommand(settings);
+		expect(reconcileBashToolSettings).toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("async.enabled"));
+	});
+
+	it("leaves the bash tool alone when no async-execution setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		const { reconcileBashToolSettings } = await runCommand(settings);
+		expect(reconcileBashToolSettings).not.toHaveBeenCalled();
+	});
+
+	it("pushes a changed async.maxJobs into the live job manager", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 4 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 7 } });
+
+		const { setMaxRunningJobs, reconcileBashToolSettings } = await runCommand(settings);
+		expect(setMaxRunningJobs).toHaveBeenCalledWith(7);
+		expect(reconcileBashToolSettings).not.toHaveBeenCalled();
+	});
+
+	it("leaves the job manager alone when async.maxJobs is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 4 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		const { setMaxRunningJobs } = await runCommand(settings);
+		expect(setMaxRunningJobs).not.toHaveBeenCalled();
 	});
 
 	it("reconciles agent-owned request options without persisting them", async () => {

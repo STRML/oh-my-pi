@@ -5069,6 +5069,11 @@ export class AgentSession {
 		return this.#tools.reconcileInspectImageTool();
 	}
 
+	/** Re-reads async-execution settings into the live bash tool; see {@link SessionTools.reconcileBashToolSettings}. */
+	reconcileBashToolSettings(): Promise<boolean> {
+		return this.#tools.reconcileBashToolSettings();
+	}
+
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
 		this.#memory.cancelLocalMemoryStartup();

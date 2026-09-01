@@ -139,6 +139,21 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 					await runtime.sessionManager.setAdditionalDirectories(nextDirs);
 					await runtime.session.refreshBaseSystemPrompt();
 				}
+				// The bash tool snapshots the async-execution settings into its schema
+				// and description at construction, and the async job manager copies its
+				// running-job cap at session start. A reloaded async or
+				// bash.autoBackground value would be reported as applied while the live
+				// objects kept the old value until restart, so push the new values in.
+				if (
+					before.get("async.enabled") !== runtime.settings.get("async.enabled") ||
+					before.get("bash.autoBackground.enabled") !== runtime.settings.get("bash.autoBackground.enabled") ||
+					before.get("bash.autoBackground.thresholdMs") !== runtime.settings.get("bash.autoBackground.thresholdMs")
+				) {
+					await runtime.session.reconcileBashToolSettings();
+				}
+				if (before.get("async.maxJobs") !== runtime.settings.get("async.maxJobs")) {
+					runtime.session.asyncJobManager?.setMaxRunningJobs(runtime.settings.get("async.maxJobs"));
+				}
 			}
 			const changed: SettingPath[] = [];
 			for (const [key, previous] of before) {

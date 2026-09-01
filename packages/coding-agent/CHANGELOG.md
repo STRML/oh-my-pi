@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/reload-settings` now applies async-execution settings live: `async.enabled`, `bash.autoBackground.*`, and `async.maxJobs` reach the running bash tool and job manager instead of waiting for a restart.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
