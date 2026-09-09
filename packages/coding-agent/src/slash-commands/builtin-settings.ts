@@ -151,6 +151,20 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				if (before.get("async.maxJobs") !== runtime.settings.get("async.maxJobs")) {
 					runtime.session.asyncJobManager?.setMaxRunningJobs(runtime.settings.get("async.maxJobs"));
 				}
+				// The Agent snapshots the thinkingBudgets group at construction and
+				// forwards the cached value on every request, so a reloaded budget
+				// would be reported as applied while reasoning kept the old tokens.
+				const nextThinkingBudgets = runtime.settings.getGroup("thinkingBudgets");
+				if (!Bun.deepEquals(agent.thinkingBudgets, nextThinkingBudgets)) {
+					agent.thinkingBudgets = nextThinkingBudgets;
+				}
+				// The owned browser idle-close deadline is armed from the
+				// browser.idleCloseSec effective-change listener, which
+				// reloadFromDisk does not emit: re-arm it here or an armed timer
+				// keeps closing tabs on the old delay.
+				if (before.get("browser.idleCloseSec") !== runtime.settings.get("browser.idleCloseSec")) {
+					runtime.session.reconcileBrowserIdleClose();
+				}
 				// The session builds its secret obfuscator once at construction, and the
 				// settings hook only flips global redaction: without a rebuild here,
 				// secrets newly enabled by this reload still ship to the provider unredacted.

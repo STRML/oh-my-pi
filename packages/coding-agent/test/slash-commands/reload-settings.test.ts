@@ -53,6 +53,7 @@ describe("/reload-settings slash command", () => {
 		reapplyModelRoles: Mock<() => void>;
 		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
 		reconcileSecretObfuscator: Mock<() => Promise<boolean>>;
+		reconcileBrowserIdleClose: Mock<() => void>;
 		setMaxRunningJobs: Mock<(value: number) => void>;
 		setAdvisorEnabled: Mock<(enabled: boolean) => void>;
 		setSteeringMode: Mock<(mode: "all" | "one-at-a-time", persist?: boolean) => void>;
@@ -65,6 +66,7 @@ describe("/reload-settings slash command", () => {
 			presencePenalty?: number;
 			repetitionPenalty?: number;
 			hideThinkingSummary?: boolean;
+			thinkingBudgets?: Record<string, number>;
 		};
 	}
 
@@ -108,6 +110,7 @@ describe("/reload-settings slash command", () => {
 			agent: agentFields,
 			reconcileBashToolSettings: vi.fn(async () => true),
 			reconcileSecretObfuscator: vi.fn(async () => true),
+			reconcileBrowserIdleClose: vi.fn(),
 			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
@@ -135,6 +138,7 @@ describe("/reload-settings slash command", () => {
 			setServiceTierFamily,
 			reconcileBashToolSettings: session.reconcileBashToolSettings as unknown as Mock<() => Promise<boolean>>,
 			reconcileSecretObfuscator: session.reconcileSecretObfuscator as unknown as Mock<() => Promise<boolean>>,
+			reconcileBrowserIdleClose: session.reconcileBrowserIdleClose as unknown as Mock<() => void>,
 			setMaxRunningJobs: session.asyncJobManager.setMaxRunningJobs as unknown as Mock<(value: number) => void>,
 			agent: agentFields,
 		};
@@ -333,6 +337,24 @@ describe("/reload-settings slash command", () => {
 		expect(reconcileSecretObfuscator).not.toHaveBeenCalled();
 	});
 
+	it("installs the reloaded thinking budgets on the live agent", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, thinkingBudgets: { high: 16384 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, thinkingBudgets: { high: 24576 } });
+
+		const { agent } = await runCommand(settings);
+		expect(agent.thinkingBudgets?.high).toBe(24576);
+	});
+
+	it("re-arms the owned browser idle-close deadline when browser.idleCloseSec changes", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { idleCloseSec: 30 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { idleCloseSec: 0 } });
+
+		const { reconcileBrowserIdleClose } = await runCommand(settings);
+		expect(reconcileBrowserIdleClose).toHaveBeenCalledTimes(1);
+	});
+
 	it("pushes a changed async.maxJobs into the live job manager", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 4 } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -387,6 +409,7 @@ describe("/reload-settings slash command", () => {
 				applyMemoryBackend: vi.fn(async () => {}),
 				setThinkToolEnabled: vi.fn(async () => {}),
 				reconcileSecretObfuscator: vi.fn(async () => true),
+				reconcileBrowserIdleClose: vi.fn(),
 				setAutoCompactionEnabled: vi.fn(),
 				serviceTierByFamily: {},
 				setServiceTierFamily: vi.fn(),

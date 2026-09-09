@@ -1962,17 +1962,9 @@ export class AgentSession {
 				});
 			});
 		});
-		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange((path, value) => {
+		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange(path => {
 			if (path !== "browser.idleCloseSec") return;
-			const ownerId = this.sessionManager.getSessionId() ?? "";
-			// Any change invalidates the armed deadline: cancel first (its
-			// sequence bump stops an in-flight sweep re-arming the old
-			// value), then re-arm under the new one. A non-positive value
-			// arms nothing, which is the disable path.
-			cancelIdleCloseForOwner(ownerId);
-			if (typeof value === "number" && value > 0) {
-				armIdleCloseForOwner(ownerId, value * 1000);
-			}
+			this.reconcileBrowserIdleClose();
 		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
@@ -5394,6 +5386,23 @@ export class AgentSession {
 		this.#obfuscator = await this.#rebuildSecretObfuscator();
 		this.#secretsEnabled = enabled;
 		return true;
+	}
+
+	/**
+	 * Re-arms this session's owned browser idle-close deadline from the current
+	 * `browser.idleCloseSec`. Any change invalidates the armed deadline: cancel
+	 * first (its sequence bump stops an in-flight sweep re-arming the old
+	 * value), then arm under the new one. A non-positive value arms nothing,
+	 * which is the disable path. Shared by the effective-change listener and
+	 * `/reload-settings`, which does not emit effective-change notifications.
+	 */
+	reconcileBrowserIdleClose(): void {
+		const ownerId = this.sessionManager.getSessionId() ?? "";
+		cancelIdleCloseForOwner(ownerId);
+		const idleSec = this.settings.get("browser.idleCloseSec");
+		if (typeof idleSec === "number" && idleSec > 0) {
+			armIdleCloseForOwner(ownerId, idleSec * 1000);
+		}
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */

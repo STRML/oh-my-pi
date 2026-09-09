@@ -3521,8 +3521,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (maxTimeout > 0 && typeof result.timeout === "number") {
 				result = { ...result, timeout: Math.min(result.timeout, maxTimeout) };
 			}
-			if (obfuscator?.hasSecrets()) {
-				result = deobfuscateToolArguments(obfuscator, result);
+			if (session.obfuscator?.hasSecrets()) {
+				result = deobfuscateToolArguments(session.obfuscator, result);
 			}
 			return result;
 		};
