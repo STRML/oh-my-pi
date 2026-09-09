@@ -23,7 +23,6 @@ const PROMPT_KEYS: Partial<Record<SettingPath, true>> = {
 	"task.batch": true,
 	"task.maxConcurrency": true,
 	"task.disabledAgents": true,
-	"task.eager": true,
 	"security.enabled": true,
 	includeModelInPrompt: true,
 	personality: true,
