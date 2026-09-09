@@ -241,7 +241,7 @@ export interface SessionAdvisorsHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -387,6 +387,17 @@ export class SessionAdvisors {
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * Rebuilds live advisor runtimes so they re-read host capabilities that are
+	 * captured once per runtime construction — notably the secret obfuscator
+	 * after a `secrets.enabled` flip rebuilt it mid-session.
+	 */
+	rebuildRuntimesForHostChange(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
@@ -1116,7 +1127,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
-				obfuscator: this.#host.obfuscator,
+				obfuscator: this.#host.obfuscator(),
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();

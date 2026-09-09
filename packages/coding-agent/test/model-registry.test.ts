@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1059,6 +1059,32 @@ describe("ModelRegistry", () => {
 			expect(registry.hasConfiguredAuth(registry.find("prov", "m1")!)).toBe(true);
 		});
 
+		test("refresh() keeps the last-good overrides when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				openrouter: {
+					baseUrl: "https://last-good-gateway.example.com/v1",
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": { name: "Last-Good Sonnet" },
+					},
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const before = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(before?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(before?.name).toBe("Last-Good Sonnet");
+
+			// A malformed edit must restore the provider- and model-level overrides
+			// snapshotted before the reload cleared them — not the emptied maps the
+			// late lastGood reference snapshot would capture.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			const after = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(after?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(after?.name).toBe("Last-Good Sonnet");
+		});
+
 		test("built-in gpt-5.4 applies the hardcoded context window policy", () => {
 			expect(sharedBuiltin.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});
@@ -1729,8 +1755,36 @@ describe("ModelRegistry", () => {
 			expect(disabledProbeUrls).toEqual([]);
 		});
 	});
-	describe("settings rebind", () => {
-		test("setSettings rebinds disabled-provider policy for a shared registry", async () => {
+	describe("settings-scoped refresh", () => {
+		test("refresh with explicit settings probes providers disabled only in those settings", async () => {
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			const startupSettings = Settings.isolated({ disabledProviders: ["ollama"] });
+			const workspaceSettings = Settings.isolated();
+			const requestedUrls: string[] = [];
+			const fetchMock: FetchImpl = input => {
+				requestedUrls.push(String(input));
+				throw new Error(`Unexpected URL: ${String(input)}`);
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: startupSettings,
+				fetch: fetchMock,
+			});
+			await registry.refresh("online", workspaceSettings);
+
+			// The rebuild consumed the passed settings, not the registry's
+			// constructor-bound startup policy: the ollama discovery probe runs.
+			expect(requestedUrls.some(url => url.includes("127.0.0.1:11434"))).toBe(true);
+		});
+
+		test("reapplyModelPolicies with explicit settings does not rebind the registry's policy", async () => {
 			writeRawModelsJson({
 				ollama: {
 					baseUrl: "http://127.0.0.1:11434/v1",
@@ -1742,41 +1796,46 @@ describe("ModelRegistry", () => {
 			await authStorage.set("github-copilot", [
 				{
 					type: "oauth",
-					access: "ghu_test_token_for_rebind",
-					refresh: "ghu_test_token_for_rebind",
+					access: "ghu_test_token_for_scoped_reapply",
+					refresh: "ghu_test_token_for_scoped_reapply",
 					expires: Date.now() + 60_000,
 				},
 			]);
-			// ACP shape: one registry shared across workspaces, each with a
-			// cloned Settings; the registry starts bound to the startup clone.
+			// ACP shape: one registry shared across workspaces, each with a cloned
+			// Settings; the registry stays bound to the startup clone.
 			const startupSettings = Settings.isolated({ disabledProviders: ["github-copilot", "ollama"] });
 			const workspaceSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: startupSettings });
 
-			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(false);
+			await registry.reapplyModelPolicies(workspaceSettings);
+
+			// The rebuild consumed the workspace settings, but the registry's bound
+			// policy stays startup-owned: a permanent rebind here would make the
+			// last-reloading ACP workspace dictate every other workspace's policy.
 			expect(registry.getDiscoverableProviders()).not.toContain("ollama");
 			expect(registry.hasProvider("ollama")).toBe(false);
-
-			registry.setSettings(workspaceSettings);
-			await registry.reapplyModelPolicies();
-
-			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(true);
-			expect(registry.getDiscoverableProviders()).toContain("ollama");
-			expect(registry.hasProvider("ollama")).toBe(true);
+			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(false);
 		});
 
-		test("setSettings rebinds extendedContext window policy for a shared registry", async () => {
-			const startupSettings = Settings.isolated();
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: startupSettings });
-			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+		test("concurrent reapplies with different settings queue instead of coalescing", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const refreshCalls: Array<Parameters<ModelRegistry["refresh"]>> = [];
+			vi.spyOn(registry, "refresh").mockImplementation(async (...args) => {
+				refreshCalls.push(args);
+			});
 
-			registry.setSettings(Settings.isolated({ extendedContext: true }));
-			await registry.reapplyModelPolicies();
+			const workspaceA = Settings.isolated({ disabledProviders: ["ollama"] });
+			const workspaceB = Settings.isolated();
+			await Promise.all([registry.reapplyModelPolicies(workspaceA), registry.reapplyModelPolicies(workspaceB)]);
 
-			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+			// Coalescing onto the in-flight rebuild would hand workspace B a catalog
+			// built for A's policy while reporting success.
+			expect(refreshCalls).toEqual([
+				["offline", workspaceA],
+				["offline", workspaceB],
+			]);
 		});
 	});
-
 	describe("extended context", () => {
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
 			const testSettings = Settings.isolated();

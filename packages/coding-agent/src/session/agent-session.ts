@@ -736,6 +736,8 @@ export class AgentSession {
 	#modelRegistry: ModelRegistry;
 	/** Settings-derived enabledModels scope; undefined keeps a --models scope fixed at its launch resolution. */
 	#cliModelScope: readonly string[] | undefined;
+	/** Programmatic (SDK-supplied) scope from `config.scopedModels`; a settings-driven reload must never clear it. */
+	#sdkScopedModels = false;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
@@ -1359,6 +1361,7 @@ export class AgentSession {
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
 		this.#cliModelScope = config.cliModelScope;
+		this.#sdkScopedModels = (config.scopedModels?.length ?? 0) > 0;
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
@@ -1655,14 +1658,13 @@ export class AgentSession {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 		};
 		this.#providerBoundary = new SessionProviderBoundary(providerBoundaryHost);
 		const streamGuardsHost: StreamGuardsHost = {
 			agent: this.agent,
 			settings: this.settings,
 			sessionManager: this.sessionManager,
-			obfuscator: this.#obfuscator,
 			model: () => this.model,
 			isDisposed: () => this.#isDisposed,
 			promptGeneration: () => this.#promptGeneration,
@@ -1769,7 +1771,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			onPayload: this.#onPayload,
@@ -1918,7 +1920,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
@@ -5403,6 +5405,10 @@ export class AgentSession {
 		if (!this.#rebuildSecretObfuscator) return false;
 		this.#obfuscator = await this.#rebuildSecretObfuscator();
 		this.#secretsEnabled = enabled;
+		// Cached hosts read the live obfuscator through their accessor, but
+		// advisor runtimes copied the value at construction: rebuild them so
+		// advisor requests transform with the rebuilt obfuscator too.
+		this.#advisors.rebuildRuntimesForHostChange();
 		return true;
 	}
 
@@ -5672,18 +5678,41 @@ export class AgentSession {
 	 * scoped pickers when the rebuilt list differs. Reads the LIVE `enabledModels`
 	 * value — not the one captured at construction — so a mid-session edit that
 	 * changes the configured scope (A→B) or clears it takes effect on the same
-	 * reload. When the setting becomes empty the scope is cleared (unfrozen) so
-	 * the picker falls back to the full catalog; a non-empty setting that merely
-	 * resolves to zero models keeps the previous scope to avoid a transient
-	 * collapse while discovery settles. No-op for `--models`-scoped sessions
-	 * (`#cliModelScope` set): the CLI scope is frozen and outranks settings.
+	 * reload. When the setting becomes empty — or non-empty but resolving to
+	 * zero models, so pickers stop offering models the config excludes — the
+	 * settings-derived scope is cleared and the picker falls back to the full
+	 * catalog. Programmatic scopes are never settings-derived: an SDK-supplied
+	 * `scopedModels` set survives untouched, and a `--models` CLI scope
+	 * re-resolves its own user-owned patterns against the rebuilt catalog so
+	 * models added to models.yml reach the cycle list. The active model is
+	 * re-adopted from the rebuilt registry on every path.
 	 */
 	async refreshScopedModels(): Promise<boolean> {
-		if (this.#isDisposed || this.#cliModelScope) return false;
+		if (this.#isDisposed) return false;
+		if (this.#cliModelScope) {
+			// The CLI scope's pattern list is user-owned and outranks settings,
+			// but it must track the rebuilt catalog: re-resolve the same patterns
+			// so models added to models.yml reach the --models cycle list, and
+			// re-adopt the active model's record.
+			const rebound = await this.#rebindActiveModelFromRegistry();
+			const resolvedCli = await resolveModelScope(
+				[...this.#cliModelScope],
+				this.#modelRegistry,
+				getModelMatchPreferences(this.settings),
+				this.settings,
+			);
+			const mappedCli = toSessionScopedModels(resolvedCli, this.settings);
+			if (mappedCli.length === 0 || sameScopedModelCycle(this.#models.scopedModels, mappedCli)) return rebound;
+			this.#models.setScopedModels(mappedCli);
+			return true;
+		}
 		const patterns = this.settings.get("enabledModels");
 		// Explicitly cleared (or never set and now absent): unfreeze the pickers.
+		// An SDK-supplied scope is programmatic, not settings-derived, so it
+		// survives the clear.
 		if (!patterns || patterns.length === 0) {
-			if (this.#models.scopedModels.length === 0) return false;
+			const rebound = await this.#rebindActiveModelFromRegistry();
+			if (this.#sdkScopedModels || this.#models.scopedModels.length === 0) return rebound;
 			this.#models.setScopedModels([]);
 			return true;
 		}
@@ -5705,8 +5734,34 @@ export class AgentSession {
 			if (fresh && fresh !== current) this.agent.setModel(fresh);
 		}
 		const mapped = toSessionScopedModels(resolved, this.settings);
-		if (mapped.length === 0 || sameScopedModelCycle(this.#models.scopedModels, mapped)) return false;
+		if (mapped.length === 0) {
+			// Non-empty patterns that resolve to nothing: drop the stale
+			// settings-derived scope so /switch and Ctrl+P stop offering models
+			// the new config excludes. An SDK-supplied scope is programmatic and
+			// stays.
+			if (this.#sdkScopedModels || this.#models.scopedModels.length === 0) return false;
+			this.#models.setScopedModels([]);
+			return true;
+		}
+		if (sameScopedModelCycle(this.#models.scopedModels, mapped)) return false;
 		this.#models.setScopedModels(mapped);
+		return true;
+	}
+
+	/**
+	 * Re-adopts the rebuilt registry record for the active model when the
+	 * catalog refresh replaced it (same provider/id, new object). Applies on
+	 * every scope path — the empty-`enabledModels` unscoped case, the
+	 * `--models` CLI scope, and the settings-derived resolution — so the next
+	 * request reads the reloaded baseUrl/headers/limits/compat, not the stale
+	 * construction-time record. Returns whether a rebind happened.
+	 */
+	async #rebindActiveModelFromRegistry(): Promise<boolean> {
+		const current = this.agent.state.model;
+		if (!current) return false;
+		const fresh = this.#modelRegistry.find(current.provider, current.id);
+		if (!fresh || fresh === current) return false;
+		this.agent.setModel(fresh);
 		return true;
 	}
 
@@ -8259,12 +8314,12 @@ export class AgentSession {
 		// forces the rebuild for the fresh settings, and the online pass below then
 		// discovers against it. Newly-enabled implicit providers (e.g. ollama) with
 		// no prior cache only surface here.
-		// ACP workspaces share one registry across per-workspace cloned settings,
-		// so rebind before recomputing policies or the refresh reads the startup
-		// disabledProviders/extendedContext values instead of this session's.
-		this.#modelRegistry.setSettings(this.settings);
-		await this.#modelRegistry.reapplyModelPolicies();
-		await this.#modelRegistry.refresh(strategy);
+		// ACP workspaces share one registry across per-workspace cloned settings;
+		// the policy rebuild consumes THIS session's settings explicitly instead
+		// of rebinding the shared registry, so the last-reloading workspace can
+		// never capture another workspace's policy pointer.
+		await this.#modelRegistry.reapplyModelPolicies(this.settings);
+		await this.#modelRegistry.refresh(strategy, this.settings);
 		// refresh() does not reject on a malformed models.yml: the custom layer
 		// comes back empty with a configError. Surface it so callers never report
 		// success while the live custom providers were dropped.
@@ -8631,10 +8686,9 @@ export class AgentSession {
 	 */
 	async #reapplyExtendedContextPolicy(): Promise<void> {
 		try {
-			// Same shared-registry rebind as refreshModels(): this listener can fire
-			// for any workspace while the registry's settings binding is global.
-			this.#modelRegistry.setSettings(this.settings);
-			await this.#modelRegistry.reapplyModelPolicies();
+			// Scope the rebuild to this session's settings: ACP workspaces share
+			// one registry, so the listener must not rebind a shared pointer.
+			await this.#modelRegistry.reapplyModelPolicies(this.settings);
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
 			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
