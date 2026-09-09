@@ -213,6 +213,7 @@ interface LastGoodConfigOverrides {
 	providerOverrides: Map<string, ProviderOverride>;
 	modelOverrides: Map<string, Map<string, ModelOverride>>;
 	keylessProviders: Set<string>;
+	discoverableProviders: DiscoveryProviderConfig[];
 }
 
 /** Authentication material returned to legacy extensions for one model request. */
@@ -733,14 +734,17 @@ export class ModelRegistry {
 		this.#modelsConfigFile.invalidate();
 		// Snapshot the config-sourced state BEFORE the clear so a malformed
 		// models.yml (parse error) can restore it: the last-good provider keys,
-		// override maps, and keyless set must survive until the file is repaired,
-		// not vanish with the failed parse. #loadModels records its own snapshot
-		// by reference, so clearing first would leave it holding emptied maps.
+		// override maps, keyless set, and discoverable providers must survive
+		// until the file is repaired, not vanish with the failed parse.
+		// #loadModels records its own snapshot by reference, so clearing first
+		// would leave it holding emptied maps (and, for the discoverable list,
+		// the empty array assigned below).
 		const lastGoodConfigApiKeys = new Map(this.#customProviderApiKeys);
 		const lastGoodOverrides: LastGoodConfigOverrides = {
 			providerOverrides: new Map(this.#providerOverrides),
 			modelOverrides: new Map(this.#modelOverrides),
 			keylessProviders: new Set(this.#keylessProviders),
+			discoverableProviders: [...this.#discoverableProviders],
 		};
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
@@ -783,7 +787,7 @@ export class ModelRegistry {
 			providerOverrides: options?.lastGoodOverrides?.providerOverrides ?? new Map(this.#providerOverrides),
 			modelOverrides: options?.lastGoodOverrides?.modelOverrides ?? new Map(this.#modelOverrides),
 			keylessProviders: options?.lastGoodOverrides?.keylessProviders ?? new Set(this.#keylessProviders),
-			discoverableProviders: this.#discoverableProviders,
+			discoverableProviders: options?.lastGoodOverrides?.discoverableProviders ?? this.#discoverableProviders,
 		};
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
@@ -811,8 +815,9 @@ export class ModelRegistry {
 				this.#installProviderApiKey(provider, keyConfig);
 			}
 			// configuredProviders comes from the failed parse (none), but the
-			// last-good discoverable set is restored above; implicit add over an
-			// empty configured set is a no-op.
+			// last-good discoverable set is restored above; the implicit add
+			// below skips names already present, so restored entries win and
+			// no implicit twin is appended alongside them.
 		} else {
 			this.#customModelOverlays = customModels;
 			this.#providerOverrides = overrides;
@@ -1340,11 +1345,15 @@ export class ModelRegistry {
 			};
 		});
 	}
-
 	#addImplicitDiscoverableProviders(configuredProviders: Set<string>, settings?: Settings): void {
 		const disabledProviders = getDisabledProviderIdsFromSettings(settings ?? this.#settings);
 		const hasOllamaEndpointOverride = Boolean(Bun.env.OLLAMA_BASE_URL?.trim() || Bun.env.OLLAMA_HOST?.trim());
-		if (!configuredProviders.has("ollama") && !disabledProviders.has("ollama")) {
+		// Implicit entries are appended after every load; on an error-path reload
+		// the restored last-good list already carries them (or an explicit
+		// config-defined provider of the same name), so skip names already
+		// present instead of appending a duplicate/shadowing twin.
+		const presentProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		if (!configuredProviders.has("ollama") && !disabledProviders.has("ollama") && !presentProviders.has("ollama")) {
 			this.#discoverableProviders.push({
 				provider: "ollama",
 				api: "openai-responses",
@@ -1354,7 +1363,11 @@ export class ModelRegistry {
 			});
 			this.#keylessProviders.add("ollama");
 		}
-		if (!configuredProviders.has("llama.cpp") && !disabledProviders.has("llama.cpp")) {
+		if (
+			!configuredProviders.has("llama.cpp") &&
+			!disabledProviders.has("llama.cpp") &&
+			!presentProviders.has("llama.cpp")
+		) {
 			this.#discoverableProviders.push({
 				provider: "llama.cpp",
 				api: "openai-responses",
@@ -1367,7 +1380,11 @@ export class ModelRegistry {
 				this.#keylessProviders.add("llama.cpp");
 			}
 		}
-		if (!configuredProviders.has("lm-studio") && !disabledProviders.has("lm-studio")) {
+		if (
+			!configuredProviders.has("lm-studio") &&
+			!disabledProviders.has("lm-studio") &&
+			!presentProviders.has("lm-studio")
+		) {
 			this.#discoverableProviders.push({
 				provider: "lm-studio",
 				api: "openai-completions",

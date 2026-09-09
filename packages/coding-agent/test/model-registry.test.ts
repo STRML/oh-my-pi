@@ -1085,6 +1085,62 @@ describe("ModelRegistry", () => {
 			expect(after?.name).toBe("Last-Good Sonnet");
 		});
 
+		test("refresh() keeps the last-good discoverable provider and its discovered models when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				"custom-local": {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:8080",
+					api: "openai-responses",
+					discovery: { type: "llama.cpp" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:8080/models", ["gpt-5.4"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			// Materialize discovery results (and their models.db cache rows) while
+			// the config is still valid.
+			await registry.refreshProvider("custom-local", "online");
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+
+			// A malformed edit must restore the discoverable providers snapshotted
+			// before the reload cleared them — not the empty list the late
+			// #loadModels snapshot would capture — so the discovery-backed
+			// provider and its discovered models stay available until repair.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+			expect(registry.hasProvider("custom-local")).toBe(true);
+		});
+
+		test("malformed edit does not shadow a restored explicit discovery provider with its implicit twin", async () => {
+			writeRawModelsJson({
+				ollama: {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:9999/v1",
+					api: "openai-responses",
+					discovery: { type: "proxy" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:9999/v1/models", ["shadow-probe"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("ollama", "online");
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+
+			// The restored explicit ollama entry must win over the implicit one:
+			// no second implicit entry may be appended, or it would clobber the
+			// restored provider's discovery state (and point discovery at the
+			// default endpoint) until the file is repaired.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+			const state = registry.getProviderDiscoveryState("ollama");
+			expect(state?.status).toBe("cached");
+			expect(state?.models).toContain("shadow-probe");
+		});
+
 		test("built-in gpt-5.4 applies the hardcoded context window policy", () => {
 			expect(sharedBuiltin.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});
