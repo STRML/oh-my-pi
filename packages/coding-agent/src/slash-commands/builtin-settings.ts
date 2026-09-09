@@ -51,6 +51,8 @@ const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
 	"providers.openaiWebsockets": true,
 	// sdk.ts construction → Agent `#dialect` via resolveDialect.
 	"tools.format": true,
+	// sdk.ts construction → Agent `#abortOnFabricatedToolResult`.
+	"tools.abortOnFabricatedResult": true,
 };
 
 export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [

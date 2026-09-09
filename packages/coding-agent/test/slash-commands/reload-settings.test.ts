@@ -14,7 +14,7 @@ import {
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sameScopedModelCycle, toSessionScopedModels } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings, type TtsrSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings, getDefault, type TtsrSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSourceMeta } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -824,13 +824,13 @@ describe("/reload-settings slash command", () => {
 		await writeSettings({
 			advisor: { syncBacklog: "1" },
 			providers: { kimiApiFormat: "auto" },
-			tools: { format: "auto" },
+			tools: { format: "auto", abortOnFabricatedResult: false },
 		});
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
 		await writeSettings({
 			advisor: { syncBacklog: "2" },
 			providers: { kimiApiFormat: "anthropic" },
-			tools: { format: "xml" },
+			tools: { format: "xml", abortOnFabricatedResult: true },
 		});
 
 		const { output } = await runCommand(settings);
@@ -839,13 +839,15 @@ describe("/reload-settings slash command", () => {
 		if (!message) throw new Error("Expected a reload result message");
 		const [appliedSection, restartSection] = message.split(" Restart required:");
 		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
-		// kimiApiFormat/openaiWebsockets/tools.format snapshot into private Agent
-		// fields at construction with no live setter: reporting them as applied
-		// would be false — they need a restart.
+		// kimiApiFormat/openaiWebsockets/tools.format/abortOnFabricatedResult
+		// snapshot into private Agent fields at construction with no live setter:
+		// reporting them as applied would be false — they need a restart.
 		expect(appliedSection).not.toContain("kimiApiFormat");
 		expect(appliedSection).not.toContain("tools.format");
+		expect(appliedSection).not.toContain("abortOnFabricatedResult");
 		expect(restartSection).toContain("providers.kimiApiFormat");
 		expect(restartSection).toContain("tools.format");
+		expect(restartSection).toContain("tools.abortOnFabricatedResult");
 	});
 
 	it("re-buckets ttsr rules when ttsr.enabled flips on during reload", async () => {
