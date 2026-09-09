@@ -245,7 +245,6 @@ export function applySettingSideEffects(
 				pending: options.pending,
 			});
 			break;
-		}
 
 		case "autocompleteMaxVisible":
 			ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));

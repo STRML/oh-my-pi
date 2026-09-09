@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `/reload-settings` now runs the same side-effect replay in ACP and RPC hosts that the TUI runs, so `tui.*`, `display.*`, and `externalThinking` changes take effect outside the TUI too.
+- `/reload-settings` no longer drops session-added workspace roots or session-only overrides (`/advisor on|off`, a manual thinking level, a `/fast` tier) when their setting did not change on disk.
+- `/reload-settings` now re-buckets TTSR rules when `ttsr.enabled` is turned on and rebuilds running advisors when a model metadata edit swaps their record.
+- `/reload-settings` now reports session-start-only settings such as `tools.format` as needing a restart instead of claiming they were applied.
+- `/reload-settings` now propagates a rebuilt secret obfuscator into every cached session host, so newly enabled secrets are redacted everywhere.
 - `/reload-settings` now reloads skills, TTSR manager settings, and prompt-affecting settings such as `skillful`, task concurrency, and `security.enabled` without a restart.
 - `/reload-settings` now applies browser and computer prelude changes, the shared LSP flag, and provider enablement changes without a restart.
 - `/reload-settings` now re-reads the read tool's default limit and image resize behavior and the write tool's LSP formatting and diagnostics settings.
