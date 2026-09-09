@@ -163,6 +163,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
+import { setSharedLspEnabled } from "../lsp/client";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -713,6 +714,8 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	/** Session LSP gate from the SDK host; backs reconcileSharedLsp on settings reload. */
+	#enableLsp: boolean;
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1360,6 +1363,7 @@ export class AgentSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#enableLsp = config.enableLsp ?? true;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -1947,11 +1951,11 @@ export class AgentSession {
 		this.#unsubscribeEvalPreludeSettings = this.settings.onEffectiveChange((path, value) => {
 			if (path !== "browser.enabled" && path !== "computer.enabled") return;
 			void (async () => {
-				if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
-					const tools = await this.#reconcileBrowserMcpFilter(value === true);
-					await this.refreshMCPTools(tools);
+				if (path === "browser.enabled") {
+					await this.reconcileBrowserEnabled();
+				} else {
+					await this.reconcileComputerEnabled();
 				}
-				await this.refreshBaseSystemPrompt();
 			})().catch(error => {
 				if (path === "browser.enabled" && value === true && this.settings.get("browser.enabled")) {
 					this.settings.override("browser.enabled", false);
@@ -5386,6 +5390,40 @@ export class AgentSession {
 		this.#obfuscator = await this.#rebuildSecretObfuscator();
 		this.#secretsEnabled = enabled;
 		return true;
+	}
+
+	/**
+	 * Re-runs the browser MCP filter and refreshes MCP tools after a
+	 * `browser.enabled` change, then rebuilds the base prompt. Shared by the
+	 * effective-change listener and `/reload-settings`, which does not emit
+	 * effective-change notifications.
+	 */
+	async reconcileBrowserEnabled(): Promise<void> {
+		if (this.#reconcileBrowserMcpFilter) {
+			const tools = await this.#reconcileBrowserMcpFilter(this.settings.get("browser.enabled") === true);
+			await this.refreshMCPTools(tools);
+		}
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/**
+	 * Rebuilds the base prompt after a `computer.enabled` change (the prompt
+	 * embeds the computer-use prelude). Shared by the effective-change listener
+	 * and `/reload-settings`, which does not emit effective-change notifications.
+	 */
+	async reconcileComputerEnabled(): Promise<void> {
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/**
+	 * Re-applies the broker-shared LSP attach flag from the current
+	 * `lsp.shared` setting. The SDK computes `enableLsp && lsp.shared` once at
+	 * session creation into process-global module state consulted on every LSP
+	 * client cold-start; `/reload-settings` does not re-run that path, so this
+	 * mirrors it with this session's frozen LSP gate.
+	 */
+	reconcileSharedLsp(): void {
+		setSharedLspEnabled(this.#enableLsp && this.settings.get("lsp.shared") === true);
 	}
 
 	/**

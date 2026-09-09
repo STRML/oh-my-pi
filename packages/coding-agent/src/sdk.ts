@@ -3759,6 +3759,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			enableLsp,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);

@@ -1,3 +1,4 @@
+import { reconcileProviderSets } from "../capability";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings";
@@ -26,6 +27,17 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 			}
 			await runtime.settings.reloadFromDisk();
 			await runtime.notifyConfigChanged?.();
+			// Capability providers filter through module-level Sets seeded once at
+			// startup (initializeWithSettings); a reloaded disabledProviders or
+			// enabledProviders is reported as applied while loadCapability keeps
+			// filtering on the stale sets until restart. Re-seed before the
+			// catalog refresh so provider discovery sees the new enablement.
+			if (
+				!Bun.deepEquals(before.get("disabledProviders"), runtime.settings.get("disabledProviders")) ||
+				!Bun.deepEquals(before.get("enabledProviders"), runtime.settings.get("enabledProviders"))
+			) {
+				reconcileProviderSets(runtime.settings);
+			}
 			// Refresh AFTER the settings reload so provider discovery sees the new
 			// disabled-provider set: an edit that enables a discovery-backed
 			// provider must surface its models in the same reload. Then re-resolve
@@ -164,6 +176,24 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				// keeps closing tabs on the old delay.
 				if (before.get("browser.idleCloseSec") !== runtime.settings.get("browser.idleCloseSec")) {
 					runtime.session.reconcileBrowserIdleClose();
+				}
+				// The browser MCP filter, MCP tools, and base prompt are reconciled
+				// by the browser.enabled/computer.enabled effective-change
+				// listeners, which reloadFromDisk does not emit: re-run them here
+				// or a flipped eval prelude keeps the old tool set until restart.
+				if (before.get("browser.enabled") !== runtime.settings.get("browser.enabled")) {
+					await runtime.session.reconcileBrowserEnabled();
+				}
+				if (before.get("computer.enabled") !== runtime.settings.get("computer.enabled")) {
+					await runtime.session.reconcileComputerEnabled();
+				}
+				// The broker-shared LSP attach flag is process-global module state
+				// written once at session creation from enableLsp && lsp.shared and
+				// consulted on every LSP client cold-start: without a re-apply, a
+				// reloaded lsp.shared is reported as applied while cold-starts keep
+				// the old decision until restart.
+				if (before.get("lsp.shared") !== runtime.settings.get("lsp.shared")) {
+					runtime.session.reconcileSharedLsp();
 				}
 				// The session builds its secret obfuscator once at construction, and the
 				// settings hook only flips global redaction: without a rebuild here,

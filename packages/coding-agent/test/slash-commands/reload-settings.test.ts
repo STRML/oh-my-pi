@@ -4,6 +4,13 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import {
+	getDisabledProviders,
+	getEnabledProviders,
+	isProviderEnabled,
+	setDisabledProviders,
+	setEnabledProviders,
+} from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sameScopedModelCycle, toSessionScopedModels } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -54,6 +61,9 @@ describe("/reload-settings slash command", () => {
 		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
 		reconcileSecretObfuscator: Mock<() => Promise<boolean>>;
 		reconcileBrowserIdleClose: Mock<() => void>;
+		reconcileBrowserEnabled: Mock<() => Promise<void>>;
+		reconcileComputerEnabled: Mock<() => Promise<void>>;
+		reconcileSharedLsp: Mock<() => void>;
 		setMaxRunningJobs: Mock<(value: number) => void>;
 		setAdvisorEnabled: Mock<(enabled: boolean) => void>;
 		setSteeringMode: Mock<(mode: "all" | "one-at-a-time", persist?: boolean) => void>;
@@ -111,6 +121,9 @@ describe("/reload-settings slash command", () => {
 			reconcileBashToolSettings: vi.fn(async () => true),
 			reconcileSecretObfuscator: vi.fn(async () => true),
 			reconcileBrowserIdleClose: vi.fn(),
+			reconcileBrowserEnabled: vi.fn(async () => {}),
+			reconcileComputerEnabled: vi.fn(async () => {}),
+			reconcileSharedLsp: vi.fn(),
 			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
@@ -139,6 +152,9 @@ describe("/reload-settings slash command", () => {
 			reconcileBashToolSettings: session.reconcileBashToolSettings as unknown as Mock<() => Promise<boolean>>,
 			reconcileSecretObfuscator: session.reconcileSecretObfuscator as unknown as Mock<() => Promise<boolean>>,
 			reconcileBrowserIdleClose: session.reconcileBrowserIdleClose as unknown as Mock<() => void>,
+			reconcileBrowserEnabled: session.reconcileBrowserEnabled as unknown as Mock<() => Promise<void>>,
+			reconcileComputerEnabled: session.reconcileComputerEnabled as unknown as Mock<() => Promise<void>>,
+			reconcileSharedLsp: session.reconcileSharedLsp as unknown as Mock<() => void>,
 			setMaxRunningJobs: session.asyncJobManager.setMaxRunningJobs as unknown as Mock<(value: number) => void>,
 			agent: agentFields,
 		};
@@ -355,6 +371,95 @@ describe("/reload-settings slash command", () => {
 		expect(reconcileBrowserIdleClose).toHaveBeenCalledTimes(1);
 	});
 
+	it("reconciles the browser MCP filter when browser.enabled flips on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { enabled: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { enabled: true } });
+
+		const { reconcileBrowserEnabled, reconcileComputerEnabled } = await runCommand(settings);
+		expect(reconcileBrowserEnabled).toHaveBeenCalledTimes(1);
+		expect(reconcileComputerEnabled).not.toHaveBeenCalled();
+	});
+
+	it("leaves the browser MCP filter alone when browser.enabled is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { enabled: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, browser: { enabled: false } });
+
+		const { reconcileBrowserEnabled } = await runCommand(settings);
+		expect(reconcileBrowserEnabled).not.toHaveBeenCalled();
+	});
+
+	it("reconciles the base prompt when computer.enabled flips on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, computer: { enabled: true } });
+
+		const { reconcileComputerEnabled, reconcileBrowserEnabled } = await runCommand(settings);
+		expect(reconcileComputerEnabled).toHaveBeenCalledTimes(1);
+		expect(reconcileBrowserEnabled).not.toHaveBeenCalled();
+	});
+
+	it("leaves the base prompt alone when computer.enabled is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, computer: { enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, computer: { enabled: true } });
+
+		const { reconcileComputerEnabled } = await runCommand(settings);
+		expect(reconcileComputerEnabled).not.toHaveBeenCalled();
+	});
+
+	it("re-applies the shared LSP flag when lsp.shared flips on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, lsp: { shared: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, lsp: { shared: true } });
+
+		const { reconcileSharedLsp } = await runCommand(settings);
+		expect(reconcileSharedLsp).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves the shared LSP flag alone when lsp.shared is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, lsp: { shared: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, lsp: { shared: false } });
+
+		const { reconcileSharedLsp } = await runCommand(settings);
+		expect(reconcileSharedLsp).not.toHaveBeenCalled();
+	});
+
+	it("re-seeds the capability provider sets when disabledProviders changes", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+
+		const disabledBefore = getDisabledProviders();
+		const enabledBefore = getEnabledProviders();
+		try {
+			const { output } = await runCommand(settings);
+			expect(output).toHaveBeenCalledWith(expect.stringContaining("disabledProviders"));
+			expect(isProviderEnabled("cap-reload-test")).toBe(false);
+			expect(getDisabledProviders()).toContain("cap-reload-test");
+		} finally {
+			// The module sets are process-global; restore whatever this test found.
+			setDisabledProviders(disabledBefore);
+			setEnabledProviders(enabledBefore);
+		}
+	});
+
+	it("leaves the capability provider sets alone when neither provider list changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+
+		// The harness never seeds the module sets, so an unconditional reconcile
+		// here would seed "cap-reload-test" from the reloaded settings.
+		const disabledBefore = getDisabledProviders();
+		const enabledBefore = getEnabledProviders();
+		await runCommand(settings);
+		expect(getDisabledProviders()).toEqual(disabledBefore);
+		expect(getEnabledProviders()).toEqual(enabledBefore);
+	});
+
 	it("pushes a changed async.maxJobs into the live job manager", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 4 } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -410,6 +515,9 @@ describe("/reload-settings slash command", () => {
 				setThinkToolEnabled: vi.fn(async () => {}),
 				reconcileSecretObfuscator: vi.fn(async () => true),
 				reconcileBrowserIdleClose: vi.fn(),
+				reconcileBrowserEnabled: vi.fn(async () => {}),
+				reconcileComputerEnabled: vi.fn(async () => {}),
+				reconcileSharedLsp: vi.fn(),
 				setAutoCompactionEnabled: vi.fn(),
 				serviceTierByFamily: {},
 				setServiceTierFamily: vi.fn(),
