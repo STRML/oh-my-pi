@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `/reload-settings` now applies a persisted setting that appears on disk over the host-default override ACP and RPC hosts install at startup, instead of leaving the startup default in effect.
+- `/reload-settings` no longer loses a discovery-backed custom provider when `models.yml` is edited into malformed syntax; the last good provider list is restored.
+- `/reload-settings` now reports `tools.abortOnFabricatedResult` as needing a restart instead of claiming it was applied.
 - `/reload-settings` now reconciles append-only context, Code Mode, and the think tool when a metadata-only edit replaces the active model's record, including when that model sits outside the configured scope.
 - `/reload-settings` no longer resets a session-only thinking level in ACP and RPC hosts, and `compaction.enabled` now updates the status line's auto-compact indicator.
 - `/reload-settings` now runs the same side-effect replay in ACP and RPC hosts that the TUI runs, so `tui.*`, `display.*`, and `externalThinking` changes take effect outside the TUI too.
@@ -113,6 +116,7 @@
 - Fixed the fullscreen `/copy` and esc-esc rewind selectors repainting the whole frame for a wheel notch that cannot move the viewport; because both open scrolled to the newest turn, wheeling down there made the frame twitch.
 - The default `omp commit` agent now uses its displayed COMMIT model and honors `--model` instead of silently running on SMOL ([#10991](https://github.com/can1357/oh-my-pi/issues/10991)).
 - Fixed JavaScript `eval` `completion()`/`agent()` handles so the documented immediate-handle pattern works: `h.wait()`, `h.status()`, and the other handle methods now work on the un-awaited factory result ([#10986](https://github.com/can1357/oh-my-pi/issues/10986)).
+
 ### Fixed
 
 - Fixed frame skips while streaming long markdown Write previews ([#10955](https://github.com/can1357/oh-my-pi/issues/10955)).
