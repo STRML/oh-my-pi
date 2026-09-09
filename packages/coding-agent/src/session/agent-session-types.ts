@@ -262,6 +262,8 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
+	/** Rebuilds the secret obfuscator after `secrets.enabled` changes so a reload redacts without a restart. */
+	rebuildSecretObfuscator?: () => Promise<SecretObfuscator | undefined>;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */

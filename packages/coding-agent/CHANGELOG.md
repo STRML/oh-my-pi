@@ -11,6 +11,7 @@
 ### Fixed
 
 - `/reload-settings` now applies per-workspace ACP settings to the shared model catalog, so `disabledProviders` and `extendedContext` edits take effect without restarting the host.
+- `/reload-settings` now rebuilds the session secret obfuscator when `secrets.enabled` changes, so newly enabled secrets.yml and environment secrets are redacted without a restart.
 - `/reload-settings` now re-arms the idle compaction and idle recap timers, so disabling them or changing their threshold or delay takes effect immediately instead of leaving the previously armed timer running.
 - `/reload-settings` now applies async-execution settings live: `async.enabled`, `bash.autoBackground.*`, and `async.maxJobs` reach the running bash tool and job manager instead of waiting for a restart.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.

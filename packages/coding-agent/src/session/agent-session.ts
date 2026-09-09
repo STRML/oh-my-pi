@@ -810,6 +810,9 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	#rebuildSecretObfuscator: AgentSessionConfig["rebuildSecretObfuscator"];
+	/** Session-start value of `secrets.enabled`; reconcileSecretObfuscator compares it against the live setting. */
+	#secretsEnabled = false;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1633,6 +1636,8 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.#rebuildSecretObfuscator = config.rebuildSecretObfuscator;
+		this.#secretsEnabled = this.settings.get("secrets.enabled") === true;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -5379,6 +5384,16 @@ export class AgentSession {
 	/** Re-reads async-execution settings into the live bash tool; see {@link SessionTools.reconcileBashToolSettings}. */
 	reconcileBashToolSettings(): Promise<boolean> {
 		return this.#tools.reconcileBashToolSettings();
+	}
+
+	/** Rebuilds the secret obfuscator after `secrets.enabled` changes so a reload redacts without a restart. */
+	async reconcileSecretObfuscator(): Promise<boolean> {
+		const enabled = this.settings.get("secrets.enabled") === true;
+		if (enabled === this.#secretsEnabled) return false;
+		if (!this.#rebuildSecretObfuscator) return false;
+		this.#obfuscator = await this.#rebuildSecretObfuscator();
+		this.#secretsEnabled = enabled;
+		return true;
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */

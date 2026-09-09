@@ -52,6 +52,7 @@ describe("/reload-settings slash command", () => {
 		refreshModels: Mock<() => Promise<void>>;
 		reapplyModelRoles: Mock<() => void>;
 		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
+		reconcileSecretObfuscator: Mock<() => Promise<boolean>>;
 		setMaxRunningJobs: Mock<(value: number) => void>;
 		setAdvisorEnabled: Mock<(enabled: boolean) => void>;
 		setSteeringMode: Mock<(mode: "all" | "one-at-a-time", persist?: boolean) => void>;
@@ -106,6 +107,7 @@ describe("/reload-settings slash command", () => {
 			setServiceTierFamily,
 			agent: agentFields,
 			reconcileBashToolSettings: vi.fn(async () => true),
+			reconcileSecretObfuscator: vi.fn(async () => true),
 			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
@@ -132,6 +134,7 @@ describe("/reload-settings slash command", () => {
 			setSteeringMode,
 			setServiceTierFamily,
 			reconcileBashToolSettings: session.reconcileBashToolSettings as unknown as Mock<() => Promise<boolean>>,
+			reconcileSecretObfuscator: session.reconcileSecretObfuscator as unknown as Mock<() => Promise<boolean>>,
 			setMaxRunningJobs: session.asyncJobManager.setMaxRunningJobs as unknown as Mock<(value: number) => void>,
 			agent: agentFields,
 		};
@@ -312,6 +315,24 @@ describe("/reload-settings slash command", () => {
 		expect(reconcileBashToolSettings).not.toHaveBeenCalled();
 	});
 
+	it("rebuilds the secret obfuscator when secrets.enabled flips on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, secrets: { enabled: true } });
+
+		const { reconcileSecretObfuscator } = await runCommand(settings);
+		expect(reconcileSecretObfuscator).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves the secret obfuscator alone when secrets.enabled is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, secrets: { enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, secrets: { enabled: true } });
+
+		const { reconcileSecretObfuscator } = await runCommand(settings);
+		expect(reconcileSecretObfuscator).not.toHaveBeenCalled();
+	});
+
 	it("pushes a changed async.maxJobs into the live job manager", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" }, async: { maxJobs: 4 } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -365,6 +386,7 @@ describe("/reload-settings slash command", () => {
 				refreshBaseSystemPrompt: vi.fn(async () => {}),
 				applyMemoryBackend: vi.fn(async () => {}),
 				setThinkToolEnabled: vi.fn(async () => {}),
+				reconcileSecretObfuscator: vi.fn(async () => true),
 				setAutoCompactionEnabled: vi.fn(),
 				serviceTierByFamily: {},
 				setServiceTierFamily: vi.fn(),

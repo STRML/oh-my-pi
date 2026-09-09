@@ -3409,8 +3409,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
-			return obfuscateMessages(obfuscator, converted);
+			const activeObfuscator = session.obfuscator;
+			if (!activeObfuscator?.hasSecrets()) return converted;
+			return obfuscateMessages(activeObfuscator, converted);
 		};
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
@@ -3447,7 +3448,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					)
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			const activeObfuscator = session.obfuscator;
+			let transformed = activeObfuscator ? obfuscateProviderContext(activeObfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			transformed = clampProviderContextImages(transformed, transformModel);
 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
@@ -3819,6 +3821,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
+			rebuildSecretObfuscator: async () =>
+				settings.get("secrets.enabled") ? await buildSecretObfuscator(cwd, agentDir, options.agentDir) : undefined,
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
@@ -4147,7 +4151,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+						const activeObfuscator = session.obfuscator;
+						let transformed = activeObfuscator ? obfuscateProviderContext(activeObfuscator, context) : context;
 						transformed = clampProviderContextImages(transformed, transformModel);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);

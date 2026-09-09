@@ -151,6 +151,12 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				if (before.get("async.maxJobs") !== runtime.settings.get("async.maxJobs")) {
 					runtime.session.asyncJobManager?.setMaxRunningJobs(runtime.settings.get("async.maxJobs"));
 				}
+				// The session builds its secret obfuscator once at construction, and the
+				// settings hook only flips global redaction: without a rebuild here,
+				// secrets newly enabled by this reload still ship to the provider unredacted.
+				if (before.get("secrets.enabled") !== runtime.settings.get("secrets.enabled")) {
+					await runtime.session.reconcileSecretObfuscator();
+				}
 			}
 			const changed: SettingPath[] = [];
 			for (const [key, previous] of before) {
