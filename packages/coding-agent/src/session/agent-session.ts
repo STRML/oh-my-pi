@@ -8183,6 +8183,10 @@ export class AgentSession {
 		// forces the rebuild for the fresh settings, and the online pass below then
 		// discovers against it. Newly-enabled implicit providers (e.g. ollama) with
 		// no prior cache only surface here.
+		// ACP workspaces share one registry across per-workspace cloned settings,
+		// so rebind before recomputing policies or the refresh reads the startup
+		// disabledProviders/extendedContext values instead of this session's.
+		this.#modelRegistry.setSettings(this.settings);
 		await this.#modelRegistry.reapplyModelPolicies();
 		await this.#modelRegistry.refresh(strategy);
 		// refresh() does not reject on a malformed models.yml: the custom layer
