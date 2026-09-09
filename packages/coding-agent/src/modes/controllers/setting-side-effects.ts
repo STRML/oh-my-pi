@@ -100,6 +100,11 @@ export function applySettingSideEffects(
 			ctx.session.setAutoCompactionEnabled(value as boolean);
 			ctx.statusLine.setAutoCompactEnabled(value as boolean);
 			break;
+		case "compaction.idleEnabled":
+		case "compaction.idleThresholdTokens":
+		case "compaction.idleTimeoutSeconds":
+			ctx.eventController.refreshIdleCompactionTimer();
+			break;
 		case "composer.shape":
 			ctx.syncComposerShape();
 			break;
@@ -107,6 +112,12 @@ export function applySettingSideEffects(
 			ctx.session.setAdvisorEnabled(value as boolean);
 			ctx.statusLine.invalidate();
 			ctx.ui.requestRender();
+			break;
+		case "advisor.maxNotesPerUpdate":
+			if (ctx.session.isAdvisorEnabled()) {
+				ctx.session.setAdvisorEnabled(true);
+				ctx.ui.requestRender();
+			}
 			break;
 		case "steeringMode":
 			ctx.session.setSteeringMode(value as "all" | "one-at-a-time", persist);
@@ -136,11 +147,6 @@ export function applySettingSideEffects(
 		case "memory.backend":
 			void ctx.session.applyMemoryBackend().catch(err => {
 				ctx.showError(`Failed to apply memory backend: ${err}`);
-			});
-			break;
-		case "inspect_image.mode":
-			void ctx.session.applyInspectImageModeChange().catch(err => {
-				ctx.showError(`Failed to apply vision mode: ${err}`);
 			});
 			break;
 		case "externalThinking":

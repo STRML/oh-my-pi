@@ -42,9 +42,6 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 			// Provider selection globals are module state consumed by web search
 			// and image tools in every host; a layer swap alone does not update it.
 			applyProviderGlobalsFromSettings(runtime.settings);
-			if (runtime.session && before.get("inspect_image.mode") !== runtime.settings.get("inspect_image.mode")) {
-				await runtime.session.applyInspectImageModeChange();
-			}
 			// Reconcile session-owned settings the reload cannot reach on its own:
 			// the live session snapshots these at construction (agent/SDK fields),
 			// so settings.get() alone would report them applied without changing

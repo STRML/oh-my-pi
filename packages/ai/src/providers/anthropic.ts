@@ -48,7 +48,13 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types";
-import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import {
+	getHeaderCaseInsensitive,
+	isRecord,
+	normalizeSystemPrompts,
+	normalizeToolCallId,
+	resolveCacheRetention,
+} from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
@@ -104,6 +110,7 @@ import {
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
+import { applyInferenceHeaders } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
@@ -199,7 +206,6 @@ function resolveAnthropicControlBetas(
 ): string[] {
 	const betas: string[] = [];
 	if (prefixMismatchBehavior) betas.push(THINKING_BINDING_CONTROLS_BETA);
-	if (model.compat.supportsMidConversationSystem) betas.push(midConversationSystemBeta);
 	if (model.compat.supportsTurnScopedSystem) betas.push(midConversationSystemClearAtBeta);
 	if (model.compat.supportsMidConversationToolChanges) betas.push(midConversationToolChangesBeta);
 	if (model.compat.supportsPerMessageEffort) betas.push(midConversationOutputConfigBeta);
@@ -233,15 +239,6 @@ function buildClaudeCodeBetas({
 	if (thinkingRequest) betas.push(effortBeta);
 	betas.push(fallbackCreditBeta);
 	return betas;
-}
-
-function getHeaderCaseInsensitive(headers: Record<string, string> | undefined, headerName: string): string | undefined {
-	if (!headers) return undefined;
-	const normalizedName = headerName.toLowerCase();
-	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === normalizedName) return value;
-	}
-	return undefined;
 }
 
 function isClaudeCodeClientUserAgent(userAgent: string | undefined): userAgent is string {
@@ -420,22 +417,7 @@ type AnthropicControlTransition = {
 	effort?: AnthropicOutputEffort;
 };
 
-type AnthropicProviderSessionState = ProviderSessionState & {
-	strictToolsDisabled: boolean;
-	fastModeDisabled: boolean;
-	/**
-	 * Runtime-learned: this endpoint returned `400 Invalid signature in
-	 * thinking block` for a replayed unsigned thinking block, so it must be
-	 * treated as a signing proxy from now on. All subsequent requests demote
-	 * unsigned thinking to text for this (baseUrl, modelId), same behavior as
-	 * an explicit `compat.replayUnsignedThinking: false`. Cleared on session
-	 * close.
-	 */
-	replayUnsignedThinkingDisabled: boolean;
-	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
-	prefixDroppedThinkingBlocks: Set<string>;
-	/** Model the control baseline below was captured for; a switch re-baselines. */
-	controlModelId: string | undefined;
+type AnthropicControlState = {
 	/** `tools` declared at baseline plus later `defer_loading` additions, in wire order. */
 	declaredTools: AnthropicWireTool[] | undefined;
 	activeToolNames: Set<string>;
@@ -447,13 +429,25 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	currentEffort: AnthropicOutputEffort | undefined;
 };
 
-function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
-	const state: AnthropicProviderSessionState = {
-		strictToolsDisabled: false,
-		fastModeDisabled: false,
-		replayUnsignedThinkingDisabled: false,
-		prefixDroppedThinkingBlocks: new Set(),
-		controlModelId: undefined,
+type AnthropicProviderSessionState = ProviderSessionState & {
+	strictToolsDisabled: boolean;
+	fastModeDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint rejected a replayed unsigned thinking
+	 * block, so it must be treated as a signing proxy from now on. All
+	 * subsequent requests demote unsigned thinking to text for this (baseUrl,
+	 * modelId), same behavior as an explicit
+	 * `compat.replayUnsignedThinking: false`. Cleared on session close.
+	 */
+	replayUnsignedThinkingDisabled: boolean;
+	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
+	prefixDroppedThinkingBlocks: Set<string>;
+	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
+	controlStates: Map<string, AnthropicControlState>;
+};
+
+function createAnthropicControlState(): AnthropicControlState {
+	return {
 		declaredTools: undefined,
 		activeToolNames: new Set(),
 		stableSystemBlocks: undefined,
@@ -462,13 +456,22 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		baseEffort: undefined,
 		baseEffortWire: undefined,
 		currentEffort: undefined,
+	};
+}
+
+function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
+	const state: AnthropicProviderSessionState = {
+		strictToolsDisabled: false,
+		fastModeDisabled: false,
+		replayUnsignedThinkingDisabled: false,
+		prefixDroppedThinkingBlocks: new Set(),
+		controlStates: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
-			state.controlModelId = undefined;
-			resetAnthropicControlState(state);
+			state.controlStates.clear();
 		},
 	};
 	return state;
@@ -496,8 +499,7 @@ function getAnthropicProviderSessionState(
 	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
-		existing.activeToolNames ??= new Set();
-		existing.controlTransitions ??= [];
+		existing.controlStates ??= new Map();
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -1234,7 +1236,7 @@ export type AnthropicClientOptionsArgs = {
 	disableStrictTools?: boolean;
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
-	claudeCodeSessionId?: string;
+	sessionId?: string;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -1624,13 +1626,6 @@ async function* observeDecodedAnthropicSdkEvents(
 const PROVIDER_MAX_RETRIES = 10;
 
 /**
- * Flat delay between attempts when Copilot 400s a model its own `/models`
- * catalog advertises. Part of the fleet carries the model and part doesn't, so
- * the retry is a reroll rather than a wait for capacity to free up.
- */
-const COPILOT_MODEL_FLAP_RETRY_DELAY_MS = 400;
-
-/**
  * How long `ping` keepalives may keep extending the idle deadline without any
  * semantic stream progress, as a multiple of the idle timeout. Anthropic pings
  * across legitimate generation gaps, so pings count as liveness — but a wedged
@@ -1655,20 +1650,6 @@ function shouldIgnoreAnthropicPreambleEvent(eventType: unknown): boolean {
 	if (typeof eventType !== "string") return false;
 	if (eventType === "ping") return true;
 	return !ANTHROPIC_MESSAGE_EVENTS.has(eventType);
-}
-
-/**
- * Whether an Anthropic (or Copilot-over-Anthropic) stream error should be
- * retried. The classification lives in {@link AIError.isProviderRetryableError};
- * this wrapper injects the Copilot-specific model-availability transient check,
- * which the error module must not import directly.
- */
-export function isProviderRetryableError(error: unknown, provider?: string): boolean {
-	return AIError.isProviderRetryableError(error, {
-		provider,
-		isProviderTransient:
-			provider === "github-copilot" ? (err): boolean => AIError.isCopilotTransientModelError(err) : undefined,
-	});
 }
 
 const THINKING_ENVELOPE_OPEN = "<thinking>";
@@ -1863,11 +1844,20 @@ function calculateFallbackTurnCost(
 }
 
 /**
- * Detects the Anthropic `400 Invalid `signature` in `thinking` block` failure
- * a signing proxy returns when a stripped/unsigned prior thinking block is
- * replayed as `signature: ""`. Exported for the compat tests.
+ * Detects the two shapes a signature-enforcing endpoint uses to reject a
+ * replayed unsigned thinking block (sent as `signature: ""`):
+ *
+ * - Anthropic and Anthropic-fronting proxies: `400 Invalid `signature` in
+ *   `thinking` block`.
+ * - Bedrock-backed proxies: the empty string fails schema validation before
+ *   signature checking, so it comes back as `ValidationException: The model
+ *   returned the following errors: messages.N.content.M.thinking.signature:
+ *   Field required`.
+ *
+ * Exported for the compat tests.
  */
 const INVALID_THINKING_SIGNATURE_PATTERN = /invalid\s+`?signature`?\s+in\s+`?thinking`?(?:\s+block)?/i;
+const MISSING_THINKING_SIGNATURE_PATTERN = /thinking\.signature\b[^"\n]{0,32}\brequired\b/i;
 const THINKING_PREFIX_BINDING_PATTERN =
 	/(?:bound to a different conversation|block_binding\.prefix_mismatch_behavior|prefix_mismatch_behavior)/i;
 
@@ -1877,10 +1867,11 @@ export function isThinkingPrefixBindingError(message: string): boolean {
 }
 
 export function isInvalidThinkingSignatureError(message: string): boolean {
-	return INVALID_THINKING_SIGNATURE_PATTERN.test(message);
+	return INVALID_THINKING_SIGNATURE_PATTERN.test(message) || MISSING_THINKING_SIGNATURE_PATTERN.test(message);
 }
 
 const INPUT_TRANSFORMATION_PATH_PATTERN = /^messages\.(\d+)\.content\.(\d+)$/;
+const PREFIX_BINDING_ERROR_PATH_PATTERN = /messages\.(\d+)\.content\.(\d+)/;
 
 function thinkingReplayKey(block: ContentBlockParam): string | undefined {
 	if (block.type === "thinking") return block.signature ? `thinking:${block.signature}` : undefined;
@@ -1923,6 +1914,31 @@ function rememberPrefixDroppedThinking(
 	}
 }
 
+function rememberPrefixBindingFailure(
+	params: MessageCreateParamsStreaming,
+	message: string,
+	state: AnthropicProviderSessionState | undefined,
+): boolean {
+	if (!state) return false;
+	const match = PREFIX_BINDING_ERROR_PATH_PATTERN.exec(message);
+	let path = match ? `messages.${match[1]}.content.${match[2]}` : undefined;
+	if (!path) {
+		for (let messageIndex = 0; messageIndex < params.messages.length && !path; messageIndex++) {
+			const candidate = params.messages[messageIndex];
+			if (!candidate || !Array.isArray(candidate.content)) continue;
+			const blockIndex = candidate.content.findIndex(block => thinkingReplayKey(block) !== undefined);
+			if (blockIndex >= 0) path = `messages.${messageIndex}.content.${blockIndex}`;
+		}
+	}
+	if (!path) return false;
+	rememberPrefixDroppedThinking(
+		params,
+		[{ type: "thinking_dropped", reason: "prefix_binding_mismatch", path }],
+		state,
+	);
+	return true;
+}
+
 function applyReportedInputTransformations(
 	output: AssistantMessage,
 	params: MessageCreateParamsStreaming,
@@ -1956,8 +1972,8 @@ function applyReportedInputTransformations(
 }
 
 /**
- * Prepend a pointed remediation to Anthropic's `Invalid signature in thinking
- * block` 400 when the model looks like an unmarked custom signing proxy
+ * Prepend a pointed remediation to a thinking-signature rejection 400 when the
+ * model looks like an unmarked custom signing proxy
  * (opaque baseUrl, `spec.reasoning: true`, no explicit
  * `compat.replayUnsignedThinking` override). The default is native replay for
  * the 3p reasoning majority (#2005); this hint turns the misconfigured-proxy
@@ -2028,6 +2044,7 @@ const streamAnthropicOnce = (
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
 			let dropAllThinking = false;
+			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
@@ -2158,7 +2175,10 @@ const streamAnthropicOnce = (
 					thinkingDisplay: options?.thinkingDisplay,
 					fetch: options?.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
-					claudeCodeSessionId: options?.sessionId ?? extractClaudeMetadataSessionId(options?.metadata?.user_id),
+					sessionId:
+						options?.sessionId ??
+						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+						options?.promptCacheKey,
 					disableStrictTools,
 				});
 				client = created.client;
@@ -2935,7 +2955,8 @@ const streamAnthropicOnce = (
 					const streamFailureMessage =
 						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
 					if (
-						!dropAllThinking &&
+						!prefixBindingRetryAttempted &&
+						options?.anthropicPrefixMismatchBehavior !== "error" &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						isThinkingPrefixBindingError(streamFailureMessage)
@@ -2945,8 +2966,9 @@ const streamAnthropicOnce = (
 							model: model.id,
 							baseUrl,
 						});
+						prefixBindingRetryAttempted = true;
 						prefixMismatchBehavior = undefined;
-						dropAllThinking = true;
+						dropAllThinking = !rememberPrefixBindingFailure(params, streamFailureMessage, providerSessionState);
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
@@ -2968,7 +2990,7 @@ const streamAnthropicOnce = (
 						isInvalidThinkingSignatureError(streamFailureMessage)
 					) {
 						logger.warn(
-							"anthropic: signing proxy detected (Invalid signature in thinking block), demoting unsigned thinking and retrying",
+							"anthropic: signing proxy detected (thinking signature rejected), demoting unsigned thinking and retrying",
 							{
 								provider: model.provider,
 								model: model.id,
@@ -3029,7 +3051,7 @@ const streamAnthropicOnce = (
 						!isLocalIdleTimeout &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						isProviderRetryableError(streamFailure, model.provider);
+						AIError.isProviderRetryableError(streamFailure);
 					if (
 						activeAbortTracker.wasCallerAbort() ||
 						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
@@ -3038,12 +3060,7 @@ const streamAnthropicOnce = (
 						throw streamFailure;
 					}
 					providerRetryAttempt++;
-					// Copilot's model-availability 400 is a per-request replica reroll, not
-					// upstream backpressure — the exponential curve would just add dead
-					// time to a coin flip that the next attempt is as likely to win.
-					const backoffDelayMs = AIError.isCopilotTransientModelError(streamFailure)
-						? COPILOT_MODEL_FLAP_RETRY_DELAY_MS
-						: calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
+					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
 					// guaranteed failure that just burns the retry budget.
@@ -3187,7 +3204,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		thinkingEnabled = false,
 		isOAuth,
 		maxRetryDelayMs,
-		claudeCodeSessionId,
+		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
 	} = args;
 	const compat = model.compat;
@@ -3250,6 +3267,11 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			dynamicHeaders,
 			headers,
 		);
+		applyInferenceHeaders(defaultHeaders, {
+			provider: model.provider,
+			protocol: "anthropic",
+			sessionId,
+		});
 
 		return {
 			isOAuthToken: false,
@@ -3272,22 +3294,23 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		betaFeatures.push(interleavedThinkingBeta);
 	}
 
+	const requestModelHeaders = mergeHeaders(
+		model.headers,
+		foundryCustomHeaders,
+		getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)),
+		headers,
+		dynamicHeaders,
+	);
 	const defaultHeaders = buildAnthropicHeaders({
 		apiKey,
 		baseUrl,
 		isOAuth: oauthToken,
 		extraBetas: betaFeatures,
 		stream,
-		modelHeaders: mergeHeaders(
-			model.headers,
-			foundryCustomHeaders,
-			getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)),
-			headers,
-			dynamicHeaders,
-		),
+		modelHeaders: requestModelHeaders,
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
-		claudeCodeSessionId,
+		claudeCodeSessionId: sessionId,
 		claudeCodeBetas: oauthToken
 			? buildClaudeCodeBetas({
 					agentRequest: hasTools || thinkingEnabled,
@@ -3296,6 +3319,11 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 					supportsContextManagement: model.compat.supportsContextManagement,
 				})
 			: [],
+	});
+	applyInferenceHeaders(defaultHeaders, {
+		provider: model.provider,
+		protocol: "anthropic",
+		sessionId,
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -3460,10 +3488,11 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		trailingMessage.content === "Continue." &&
 		params.messages[trailingIndex - 1]?.role === "assistant";
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
-	const start = Math.max(0, messageEnd - 1);
-	for (let index = messageEnd; index >= start; index--) {
+	let eligibleMessages = 0;
+	for (let index = messageEnd; index >= 0 && eligibleMessages < 2; index--) {
 		const message = params.messages[index];
-		if (!message) continue;
+		if (!message || message.clear_at === "next_user_message") continue;
+		eligibleMessages++;
 		if (typeof message.content === "string") {
 			message.content = [
 				{ type: "text", text: message.content, cache_control: cloneAnthropicCacheControl(cacheControl) },
@@ -3471,6 +3500,64 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		} else if (Array.isArray(message.content)) {
 			applyCacheControlToLastBlock(message.content, cacheControl);
 		}
+	}
+}
+
+/**
+ * Anchor cache_control on the stable request head — the last (non-deferred)
+ * tool definition and the last system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final system block caches
+ * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * definitions cached even when the system text changes. This guarantees the
+ * large, unchanging head is a cache hit on every turn regardless of how the
+ * message tail churns — the breakpoint placement first-party Anthropic clients
+ * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
+ * moving message tail, so tail churn re-writes the whole head uncached.
+ *
+ * Anthropic allows at most 4 cache breakpoints per request. At most one is
+ * spent on tools and one on system here, leaving two for the message tail in
+ * `applyPromptCaching`. Head caching is skipped entirely when the head is
+ * already anchored — the OAuth Claude Code path caches its own instruction
+ * block at buildAnthropicSystemBlocks, and via the canonical tools → system
+ * order that single system breakpoint already caches every preceding tool. Re-
+ * anchoring there would be redundant, would change the OAuth wire, and could
+ * push a tool-heavy request over the 4-breakpoint budget, so the general
+ * API-key path (nothing cached upstream) is the only one decorated here.
+ *
+ * Runs after the byte-stability plane (planStableAnthropicSystem /
+ * planStableAnthropicTools), which hands back fresh block/tool copies each turn
+ * and keys tool identity off a fingerprint that excludes cache_control — so
+ * decorating here is byte-stable across turns and never forces a re-baseline.
+ */
+function applyHeadCaching(
+	systemBlocks: AnthropicSystemBlock[] | undefined,
+	tools: AnthropicWireTool[] | undefined,
+	cacheControl?: AnthropicCacheControl,
+): void {
+	if (!cacheControl) return;
+
+	// If anything in the head already carries a breakpoint, the head is already
+	// cached (OAuth anchors its identity system block, which — canonical order
+	// tools → system — caches all tools too). Leave it untouched.
+	const headAlreadyCached =
+		(systemBlocks?.some(block => block.cache_control != null) ?? false) ||
+		(tools?.some(tool => tool.cache_control != null) ?? false);
+	if (headAlreadyCached) return;
+
+	if (tools && tools.length > 0) {
+		// Deferred tools are not part of the checked prefix until referenced, so
+		// anchor the last tool that actually sits in the stable prefix.
+		for (let index = tools.length - 1; index >= 0; index--) {
+			const tool = tools[index];
+			if (!tool || tool.defer_loading) continue;
+			tool.cache_control = cloneAnthropicCacheControl(cacheControl);
+			break;
+		}
+	}
+
+	if (systemBlocks && systemBlocks.length > 0) {
+		const lastBlock = systemBlocks[systemBlocks.length - 1];
+		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
 	}
 }
 
@@ -3525,7 +3612,9 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
 	return "";
 }
 
-function resetAnthropicControlState(state: AnthropicProviderSessionState): void {
+const MAX_ANTHROPIC_CONTROL_STATES = 16;
+
+function resetAnthropicControlState(state: AnthropicControlState): void {
 	state.declaredTools = undefined;
 	state.activeToolNames.clear();
 	state.stableSystemBlocks = undefined;
@@ -3536,10 +3625,51 @@ function resetAnthropicControlState(state: AnthropicProviderSessionState): void 
 	state.currentEffort = undefined;
 }
 
+function anthropicControlMessageProjection(message: MessageParam): MessageParam {
+	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+	return {
+		...message,
+		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
+	};
+}
+
+function getAnthropicControlState(
+	state: AnthropicProviderSessionState | undefined,
+	sessionId: string | undefined,
+	system: readonly AnthropicSystemBlock[] | undefined,
+	messages: readonly MessageParam[],
+): AnthropicControlState | undefined {
+	if (!state) return undefined;
+	const root = messages[0];
+	const fingerprint = String(
+		Bun.hash(
+			JSON.stringify([
+				sessionId ?? "",
+				system?.map(block => block.text) ?? null,
+				root ? anthropicControlMessageProjection(root) : null,
+			]),
+		),
+	);
+	const existing = state.controlStates.get(fingerprint);
+	if (existing) {
+		state.controlStates.delete(fingerprint);
+		state.controlStates.set(fingerprint, existing);
+		return existing;
+	}
+	const created = createAnthropicControlState();
+	state.controlStates.set(fingerprint, created);
+	if (state.controlStates.size > MAX_ANTHROPIC_CONTROL_STATES) {
+		const oldest = state.controlStates.keys().next().value;
+		if (oldest !== undefined) state.controlStates.delete(oldest);
+	}
+	return created;
+}
+
 /** Fingerprint of the wire message a control transition is attached after. */
 function anthropicControlAnchor(messages: readonly MessageParam[], messageCount: number): string {
 	if (messageCount === 0) return "";
-	return String(Bun.hash(JSON.stringify(messages[messageCount - 1])));
+	const message = messages[messageCount - 1];
+	return message ? String(Bun.hash(JSON.stringify(anthropicControlMessageProjection(message)))) : "";
 }
 
 /**
@@ -3548,16 +3678,7 @@ function anthropicControlAnchor(messages: readonly MessageParam[], messageCount:
  * shrank or was rewritten under a recorded transition (compaction, branch
  * switch, `/clear`). The next request re-baselines from its own payload.
  */
-function syncAnthropicControlState(
-	state: AnthropicProviderSessionState,
-	model: Model<"anthropic-messages">,
-	messages: readonly MessageParam[],
-): void {
-	if (state.controlModelId !== model.id) {
-		state.controlModelId = model.id;
-		resetAnthropicControlState(state);
-		return;
-	}
+function syncAnthropicControlState(state: AnthropicControlState, messages: readonly MessageParam[]): void {
 	for (const transition of state.controlTransitions) {
 		if (
 			transition.messageCount > messages.length ||
@@ -3581,7 +3702,7 @@ function syncAnthropicControlState(
  */
 function planStableAnthropicSystem(
 	current: AnthropicSystemBlock[] | undefined,
-	state: AnthropicProviderSessionState | undefined,
+	state: AnthropicControlState | undefined,
 	enabled: boolean,
 ): AnthropicSystemBlock[] | undefined {
 	if (!state || !enabled) return current;
@@ -3600,11 +3721,16 @@ function planStableAnthropicSystem(
 function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
 	const stable = { ...tool };
 	delete stable.defer_loading;
+	delete stable.description;
 	return JSON.stringify(stable);
 }
 
+function cloneAnthropicTools(tools: readonly AnthropicWireTool[]): AnthropicWireTool[] {
+	return tools.map(tool => ({ ...tool }));
+}
+
 function recordAnthropicControlTransition(
-	state: AnthropicProviderSessionState,
+	state: AnthropicControlState,
 	messages: readonly MessageParam[],
 	messageCount: number,
 	content: ContentBlockParam[],
@@ -3634,14 +3760,14 @@ function recordAnthropicControlTransition(
 function planStableAnthropicTools(
 	current: AnthropicWireTool[] | undefined,
 	messages: readonly MessageParam[],
-	state: AnthropicProviderSessionState | undefined,
+	state: AnthropicControlState | undefined,
 	enabled: boolean,
 ): AnthropicWireTool[] | undefined {
 	if (!state || !enabled || !current) return current;
 	if (!state.declaredTools) {
-		state.declaredTools = current.map(tool => ({ ...tool }));
+		state.declaredTools = cloneAnthropicTools(current);
 		state.activeToolNames = new Set(current.map(tool => tool.name));
-		return state.declaredTools;
+		return cloneAnthropicTools(state.declaredTools);
 	}
 
 	const declaredByName = new Map(state.declaredTools.map(tool => [tool.name, tool]));
@@ -3649,9 +3775,9 @@ function planStableAnthropicTools(
 		const declared = declaredByName.get(tool.name);
 		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
 			resetAnthropicControlState(state);
-			state.declaredTools = current.map(candidate => ({ ...candidate }));
+			state.declaredTools = cloneAnthropicTools(current);
 			state.activeToolNames = new Set(current.map(candidate => candidate.name));
-			return state.declaredTools;
+			return cloneAnthropicTools(state.declaredTools);
 		}
 	}
 
@@ -3678,7 +3804,7 @@ function planStableAnthropicTools(
 	}
 	if (changes.length > 0) recordAnthropicControlTransition(state, messages, messages.length, changes);
 	state.activeToolNames = nextActive;
-	return state.declaredTools;
+	return cloneAnthropicTools(state.declaredTools);
 }
 
 /**
@@ -3690,7 +3816,7 @@ function planStableAnthropicTools(
 function planStableAnthropicEffort(
 	current: AnthropicOutputEffort | undefined,
 	messages: readonly MessageParam[],
-	state: AnthropicProviderSessionState | undefined,
+	state: AnthropicControlState | undefined,
 	enabled: boolean,
 ): AnthropicOutputEffort | undefined {
 	if (!state || !enabled) return current;
@@ -3712,7 +3838,7 @@ function planStableAnthropicEffort(
 
 function materializeAnthropicControlTransitions(
 	messages: MessageParam[],
-	state: AnthropicProviderSessionState | undefined,
+	state: AnthropicControlState | undefined,
 ): MessageParam[] {
 	if (!state || state.controlTransitions.length === 0) return messages;
 	const result = messages.slice();
@@ -3736,7 +3862,7 @@ function materializeAnthropicControlTransitions(
 		}
 		result.splice(index, 0, {
 			role: "system",
-			content: transition.content,
+			content: transition.content.map(block => ({ ...block })),
 			...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
 		});
 		offset++;
@@ -3906,25 +4032,20 @@ function buildParams(
 		dropAllThinking,
 		droppedThinkingBlocks,
 	});
-	if (providerSessionState) syncAnthropicControlState(providerSessionState, model, wireMessages);
-	systemBlocks = planStableAnthropicSystem(
-		systemBlocks,
-		providerSessionState,
-		model.compat.supportsMidConversationSystem,
-	);
-	tools = planStableAnthropicTools(
-		tools,
-		wireMessages,
-		providerSessionState,
-		model.compat.supportsMidConversationToolChanges,
-	);
+	const controlState = getAnthropicControlState(providerSessionState, options?.sessionId, systemBlocks, wireMessages);
+	if (controlState) syncAnthropicControlState(controlState, wireMessages);
+	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
+	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	// Anchor the stable tools+system head so it stays cached across turns; the
+	// moving message tail is anchored separately in applyPromptCaching below.
+	applyHeadCaching(systemBlocks, tools, cacheControl);
 	const topLevelEffort = planStableAnthropicEffort(
 		outputConfigEffort,
 		wireMessages,
-		providerSessionState,
+		controlState,
 		model.compat.supportsPerMessageEffort,
 	);
-	wireMessages = materializeAnthropicControlTransitions(wireMessages, providerSessionState);
+	wireMessages = materializeAnthropicControlTransitions(wireMessages, controlState);
 
 	const outputConfigEntries: AnthropicOutputConfig = {};
 	if (topLevelEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = topLevelEffort;
@@ -4303,7 +4424,7 @@ export function convertAnthropicMessages(
 			for (const block of blocks) {
 				if (block.type === "tool_use") {
 					sawToolUse = true;
-				} else if (sawToolUse) {
+				} else if (sawToolUse && block.type !== "thinking" && block.type !== "redacted_thinking") {
 					needsPartition = true;
 					break;
 				}
@@ -4366,7 +4487,7 @@ export function convertAnthropicMessages(
 	// covers both the "followed by assistant / last" and "no consecutive system"
 	// constraints. Anything that does not qualify stays a `user` message.
 	if (developerParams.length > 0 && model.compat.supportsMidConversationSystem) {
-		for (const developer of developerParams) {
+		for (const developer of developerParams.toReversed()) {
 			const idx = developer.index;
 			const followsUser = idx > 0 && params[idx - 1]?.role === "user";
 			const next = params[idx + 1];
@@ -4378,18 +4499,35 @@ export function convertAnthropicMessages(
 					block => block.type === "text" || block.type === "tool_addition" || block.type === "tool_removal",
 				);
 			const effortOnly = developer.payload?.effort !== undefined && Array.isArray(content) && content.length === 0;
-			if ((followsUser && lastOrBeforeAssistant && systemCompatible) || effortOnly) {
-				params[idx] = {
-					role: "system",
-					content,
-					...(developer.payload?.clearAt !== undefined && model.compat.supportsTurnScopedSystem
-						? { clear_at: developer.payload.clearAt }
-						: {}),
-					...(developer.payload?.effort !== undefined && model.compat.supportsPerMessageEffort
-						? { output_config: { effort: developer.payload.effort } }
-						: {}),
-				};
+			if (!((followsUser && lastOrBeforeAssistant && systemCompatible) || effortOnly)) continue;
+
+			const turnScoped = developer.payload?.clearAt === "next_user_message" && model.compat.supportsTurnScopedSystem;
+			const hasEffort = developer.payload?.effort !== undefined && model.compat.supportsPerMessageEffort;
+			const hasToolChanges = (developer.payload?.toolChanges?.length ?? 0) > 0;
+			if (turnScoped && (hasEffort || hasToolChanges) && Array.isArray(content)) {
+				const scopedContent = content.filter(block => block.type === "text");
+				const controlContent = content.filter(block => block.type !== "text");
+				if (scopedContent.length > 0) {
+					params[idx] = {
+						role: "system",
+						content: scopedContent,
+						clear_at: "next_user_message",
+					};
+					params.splice(idx + 1, 0, {
+						role: "system",
+						content: controlContent,
+						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
+					});
+					continue;
+				}
 			}
+
+			params[idx] = {
+				role: "system",
+				content,
+				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),
+				...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
+			};
 		}
 	}
 	// Dropped empty user/developer turns can leave two assistant params adjacent;
