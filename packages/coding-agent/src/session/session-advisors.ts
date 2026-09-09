@@ -841,6 +841,13 @@ export class SessionAdvisors {
 		if (descriptors.length !== this.#advisors.length) return false;
 		for (let i = 0; i < descriptors.length; i++) {
 			if (descriptors[i].signature !== this.#advisors[i].signature) return false;
+			// A models.yml/discovery refresh re-issues the same provider/id as a new
+			// Model record; the string signature above only sees the selector string,
+			// so a metadata-only edit (baseUrl, limits, compat) would compare equal
+			// and leave the advisor streaming against the stale record. Compare by
+			// reference — the same guard `sameScopedModelCycle` applies to the
+			// Ctrl+P cycle — so any swapped-in record forces a rebuild.
+			if (descriptors[i].model !== this.#advisors[i].model) return false;
 		}
 		return true;
 	}
