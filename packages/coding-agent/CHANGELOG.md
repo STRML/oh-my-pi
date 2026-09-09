@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `/reload-settings` now reloads the plugin pipeline when `extensions` or `disabledExtensions` changes, and awaits headless replays before ACP and RPC acknowledge the reload.
+- `/reload-settings` now reports construction-only tool enablement (`bash.enabled`, `glob.enabled`, `grep.enabled`, and the other tool gates) and the TTSR bucketing keys as restart-required instead of claiming they were applied.
+- `/reload-settings` now clears a `--models` scope whose patterns stop resolving after a catalog reload.
 - `/reload-settings` now applies a persisted setting that appears on disk over the host-default override ACP and RPC hosts install at startup, instead of leaving the startup default in effect.
 - `/reload-settings` no longer loses a discovery-backed custom provider when `models.yml` is edited into malformed syntax; the last good provider list is restored.
 - `/reload-settings` now reports `tools.abortOnFabricatedResult` as needing a restart instead of claiming it was applied.
