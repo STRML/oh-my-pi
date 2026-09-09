@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `/reload-settings` now reloads skills, TTSR manager settings, and prompt-affecting settings such as `skillful`, task concurrency, and `security.enabled` without a restart.
 - `/reload-settings` now applies browser and computer prelude changes, the shared LSP flag, and provider enablement changes without a restart.
 - `/reload-settings` now re-reads the read tool's default limit and image resize behavior and the write tool's LSP formatting and diagnostics settings.
 - `/reload-settings` no longer resets `statusLine.contextLine` when the status line is rebuilt.
