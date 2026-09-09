@@ -186,11 +186,14 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 // guard preserves any explicit configuration — caller `Settings.isolated`
 // overrides, project `.claude/settings.yml`, `--config` overlays, or global
 // `config.yml` — so the host default only kicks in when nothing is set. Without
-// it the override clobbers every caller/host choice (#2598, #3207).
+// it the override clobbered every caller/host choice (#2598, #3207). Overrides
+// applied here are tracked as host defaults (`Settings.overrideHostDefault`):
+// when an explicit persisted value appears later, `reloadFromDisk()` releases
+// the fabricated default so the new value takes effect mid-session.
 function applyDefaultSettingOverrides(settingPaths: SettingPath[], targetSettings: Settings): void {
 	for (const settingPath of settingPaths) {
 		if (targetSettings.isConfigured(settingPath)) continue;
-		targetSettings.override(settingPath, getDefault(settingPath));
+		targetSettings.overrideHostDefault(settingPath, getDefault(settingPath));
 	}
 }
 

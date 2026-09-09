@@ -850,6 +850,23 @@ describe("/reload-settings slash command", () => {
 		expect(restartSection).toContain("tools.abortOnFabricatedResult");
 	});
 
+	it("applies a persisted value that appears over a host-default override", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		// Mirror the ACP/RPC startup applier: an unconfigured host-defaulted path
+		// gets a fabricated runtime override of the schema default, which shadows
+		// every layer until an explicit persisted value appears.
+		const hostDefault = getDefault("memories.enabled");
+		settings.overrideHostDefault("memories.enabled", hostDefault);
+
+		const persisted = !hostDefault;
+		await writeSettings({ advisor: { syncBacklog: "2" }, memories: { enabled: persisted } });
+		const { output } = await runCommand(settings);
+
+		expect(settings.get("memories.enabled")).toBe(persisted);
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("memories.enabled"));
+	});
+
 	it("re-buckets ttsr rules when ttsr.enabled flips on during reload", async () => {
 		const rulesDir = path.join(projectDir, ".agents", "rules");
 		fs.mkdirSync(rulesDir, { recursive: true });

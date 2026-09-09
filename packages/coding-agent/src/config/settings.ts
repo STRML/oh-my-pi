@@ -494,6 +494,13 @@ export class Settings {
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
+	/**
+	 * Paths whose runtime override is a host-fabricated schema default (see
+	 * {@link overrideHostDefault}). {@link #reloadPersistedLayers} releases
+	 * these once an explicit persisted value appears, so the persisted layer
+	 * takes effect instead of staying shadowed by the startup default.
+	 */
+	#hostDefaultedPaths = new Set<SettingPath>();
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
@@ -686,11 +693,27 @@ export class Settings {
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		// An explicit runtime override supersedes any host default for this path:
+		// from here on it keeps full override precedence across reloads.
+		this.#hostDefaultedPaths.delete(path);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+	}
+
+	/**
+	 * Apply a host-default runtime override: `value` shadows every layer now,
+	 * but unlike {@link override} the path is remembered as fabricated. When an
+	 * explicit value for `path` later appears in a persisted layer (global,
+	 * project, or `--config` overlay), {@link reloadFromDisk} drops the
+	 * fabricated override so the persisted value takes effect instead of being
+	 * shadowed by the startup default for the rest of the process lifetime.
+	 */
+	overrideHostDefault<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.override(path, value);
+		this.#hostDefaultedPaths.add(path);
 	}
 
 	/**
@@ -700,6 +723,7 @@ export class Settings {
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		this.#hostDefaultedPaths.delete(path);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		let current = this.#overrides;
@@ -811,6 +835,7 @@ export class Settings {
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
 		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
 		cloned.#overrides = this.#buildOriginalOverrides();
+		cloned.#hostDefaultedPaths = new Set(this.#hostDefaultedPaths);
 		cloned.#rebuildMerged();
 		cloned.#fireAllHooks();
 		return cloned;
@@ -878,6 +903,7 @@ export class Settings {
 			this.#configOverlay = overlayResult.value.settings;
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
+			this.#releaseSupersededHostDefaults();
 
 			const nextModelRoles = this.get("modelRoles");
 			if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
@@ -899,6 +925,28 @@ export class Settings {
 				}
 			}
 			return;
+		}
+	}
+
+	/**
+	 * Drop host-default overrides ({@link overrideHostDefault}) whose path has
+	 * gained an explicit value in a persisted layer, so the freshly loaded
+	 * global/project/overlay value takes effect instead of staying shadowed by
+	 * the startup default. Runs inside {@link #reloadPersistedLayers} right
+	 * after the layers are installed; `clearOverride` re-signals each released
+	 * path. Leaf presence is checked per layer because the merged view still
+	 * contains the tracked override itself.
+	 */
+	#releaseSupersededHostDefaults(): void {
+		for (const path of this.#hostDefaultedPaths) {
+			const segments = SETTING_PATH_SEGMENTS[path];
+			const persistedConfigured =
+				getByPath(this.#global, segments) !== undefined ||
+				getByPath(this.#projectSettingsForMerge(), segments) !== undefined ||
+				getByPath(this.#configOverlay, segments) !== undefined;
+			if (persistedConfigured) {
+				this.clearOverride(path);
+			}
 		}
 	}
 
