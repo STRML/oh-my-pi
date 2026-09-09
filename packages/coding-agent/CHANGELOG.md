@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- `/reload-settings` now reconciles append-only context, Code Mode, and the think tool when a metadata-only edit replaces the active model's record, including when that model sits outside the configured scope.
+- `/reload-settings` no longer resets a session-only thinking level in ACP and RPC hosts, and `compaction.enabled` now updates the status line's auto-compact indicator.
 - `/reload-settings` now runs the same side-effect replay in ACP and RPC hosts that the TUI runs, so `tui.*`, `display.*`, and `externalThinking` changes take effect outside the TUI too.
 - `/reload-settings` no longer drops session-added workspace roots or session-only overrides (`/advisor on|off`, a manual thinking level, a `/fast` tier) when their setting did not change on disk.
 - `/reload-settings` now re-buckets TTSR rules when `ttsr.enabled` is turned on and rebuilds running advisors when a model metadata edit swaps their record.
