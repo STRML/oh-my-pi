@@ -201,6 +201,43 @@ describe("AgentSession.refreshScopedModels active-model rebind", () => {
 		expect(current.scopedModels.map(entry => entry.model.id)).toEqual(["m1", "m2"]);
 	});
 
+	it("clears the --models scope when its patterns stop resolving after a reload", async () => {
+		const current = await createSession(["testprov/m1"]);
+		await current.refreshModels("offline");
+		expect(await current.refreshScopedModels()).toBe(true);
+		expect(current.scopedModels.map(entry => entry.model.id)).toEqual(["m1"]);
+
+		// The rebuilt catalog no longer matches any --models pattern: the stale
+		// scope must go so Ctrl+P and /switch stop offering removed records,
+		// instead of staying frozen at the launch resolution.
+		await Bun.write(
+			tempDir.join("models.yml"),
+			YAML.stringify({
+				providers: {
+					otherprov: {
+						baseUrl: "https://other-gateway.example.com/v1",
+						apiKey: "TEST_KEY",
+						api: "anthropic-messages",
+						models: [
+							{
+								id: "other",
+								name: "Other",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 100_000,
+								maxTokens: 8_000,
+							},
+						],
+					},
+				},
+			}),
+		);
+		await current.refreshModels("offline");
+		expect(await current.refreshScopedModels()).toBe(true);
+		expect(current.scopedModels.length).toBe(0);
+	});
+
 	it("reconciles model-dependent state and emits model_changed on an unscoped rebind", async () => {
 		const current = await createSession();
 		expect(current.agent.appendOnlyContext).toBeUndefined();

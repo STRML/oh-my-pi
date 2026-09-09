@@ -734,7 +734,7 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
-	/** Settings-derived enabledModels scope; undefined keeps a --models scope fixed at its launch resolution. */
+	/** `--models` scope patterns: user-owned, outranks settings; re-resolved against the rebuilt catalog on each reload. */
 	#cliModelScope: readonly string[] | undefined;
 	/** Programmatic (SDK-supplied) scope from `config.scopedModels`; a settings-driven reload must never clear it. */
 	#sdkScopedModels = false;
@@ -5684,16 +5684,20 @@ export class AgentSession {
 	 * catalog. Programmatic scopes are never settings-derived: an SDK-supplied
 	 * `scopedModels` set survives untouched, and a `--models` CLI scope
 	 * re-resolves its own user-owned patterns against the rebuilt catalog so
-	 * models added to models.yml reach the cycle list. The active model is
-	 * re-adopted from the rebuilt registry on every path.
+	 * models added to models.yml reach the cycle list; when those patterns
+	 * resolve to zero models the CLI-derived scope is cleared the same way —
+	 * the pattern list itself survives, so a later reload that restores a
+	 * match re-resolves it. The active model is re-adopted from the rebuilt
+	 * registry on every path.
 	 */
 	async refreshScopedModels(): Promise<boolean> {
 		if (this.#isDisposed) return false;
 		if (this.#cliModelScope) {
 			// The CLI scope's pattern list is user-owned and outranks settings,
 			// but it must track the rebuilt catalog: re-resolve the same patterns
-			// so models added to models.yml reach the --models cycle list, and
-			// re-adopt the active model's record.
+			// so models added to models.yml reach the --models cycle list, drop
+			// the scope when the patterns stop resolving, and re-adopt the
+			// active model's record.
 			const rebound = await this.#rebindActiveModelFromRegistry();
 			const resolvedCli = await resolveModelScope(
 				[...this.#cliModelScope],
@@ -5702,7 +5706,16 @@ export class AgentSession {
 				this.settings,
 			);
 			const mappedCli = toSessionScopedModels(resolvedCli, this.settings);
-			if (mappedCli.length === 0 || sameScopedModelCycle(this.#models.scopedModels, mappedCli)) return rebound;
+			if (mappedCli.length === 0) {
+				// Patterns that resolve to nothing after a reload: drop the stale
+				// --models scope so Ctrl+P and /switch stop offering records the
+				// rebuilt catalog removed. The pattern list itself stays; a later
+				// reload that restores a match re-resolves it.
+				if (this.#models.scopedModels.length === 0) return rebound;
+				this.#models.setScopedModels([]);
+				return true;
+			}
+			if (sameScopedModelCycle(this.#models.scopedModels, mappedCli)) return rebound;
 			this.#models.setScopedModels(mappedCli);
 			return true;
 		}
