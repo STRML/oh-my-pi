@@ -377,6 +377,17 @@ export class TtsrManager {
 	}
 
 	/**
+	 * Drops every registered rule and resets the match flags so a re-bucket
+	 * pass can repopulate from fresh settings. Injection records are kept:
+	 * repeat gating survives a reload just as it survives a session resume.
+	 */
+	clearRules(): void {
+		this.#rules.clear();
+		this.#canMatchText = false;
+		this.#canMatchThinking = false;
+	}
+
+	/**
 	 * Add a stream chunk to its scoped buffer and return matching rules.
 	 *
 	 * Buffers are isolated by source/tool key so matches don't bleed across

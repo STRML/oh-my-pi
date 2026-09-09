@@ -1,6 +1,9 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
-import { applySettingSideEffects, REPLAYED_SETTING_IDS } from "../modes/controllers/setting-side-effects";
+import {
+	applySettingSideEffectsAwaitingCompletion,
+	REPLAYED_SETTING_IDS,
+} from "../modes/controllers/setting-side-effects";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -155,6 +158,11 @@ export async function executeBuiltinSlashCommand(
 		// dispatcher without forcing every TUI test to construct the full
 		// `SlashCommandRuntime` shape.
 		const ctx = runtime.ctx;
+		// Snapshot the replay ids before the command runs so notifyConfigChanged
+		// can replay only what the command actually changed. Contexts without a
+		// readable settings object (read-only builtins) never reach the replay.
+		const replayGet = ctx.settings?.get.bind(ctx.settings);
+		const beforeReplay = replayGet ? new Map(REPLAYED_SETTING_IDS.map(id => [id, replayGet(id)])) : undefined;
 		const adapted: SlashCommandRuntime = {
 			session: ctx.session,
 			sessionManager: ctx.sessionManager,
@@ -166,12 +174,19 @@ export async function executeBuiltinSlashCommand(
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
 			notifyConfigChanged: async () => {
+				if (!beforeReplay) return;
 				// Replay the settings that components and agent fields cache at
 				// construction; a layer swap alone leaves them stale until the
-				// next editor swap. Queue modes are reconciled by the handler
-				// itself with persist=false, so they stay out of the replay list.
+				// next editor swap. Only ids whose value changed during this
+				// command replay: a no-op reload replaying every id would clobber
+				// session-only overrides such as a Shift+Tab model-control
+				// thinking level (defaultThinkingLevel). Queue modes are
+				// reconciled by the handler itself with persist=false, so they
+				// stay out of the replay list.
 				for (const id of REPLAYED_SETTING_IDS) {
-					applySettingSideEffects(ctx, id, ctx.settings.get(id), { persist: false });
+					const next = ctx.settings.get(id);
+					if (Bun.deepEquals(beforeReplay.get(id), next)) continue;
+					await applySettingSideEffectsAwaitingCompletion(ctx, id, next, { persist: false });
 				}
 			},
 		};

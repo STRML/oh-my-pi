@@ -1,7 +1,11 @@
 import { reconcileProviderSets } from "../capability";
+import { bucketRules } from "../capability/rule-buckets";
+import { MAIN_AGENT_RULE_NAME, ruleCapability, setActiveRules, type Rule } from "../capability/rule";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings";
+import { loadCapability } from "../discovery";
+import { additionalWorkspaceDirectories, normalizeSessionWorkspace } from "../session/session-workspace";
 import type { SlashCommandSpec } from "./types";
 
 /**
@@ -28,6 +32,25 @@ const PROMPT_KEYS: Partial<Record<SettingPath, true>> = {
 	personality: true,
 	"tui.reactions": true,
 	"tools.xdevDocs": true,
+	// The inline allowlist feeds xdevDocsAll() at prompt-rebuild time exactly
+	// like tools.xdevDocs does (sdk.ts passes both live), so an edited
+	// allowlist needs the same one rebuild to reach the model.
+	"tools.xdevInlineDevices": true,
+};
+
+/**
+ * Settings snapshotted into private Agent fields at session construction with
+ * no live setter: sdk.ts reads each once while building the Agent and the
+ * value rides every later request from that snapshot, so a reload cannot
+ * apply them. They are reported as restart-required instead of "Applied".
+ */
+const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
+	// sdk.ts construction → Agent `#kimiApiFormat` (packages/agent/src/agent.ts).
+	"providers.kimiApiFormat": true,
+	// sdk.ts construction → Agent `#preferWebsockets`.
+	"providers.openaiWebsockets": true,
+	// sdk.ts construction → Agent `#dialect` via resolveDialect.
+	"tools.format": true,
 };
 
 export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -43,7 +66,6 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				before.set(key, runtime.settings.get(key));
 			}
 			await runtime.settings.reloadFromDisk();
-			await runtime.notifyConfigChanged?.();
 			// Capability providers filter through module-level Sets seeded once at
 			// startup (initializeWithSettings); a reloaded disabledProviders or
 			// enabledProviders is reported as applied while loadCapability keeps
@@ -71,6 +93,10 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 			// Provider selection globals are module state consumed by web search
 			// and image tools in every host; a layer swap alone does not update it.
 			applyProviderGlobalsFromSettings(runtime.settings);
+			// Advertise AFTER the catalog refresh: hosts read the model list from
+			// this push, and a catalog-only change emits no later model_changed,
+			// so a pre-refresh push would advertise the stale catalog.
+			await runtime.notifyConfigChanged?.();
 			// Reconcile session-owned settings the reload cannot reach on its own:
 			// the live session snapshots these at construction (agent/SDK fields),
 			// so settings.get() alone would report them applied without changing
@@ -91,7 +117,11 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 					scopeFailure = error instanceof Error ? error.message : String(error);
 				}
 				const nextAdvisorEnabled = runtime.settings.get("advisor.enabled");
-				if (runtime.session.isAdvisorEnabled() !== nextAdvisorEnabled) {
+				// Sync only when the setting itself changed: isAdvisorEnabled() also
+				// tracks a session-level /advisor off override, and comparing live
+				// state to the settings value on every reload would reset that
+				// override even when nothing changed on disk.
+				if (before.get("advisor.enabled") !== nextAdvisorEnabled) {
 					runtime.session.setAdvisorEnabled(nextAdvisorEnabled);
 				}
 				const nextSteeringMode = runtime.settings.get("steeringMode");
@@ -143,26 +173,58 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				// the per-family map from the reloaded `tier.*` settings and apply
 				// per-family changes so requests use the new tier without a restart.
 				// setServiceTierFamily does not persist — it mutates the live map.
-				const nextTierByFamily = buildServiceTierByFamily(
-					runtime.settings.get("tier.openai"),
-					runtime.settings.get("tier.anthropic"),
-					runtime.settings.get("tier.google"),
-				);
-				for (const family of ["openai", "anthropic", "google"] as const) {
-					const next = nextTierByFamily[family];
-					if (runtime.session.serviceTierByFamily[family] !== next) {
-						runtime.session.setServiceTierFamily(family, next);
+				// Guarded on the tier.* values actually changing: the live
+				// serviceTierByFamily also carries session-only /fast overrides that
+				// a no-op reload must not reset to the settings default.
+				if (
+					before.get("tier.openai") !== runtime.settings.get("tier.openai") ||
+					before.get("tier.anthropic") !== runtime.settings.get("tier.anthropic") ||
+					before.get("tier.google") !== runtime.settings.get("tier.google")
+				) {
+					const nextTierByFamily = buildServiceTierByFamily(
+						runtime.settings.get("tier.openai"),
+						runtime.settings.get("tier.anthropic"),
+						runtime.settings.get("tier.google"),
+					);
+					for (const family of ["openai", "anthropic", "google"] as const) {
+						const next = nextTierByFamily[family];
+						if (runtime.session.serviceTierByFamily[family] !== next) {
+							runtime.session.setServiceTierFamily(family, next);
+						}
 					}
 				}
 				// Workspace roots snapshot into SessionManager at construction
 				// (tools and the system prompt read the live list from it), so an
-				// on-disk edit to additionalDirectories must be pushed into the
-				// manager and the base prompt rebuilt — the same flow /add-dir
-				// and /remove-dir use.
-				const nextDirs = runtime.settings.get("workspace.additionalDirectories");
-				const currentDirs = runtime.sessionManager.getAdditionalDirectories();
-				if (!Bun.deepEquals(nextDirs, currentDirs)) {
-					await runtime.sessionManager.setAdditionalDirectories(nextDirs);
+				// on-disk edit to additionalDirectories must reach the manager and
+				// rebuild the base prompt — through the same per-directory flow
+				// /add-dir and /remove-dir use. Only the settings-derived delta is
+				// applied: getAdditionalDirectories() also holds session-added
+				// roots (--add-dir, /add-dir), and a wholesale replace would drop
+				// them and rewrite the session header on every reload.
+				const nextRoots = additionalWorkspaceDirectories(
+					normalizeSessionWorkspace({
+						cwd: runtime.cwd,
+						directories: runtime.settings.get("workspace.additionalDirectories"),
+					}),
+				);
+				const previousRoots = additionalWorkspaceDirectories(
+					normalizeSessionWorkspace({
+						cwd: runtime.cwd,
+						directories: before.get("workspace.additionalDirectories") as string[] | undefined,
+					}),
+				);
+				const previousRootSet = new Set(previousRoots);
+				const nextRootSet = new Set(nextRoots);
+				let rootsChanged = false;
+				for (const root of nextRoots) {
+					if (previousRootSet.has(root)) continue;
+					if ((await runtime.sessionManager.addWorkspaceDirectory(root)) !== null) rootsChanged = true;
+				}
+				for (const root of previousRoots) {
+					if (nextRootSet.has(root)) continue;
+					if ((await runtime.sessionManager.removeWorkspaceDirectory(root)) !== null) rootsChanged = true;
+				}
+				if (rootsChanged) {
 					await runtime.session.refreshBaseSystemPrompt();
 				}
 				// The bash tool snapshots the async-execution settings into its schema
@@ -242,7 +304,11 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 					if (Bun.deepEquals(previous, runtime.settings.get(key))) {
 						continue;
 					}
-					if (key.startsWith("skills.")) {
+					// Provider-filter changes re-seed the discovery sets earlier in
+					// this handler, but already-loaded skills keep their
+					// provider-filtered content until a capability refresh, so
+					// they ride the same refreshSkills() pass as skills.* keys.
+					if (key === "enabledProviders" || key === "disabledProviders" || key.startsWith("skills.")) {
 						skillsChanged = true;
 					} else if (PROMPT_KEYS[key]) {
 						promptChanged = true;
@@ -259,9 +325,7 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				}
 				// The TtsrManager merges the ttsr group once in its constructor and
 				// reads that snapshot on every match/repeat decision, so a reloaded
-				// manager-level key would keep the old behavior until restart. The
-				// bucketing-only builtinRules/disabledRules are consumed per reload
-				// by bucketRules and need no manager update.
+				// manager-level key would keep the old behavior until restart.
 				if (
 					before.get("ttsr.enabled") !== runtime.settings.get("ttsr.enabled") ||
 					before.get("ttsr.contextMode") !== runtime.settings.get("ttsr.contextMode") ||
@@ -271,10 +335,44 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				) {
 					runtime.session.updateTtsrSettings(runtime.settings.getGroup("ttsr"));
 				}
+				// Registration settings were baked into the rule set once at session
+				// construction: bucketRules ran while the manager was still disabled,
+				// so flipping ttsr.enabled on left the rule map empty, and
+				// builtinRules/disabledRules never re-bucketed the discovered
+				// inventory. Re-run the same discovery + bucketRules funnel the
+				// session used at construction and replace the active rule snapshot.
+				// Slash commands only run in main sessions, so the main agent name
+				// matches the construction pass. (The sdk prompt closure keeps its
+				// construction-time buckets until restart; stream matching and
+				// rule:// go live immediately.)
+				const ttsrRegistrationChanged =
+					before.get("ttsr.enabled") !== runtime.settings.get("ttsr.enabled") ||
+					before.get("ttsr.builtinRules") !== runtime.settings.get("ttsr.builtinRules") ||
+					!Bun.deepEquals(before.get("ttsr.disabledRules"), runtime.settings.get("ttsr.disabledRules"));
+				if (ttsrRegistrationChanged && runtime.session.ttsrManager) {
+					const manager = runtime.session.ttsrManager;
+					const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd: runtime.cwd });
+					manager.clearRules();
+					const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, manager, {
+						builtinRules: runtime.settings.get("ttsr.builtinRules"),
+						disabledRules: runtime.settings.get("ttsr.disabledRules"),
+						agentName: MAIN_AGENT_RULE_NAME,
+					});
+					setActiveRules([...rulebookRules, ...alwaysApplyRules, ...manager.getRules()]);
+				}
 			}
 			const changed: SettingPath[] = [];
+			const restartRequired: SettingPath[] = [];
 			for (const [key, previous] of before) {
-				if (!Bun.deepEquals(previous, runtime.settings.get(key))) {
+				if (Bun.deepEquals(previous, runtime.settings.get(key))) {
+					continue;
+				}
+				// Construction-snapshotted Agent fields have no live setter, so a
+				// reload cannot apply them — report them honestly instead of
+				// claiming they took effect.
+				if (RESTART_REQUIRED_KEYS[key]) {
+					restartRequired.push(key);
+				} else {
 					changed.push(key);
 				}
 			}
@@ -287,11 +385,13 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				await runtime.output(`Settings reloaded from disk (models.yml failed: ${modelsFailure})${scopeNote}`);
 				return;
 			}
-			if (changed.length === 0) {
+			if (changed.length === 0 && restartRequired.length === 0) {
 				await runtime.output(`Settings reloaded from disk. No effective values changed.${scopeNote}`);
 				return;
 			}
-			await runtime.output(`Settings reloaded from disk. Applied: ${changed.join(", ")}${scopeNote}`);
+			const appliedNote = changed.length > 0 ? ` Applied: ${changed.join(", ")}` : "";
+			const restartNote = restartRequired.length > 0 ? ` Restart required: ${restartRequired.join(", ")}` : "";
+			await runtime.output(`Settings reloaded from disk.${appliedNote}${restartNote}${scopeNote}`);
 		},
 	},
 ];

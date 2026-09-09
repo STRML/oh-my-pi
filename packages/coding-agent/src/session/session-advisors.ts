@@ -808,9 +808,21 @@ export class SessionAdvisors {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		// tier.advisor is captured per runtime build (the service-tier resolver
+		// closes over the setting), so it must participate in the rebuild
+		// signature or onModelRolesChanged keeps serving the old tier after a
+		// reload changes it.
+		const tier = this.#host.settings.get("tier.advisor");
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			budget,
+			tier,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {

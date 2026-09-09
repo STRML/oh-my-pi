@@ -23,6 +23,13 @@ export interface SettingSideEffectOptions {
 	 * project-overlay value would be promoted into global config.
 	 */
 	persist?: boolean;
+	/**
+	 * When provided, the async mutations this apply launches (prompt rebuilds,
+	 * think-tool re-registration, memory-backend swap) push their promises here
+	 * so the caller can await completion. The fire-and-forget path leaves it
+	 * undefined.
+	 */
+	pending?: Promise<unknown>[];
 }
 
 /**
@@ -144,26 +151,34 @@ export function applySettingSideEffects(
 			ctx.statusLine.invalidate();
 			ctx.updateEditorBorderColor();
 			break;
-		case "personality":
-			void ctx.session.refreshBaseSystemPrompt().catch(err => {
+		case "personality": {
+			const rebuild = ctx.session.refreshBaseSystemPrompt().catch(err => {
 				ctx.showError(`Failed to apply personality: ${err}`);
 			});
+			options.pending?.push(rebuild);
 			break;
-		case "tools.xdevDocs":
-			void ctx.session.refreshBaseSystemPrompt().catch(err => {
+		}
+		case "tools.xdevDocs": {
+			const rebuild = ctx.session.refreshBaseSystemPrompt().catch(err => {
 				ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 			});
+			options.pending?.push(rebuild);
 			break;
-		case "memory.backend":
-			void ctx.session.applyMemoryBackend().catch(err => {
+		}
+		case "memory.backend": {
+			const backend = ctx.session.applyMemoryBackend().catch(err => {
 				ctx.showError(`Failed to apply memory backend: ${err}`);
 			});
+			options.pending?.push(backend);
 			break;
-		case "externalThinking":
-			void ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
+		}
+		case "externalThinking": {
+			const thinkTool = ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
 				ctx.showError(`Failed to apply external thinking: ${err}`);
 			});
+			options.pending?.push(thinkTool);
 			break;
+		}
 
 		case "autocompleteMaxVisible":
 			ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -276,14 +291,16 @@ export function applySettingSideEffects(
 			ctx.ui.setMaxInlineImages(typeof value === "number" ? value : Number(value));
 			break;
 
-		case "tui.renderMermaid":
+		case "tui.renderMermaid": {
 			setMarkdownMermaidRendering(value as boolean);
-			ctx.session.refreshBaseSystemPrompt().catch(err => {
+			const rebuild = ctx.session.refreshBaseSystemPrompt().catch(err => {
 				ctx.showError(`Failed to apply Mermaid rendering setting: ${err}`);
 			});
+			options.pending?.push(rebuild);
 			ctx.rebuildChatFromMessages();
 			ctx.ui.resetDisplay();
 			break;
+		}
 
 		case "theme": {
 			setTheme(value as string, true).then(result => {
@@ -404,4 +421,23 @@ export function applySettingSideEffects(
 		// All other settings are handled by the definitions (get/set on SettingsManager)
 		// No additional side effects needed
 	}
+}
+
+/**
+ * Applies one setting's live side effects and resolves only after the
+ * asynchronous mutations complete (prompt rebuilds, think-tool
+ * re-registration, memory-backend swap). The interactive selector keeps using
+ * {@link applySettingSideEffects} fire-and-forget; the `/reload-settings`
+ * replay awaits this so a reloaded setting is reported applied only once its
+ * side effect has landed.
+ */
+export async function applySettingSideEffectsAwaitingCompletion(
+	ctx: InteractiveModeContext,
+	id: string,
+	value: unknown,
+	options: SettingSideEffectOptions = {},
+): Promise<void> {
+	const pending: Promise<unknown>[] = [];
+	applySettingSideEffects(ctx, id, value, { ...options, pending });
+	await Promise.all(pending);
 }

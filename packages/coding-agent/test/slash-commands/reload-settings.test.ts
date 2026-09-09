@@ -11,9 +11,11 @@ import {
 	setDisabledProviders,
 	setEnabledProviders,
 } from "@oh-my-pi/pi-coding-agent/capability";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sameScopedModelCycle, toSessionScopedModels } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings, type TtsrSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createSourceMeta } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -88,6 +90,7 @@ describe("/reload-settings slash command", () => {
 	async function runCommand(
 		settings: Settings,
 		sessionOverrides: Partial<Record<string, unknown>> = {},
+		sessionManagerOverrides: Partial<Record<string, unknown>> = {},
 	): Promise<CommandCalls> {
 		const command = lookupBuiltinSlashCommand("reload-settings");
 		expect(command).toBeDefined();
@@ -133,6 +136,7 @@ describe("/reload-settings slash command", () => {
 			refreshSkills: vi.fn(async () => {}),
 			refreshBaseSystemPrompt: vi.fn(async () => {}),
 			updateTtsrSettings: vi.fn(() => false),
+			ttsrManager: undefined,
 			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
@@ -140,7 +144,9 @@ describe("/reload-settings slash command", () => {
 			session,
 			sessionManager: {
 				getAdditionalDirectories: vi.fn(() => []),
-				setAdditionalDirectories: vi.fn(async () => {}),
+				addWorkspaceDirectory: vi.fn(async () => null),
+				removeWorkspaceDirectory: vi.fn(async () => null),
+				...sessionManagerOverrides,
 			},
 			settings,
 			cwd: projectDir,
@@ -620,9 +626,21 @@ describe("/reload-settings slash command", () => {
 	});
 
 	it("runs the full reload through the TUI adapter without aborting", async () => {
-		await writeSettings({ advisor: { syncBacklog: "1" }, autocompleteMaxVisible: 7 });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			autocompleteMaxVisible: 7,
+			compaction: { idleThresholdTokens: 120000 },
+			recap: { idleSeconds: 45 },
+		});
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
-
+		// Only ids this rewrite changes on disk may replay; unchanged ids must
+		// leave their live consumers (including session-only overrides) alone.
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			autocompleteMaxVisible: 9,
+			compaction: { idleThresholdTokens: 180000 },
+			recap: { idleSeconds: 75 },
+		});
 		const editorSetAutocomplete = vi.fn();
 		const ctx = {
 			session: {
@@ -647,6 +665,7 @@ describe("/reload-settings slash command", () => {
 				reconcileSharedLsp: vi.fn(),
 				refreshSkills: vi.fn(async () => {}),
 				updateTtsrSettings: vi.fn(() => false),
+				ttsrManager: undefined,
 				setAutoCompactionEnabled: vi.fn(),
 				serviceTierByFamily: {},
 				setServiceTierFamily: vi.fn(),
@@ -694,11 +713,14 @@ describe("/reload-settings slash command", () => {
 		};
 		const result = await executeBuiltinSlashCommand("/reload-settings", { ctx } as never);
 		expect(result).toBe(true);
-		expect(editorSetAutocomplete).toHaveBeenCalledWith(7);
+		expect(editorSetAutocomplete).toHaveBeenCalledWith(9);
 		// Idle timers cache their delay and captured threshold, so the reload
 		// must re-arm them or a disabled task can still fire.
 		expect(ctx.eventController.refreshIdleCompactionTimer).toHaveBeenCalled();
 		expect(ctx.eventController.refreshIdleRecapTimer).toHaveBeenCalled();
+		// A blanket replay would push the settings default onto the session and
+		// reset a session-only Shift+Tab model-control thinking level.
+		expect(ctx.session.setThinkingLevel).not.toHaveBeenCalled();
 	});
 
 	it("re-resolves the settings-derived model scope and reports it", async () => {
@@ -745,6 +767,341 @@ describe("/reload-settings slash command", () => {
 
 		// A pre-reload resolution would observe the stale empty list.
 		expect(seenDuringScopeRefresh).toEqual(["liveprov/alpha-base"]);
+	});
+	it("rebuilds the base prompt when tools.xdevInlineDevices changes on disk", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			tools: { xdevDocs: "builtins", xdevInlineDevices: ["dev-a"] },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			tools: { xdevDocs: "builtins", xdevInlineDevices: ["dev-a", "dev-b"] },
+		});
+
+		const { refreshBaseSystemPrompt, output } = await runCommand(settings);
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("tools.xdevInlineDevices"));
+	});
+
+	it("refreshes skills when a capability provider filter changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			disabledProviders: ["cap-reload-test", "cap-skill-probe"],
+		});
+
+		const disabledBefore = getDisabledProviders();
+		const enabledBefore = getEnabledProviders();
+		try {
+			const { refreshSkills, refreshBaseSystemPrompt, output } = await runCommand(settings);
+			// Skills loaded through the old provider sets keep their filtered
+			// content until a capability refresh; refreshSkills rebuilds the base
+			// prompt in the same pass, so no second direct rebuild may stack on.
+			expect(refreshSkills).toHaveBeenCalledTimes(1);
+			expect(refreshBaseSystemPrompt).not.toHaveBeenCalled();
+			expect(output).toHaveBeenCalledWith(expect.stringContaining("disabledProviders"));
+		} finally {
+			// The module sets are process-global; restore whatever this test found.
+			setDisabledProviders(disabledBefore);
+			setEnabledProviders(enabledBefore);
+		}
+	});
+
+	it("leaves skills alone when no capability provider filter changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledProviders: ["cap-reload-test"] });
+
+		const { refreshSkills } = await runCommand(settings);
+		expect(refreshSkills).not.toHaveBeenCalled();
+	});
+
+	it("reports construction-only settings as restart-required instead of applied", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			providers: { kimiApiFormat: "auto" },
+			tools: { format: "auto" },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "2" },
+			providers: { kimiApiFormat: "anthropic" },
+			tools: { format: "xml" },
+		});
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// kimiApiFormat/openaiWebsockets/tools.format snapshot into private Agent
+		// fields at construction with no live setter: reporting them as applied
+		// would be false — they need a restart.
+		expect(appliedSection).not.toContain("kimiApiFormat");
+		expect(appliedSection).not.toContain("tools.format");
+		expect(restartSection).toContain("providers.kimiApiFormat");
+		expect(restartSection).toContain("tools.format");
+	});
+
+	it("re-buckets ttsr rules when ttsr.enabled flips on during reload", async () => {
+		const rulesDir = path.join(projectDir, ".agents", "rules");
+		fs.mkdirSync(rulesDir, { recursive: true });
+		await Bun.write(
+			path.join(rulesDir, "reload-rebucket-fixture.md"),
+			[
+				"---",
+				'description: "Reload rebucket fixture"',
+				'condition: "REBUCKET-BOOM-"',
+				"---",
+				"",
+				"Fixture body.",
+				"",
+			].join("\n"),
+		);
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		// Session-construction parity: bucketRules ran while the manager was
+		// disabled, so the conditional fixture was never registered.
+		const manager = new TtsrManager(settings.getGroup("ttsr"));
+		expect(manager.getRules().map(rule => rule.name)).not.toContain("reload-rebucket-fixture");
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: true } });
+
+		await runCommand(settings, {
+			ttsrManager: manager,
+			updateTtsrSettings: (group: unknown) => manager.updateSettings(group as TtsrSettings),
+		});
+
+		// Flipping ttsr.enabled on must re-run discovery + bucketRules; updating
+		// the manager settings alone leaves the rule map empty.
+		expect(manager.getRules().map(rule => rule.name)).toContain("reload-rebucket-fixture");
+	});
+
+	it("drops a ttsr rule disabled by ttsr.disabledRules during reload", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const manager = new TtsrManager(settings.getGroup("ttsr"));
+		const seeded = {
+			name: "reload-rebucket-seeded",
+			path: "/fixture/reload-rebucket-seeded.md",
+			content: "seeded",
+			condition: ["REBUCKET-SEEDED-"],
+			_source: createSourceMeta("fixture", "/fixture/reload-rebucket-seeded.md", "project"),
+		} as Rule;
+		expect(manager.addRule(seeded)).toBe(true);
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			ttsr: { enabled: true, disabledRules: ["reload-rebucket-seeded"] },
+		});
+
+		await runCommand(settings, {
+			ttsrManager: manager,
+			updateTtsrSettings: (group: unknown) => manager.updateSettings(group as TtsrSettings),
+		});
+
+		// The reload replaces the active rule set, so the seeded registration
+		// must not survive a disabledRules entry naming it.
+		expect(manager.getRules().map(rule => rule.name)).not.toContain("reload-rebucket-seeded");
+	});
+
+	it("awaits async setting replays before reporting the reload applied", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, personality: "default" });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, personality: "pragmatic" });
+
+		let release!: () => void;
+		const gated = new Promise<void>(resolve => {
+			release = resolve;
+		});
+		const replayStarted = Promise.withResolvers<void>();
+		let promptRefreshFinished = false;
+		let appliedSeen = false;
+		const ctx = {
+			session: {
+				refreshModels: vi.fn(async () => {}),
+				reapplyModelRoles: vi.fn(),
+				isAdvisorEnabled: () => true,
+				setAdvisorEnabled: vi.fn(),
+				steeringMode: "one-at-a-time",
+				followUpMode: "one-at-a-time",
+				interruptMode: "wait",
+				setSteeringMode: vi.fn(),
+				setFollowUpMode: vi.fn(),
+				setInterruptMode: vi.fn(),
+				setThinkingLevel: vi.fn(),
+				refreshBaseSystemPrompt: vi.fn(async () => {
+					replayStarted.resolve();
+					await gated;
+					promptRefreshFinished = true;
+				}),
+				applyMemoryBackend: vi.fn(async () => {}),
+				setThinkToolEnabled: vi.fn(async () => {}),
+				reconcileSecretObfuscator: vi.fn(async () => true),
+				reconcileBrowserIdleClose: vi.fn(),
+				reconcileBrowserEnabled: vi.fn(async () => {}),
+				reconcileComputerEnabled: vi.fn(async () => {}),
+				reconcileSharedLsp: vi.fn(),
+				refreshSkills: vi.fn(async () => {}),
+				updateTtsrSettings: vi.fn(() => false),
+				ttsrManager: undefined,
+				setAutoCompactionEnabled: vi.fn(),
+				serviceTierByFamily: {},
+				setServiceTierFamily: vi.fn(),
+				agent: {},
+			},
+			sessionManager: {
+				getCwd: () => projectDir,
+				getAdditionalDirectories: vi.fn(() => []),
+				setAdditionalDirectories: vi.fn(async () => {}),
+			},
+			settings,
+			ui: {
+				requestRender: vi.fn(),
+				invalidate: vi.fn(),
+				clearInlineImages: vi.fn(),
+				setResizeScrollback: vi.fn(),
+				resetDisplay: vi.fn(),
+				setMaxInlineImages: vi.fn(),
+			},
+			editor: {
+				setText: vi.fn(),
+				setAutocompleteMaxVisible: vi.fn(),
+				setImeSafeCursorLayout: vi.fn(),
+			},
+			syncEditorSpelling: vi.fn(),
+			syncComposerShape: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+			rebuildChatFromMessages: vi.fn(),
+			effectiveHideThinkingBlock: false,
+			hideToolActivity: false,
+			toolOutputExpanded: false,
+			showError: vi.fn(),
+			statusLine: {
+				invalidate: vi.fn(),
+				setAutoCompactEnabled: vi.fn(),
+				updateSettings: vi.fn(),
+			},
+			eventController: {
+				refreshIdleCompactionTimer: vi.fn(),
+				refreshIdleRecapTimer: vi.fn(),
+			},
+			chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+			showStatus: vi.fn((text: string) => {
+				if (text.includes("Applied:")) appliedSeen = true;
+			}),
+			refreshSlashCommandState: vi.fn(),
+		};
+
+		const done = executeBuiltinSlashCommand("/reload-settings", { ctx } as never);
+		// Deterministic drain (event-loop boundaries, no wall-clock): a
+		// fire-and-forget replay lets the command run to its output here, while
+		// the fixed path stays parked on the gated prompt rebuild.
+		await replayStarted.promise;
+		for (let hop = 0; hop < 20; hop++) await new Promise<void>(resolve => setImmediate(resolve));
+		const appliedWhileGated = appliedSeen;
+		release();
+		await done;
+
+		expect(promptRefreshFinished).toBe(true);
+		expect(appliedWhileGated).toBe(false);
+		expect(appliedSeen).toBe(true);
+	});
+	it("adds only the settings workspace delta and keeps session-added roots", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only"] },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only", "/settings/added"] },
+		});
+
+		const addWorkspaceDirectory = vi.fn(async () => "/settings/added");
+		const removeWorkspaceDirectory = vi.fn(async () => null);
+		const { refreshBaseSystemPrompt } = await runCommand(
+			settings,
+			{},
+			{
+				// The live merged list also carries a session-added --add-dir root.
+				getAdditionalDirectories: vi.fn(() => ["/settings/only", "/session/added"]),
+				addWorkspaceDirectory,
+				removeWorkspaceDirectory,
+			},
+		);
+
+		expect(addWorkspaceDirectory).toHaveBeenCalledTimes(1);
+		expect(addWorkspaceDirectory).toHaveBeenCalledWith("/settings/added");
+		// A wholesale replace would drop the session-added root; the delta
+		// application never removes anything here.
+		expect(removeWorkspaceDirectory).not.toHaveBeenCalled();
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("removes a settings workspace root that disappeared from disk", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only", "/settings/gone"] },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only"] },
+		});
+
+		const addWorkspaceDirectory = vi.fn(async () => null);
+		const removeWorkspaceDirectory = vi.fn(async () => "/settings/gone");
+		await runCommand(
+			settings,
+			{},
+			{
+				getAdditionalDirectories: vi.fn(() => ["/settings/only", "/settings/gone"]),
+				addWorkspaceDirectory,
+				removeWorkspaceDirectory,
+			},
+		);
+
+		expect(addWorkspaceDirectory).not.toHaveBeenCalled();
+		expect(removeWorkspaceDirectory).toHaveBeenCalledWith("/settings/gone");
+	});
+
+	it("preserves a session /advisor override when advisor.enabled is unchanged", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1", enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1", enabled: true } });
+
+		// The session ran /advisor off; the unchanged setting must not flip it
+		// back on during a reload.
+		const { setAdvisorEnabled } = await runCommand(settings, { isAdvisorEnabled: () => false });
+		expect(setAdvisorEnabled).not.toHaveBeenCalled();
+	});
+
+	it("preserves session-only service tiers when no tier setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+
+		// The live map carries a session-only /fast override; a no-op reload
+		// must not reset it to the settings default.
+		const { setServiceTierFamily } = await runCommand(settings, {
+			serviceTierByFamily: { openai: "priority" },
+		});
+		expect(setServiceTierFamily).not.toHaveBeenCalled();
+	});
+
+	it("pushes the config update after the model catalog refresh", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		const { notifyConfigChanged, refreshModels } = await runCommand(settings);
+		// notifyConfigChanged advertises the model list to hosts; a pre-refresh
+		// push would advertise the stale catalog on a models.yml-only change.
+		expect(refreshModels).toHaveBeenCalled();
+		expect(notifyConfigChanged.mock.invocationCallOrder[0]).toBeGreaterThan(
+			refreshModels.mock.invocationCallOrder[0],
+		);
 	});
 });
 
