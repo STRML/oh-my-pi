@@ -8579,6 +8579,9 @@ export class AgentSession {
 	 */
 	async #reapplyExtendedContextPolicy(): Promise<void> {
 		try {
+			// Same shared-registry rebind as refreshModels(): this listener can fire
+			// for any workspace while the registry's settings binding is global.
+			this.#modelRegistry.setSettings(this.settings);
 			await this.#modelRegistry.reapplyModelPolicies();
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
