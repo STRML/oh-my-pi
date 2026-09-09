@@ -82,6 +82,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
+import { replaySessionSettingSideEffects } from "../controllers/setting-side-effects";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -997,6 +998,12 @@ export class AcpAgent implements Agent {
 				});
 			},
 			notifyConfigChanged: async () => {
+				// The TUI adapter replays the reload allowlist through
+				// applySettingSideEffects; headless hosts have no components, so run
+				// the session-level subset — otherwise externalThinking,
+				// memory.backend, and the thinking-level default stay stale while
+				// /reload-settings reports success.
+				replaySessionSettingSideEffects(record.session);
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});

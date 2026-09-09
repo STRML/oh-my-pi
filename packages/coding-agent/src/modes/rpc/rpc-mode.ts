@@ -31,6 +31,7 @@ import {
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { replaySessionSettingSideEffects } from "../controllers/setting-side-effects";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -209,6 +210,17 @@ export async function tryRunRpcSkillCommand(
 	if (!invocation) return false;
 	await runRpcSkillCommand(session, invocation, streamingBehavior);
 	return { agentInvoked: true };
+}
+
+/**
+ * Applies the reload allowlist's session-level side effects, then emits the RPC
+ * `config_update` frame. RunRpcMode wires this as the builtin runtime's
+ * `notifyConfigChanged`, mirroring the TUI adapter's replay-before-notify
+ * contract; exported for tests.
+ */
+export function emitRpcConfigUpdate(session: AgentSession, output: (obj: object) => void): void {
+	replaySessionSettingSideEffects(session);
+	output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 }
 
 export function reportLocalOnlyPromptResult(input: {
@@ -1116,7 +1128,7 @@ export async function runRpcMode(
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
 					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						emitRpcConfigUpdate(session, output);
 					},
 				});
 				if (builtinResult !== false) {
