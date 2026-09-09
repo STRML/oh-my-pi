@@ -200,6 +200,57 @@ describe("AgentSession.refreshScopedModels active-model rebind", () => {
 		expect(await current.refreshScopedModels()).toBe(true);
 		expect(current.scopedModels.map(entry => entry.model.id)).toEqual(["m1", "m2"]);
 	});
+
+	it("reconciles model-dependent state and emits model_changed on an unscoped rebind", async () => {
+		const current = await createSession();
+		expect(current.agent.appendOnlyContext).toBeUndefined();
+		const events: string[] = [];
+		const unsubscribe = current.subscribe(event => {
+			if (event.type === "model_changed") events.push(event.type);
+		});
+
+		// A loopback baseUrl flips the append-only-context auto-enable
+		// predicate; the rebind must reconcile that state, not just swap the
+		// record, and notify subscribers afterward.
+		await writeModelsYml("http://127.0.0.1:8080/v1");
+		await current.refreshModels("offline");
+		expect(await current.refreshScopedModels()).toBe(true);
+
+		expect(current.model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
+		expect(current.agent.appendOnlyContext).toBeDefined();
+		expect(events).toEqual(["model_changed"]);
+		unsubscribe();
+	});
+
+	it("reconciles model-dependent state when the settings scope rebinds the active model", async () => {
+		const current = await createSession(undefined, Settings.isolated({ enabledModels: ["testprov/m1"] }));
+		expect(current.agent.appendOnlyContext).toBeUndefined();
+
+		// The active model is a scope member: the settings-resolved rebind must
+		// run the same reconcile sequence as the registry-backed path.
+		await writeModelsYml("http://127.0.0.1:8080/v1");
+		await current.refreshModels("offline");
+		expect(await current.refreshScopedModels()).toBe(true);
+
+		expect(current.model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
+		expect(current.agent.appendOnlyContext).toBeDefined();
+	});
+
+	it("rebinds an active model that fell out of the resolved settings scope", async () => {
+		const current = await createSession();
+
+		// Mid-session the scope no longer contains the active model, but the
+		// model stays active: its registry record must still follow the rebuilt
+		// catalog so the next request reads the reloaded metadata.
+		current.settings.override("enabledModels", ["testprov/m2"]);
+		await writeModelsYml("https://new-gateway.example.com/v1", ["m2"]);
+		await current.refreshModels("offline");
+		expect(await current.refreshScopedModels()).toBe(true);
+
+		expect(current.scopedModels.map(entry => entry.model.id)).toEqual(["m2"]);
+		expect(current.model?.id).toBe("m1");
+		expect(current.model?.baseUrl).toBe("https://new-gateway.example.com/v1");
+	});
 });
 
 describe("AgentSession.refreshModels shared-registry scoping", () => {

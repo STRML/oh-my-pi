@@ -5726,12 +5726,16 @@ export class AgentSession {
 		// edits the current model's metadata (baseUrl, compat, limits) rebuilds
 		// the registry into new objects with the same provider/id, and the next
 		// request must read them rather than the stale construction-time record.
+		// A scope member is re-adopted from the resolved scope; when the active
+		// model fell out of the resolved scope entirely, the registry-backed
+		// rebind still refreshes its record so requests keep the new metadata.
 		const current = this.agent.state.model;
 		if (current) {
 			const fresh = resolved.find(
 				entry => entry.model.provider === current.provider && entry.model.id === current.id,
 			)?.model;
-			if (fresh && fresh !== current) this.agent.setModel(fresh);
+			if (fresh) await this.#adoptRefreshedActiveModel(fresh);
+			else await this.#rebindActiveModelFromRegistry();
 		}
 		const mapped = toSessionScopedModels(resolved, this.settings);
 		if (mapped.length === 0) {
@@ -5760,8 +5764,29 @@ export class AgentSession {
 		const current = this.agent.state.model;
 		if (!current) return false;
 		const fresh = this.#modelRegistry.find(current.provider, current.id);
-		if (!fresh || fresh === current) return false;
+		if (!fresh) return false;
+		return this.#adoptRefreshedActiveModel(fresh);
+	}
+
+	/**
+	 * Point the agent at an already-resolved refreshed record for the same
+	 * provider/id. Same-selector metadata refreshes take the
+	 * `#rebindActiveModelAfterModelDiscovery` sequence (issue #10488), not
+	 * `#setModelWithProviderSessionReset`: a metadata-only swap must not close
+	 * warm codex/responses provider sessions, completions sessions re-key from
+	 * the live record's baseUrl on the next request anyway, and
+	 * `modelsAreEqual`'s provider/id comparison would suppress the
+	 * `model_changed` emit exactly when subscribers need it. Reconcile
+	 * model-dependent state (append-only context, Code Mode, think tool)
+	 * before the emit so the notification observes the reconciled session.
+	 */
+	async #adoptRefreshedActiveModel(fresh: Model): Promise<boolean> {
+		const current = this.agent.state.model;
+		if (!current || fresh === current) return false;
 		this.agent.setModel(fresh);
+		await this.#reconcileModelDependentState(current, fresh);
+		if (this.#isDisposed) return true;
+		this.#emit({ type: "model_changed" });
 		return true;
 	}
 
