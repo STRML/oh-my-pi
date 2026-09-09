@@ -161,7 +161,12 @@ export function snapshotReplaySettings(snapshotSettings: Settings): Map<string, 
 
 /**
  * Replays the allowlisted settings whose value changed since `before` against
- * `session` after a settings reload. The TUI adapter replays the full list
+ * `session` after a settings reload, resolving only after the async mutations
+ * (prompt rebuilds, think-tool re-registration, memory-backend swap) have
+ * settled — a protocol host must not acknowledge the reload, or accept the
+ * next prompt, while the previous tool set or memory backend is still live.
+ * Apply failures never reject the replay: they are routed to the logger just
+ * like the fire-and-forget path. The TUI adapter replays the full list
  * through {@link applySettingSideEffects} (component caches included); the
  * protocol hosts (ACP/RPC) have no interactive components, so the session
  * subset is what applies there — filtered through the same before/after diff
@@ -170,12 +175,17 @@ export function snapshotReplaySettings(snapshotSettings: Settings): Map<string, 
  * `persist: false` — the values were just loaded from disk, and a
  * project-overlay value must not be promoted into global config.
  */
-export function replaySessionSettingSideEffects(session: AgentSession, before: ReadonlyMap<string, unknown>): void {
+export async function replaySessionSettingSideEffects(
+	session: AgentSession,
+	before: ReadonlyMap<string, unknown>,
+): Promise<void> {
+	const pending: Promise<unknown>[] = [];
 	for (const id of REPLAYED_SETTING_IDS) {
 		const value = session.settings.get(id);
 		if (Bun.deepEquals(before.get(id), value)) continue;
-		applySessionSettingSideEffects(session, id, value, { persist: false });
+		applySessionSettingSideEffects(session, id, value, { persist: false, pending });
 	}
+	await Promise.all(pending);
 }
 
 /**

@@ -1007,8 +1007,10 @@ export class AcpAgent implements Agent {
 				// applySettingSideEffects; headless hosts have no components, so run
 				// the session-level subset — otherwise externalThinking,
 				// memory.backend, and the thinking-level default stay stale while
-				// /reload-settings reports success.
-				replaySessionSettingSideEffects(record.session, beforeReplay);
+				// /reload-settings reports success. Awaiting the replay keeps the
+				// host update (and the command's success response) behind the
+				// mutations actually landing.
+				await replaySessionSettingSideEffects(record.session, beforeReplay);
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});

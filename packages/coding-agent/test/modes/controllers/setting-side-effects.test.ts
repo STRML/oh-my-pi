@@ -183,7 +183,7 @@ describe("replaySessionSettingSideEffects", () => {
 		} as unknown as AgentSession;
 	}
 
-	it("applies session-level settings with persist=false and ignores TUI-only ids", () => {
+	it("applies session-level settings with persist=false and ignores TUI-only ids", async () => {
 		const thinkingLevels: Array<{ level: unknown; persist: boolean }> = [];
 		const thinkToolStates: boolean[] = [];
 		const session = stubSession({
@@ -200,13 +200,13 @@ describe("replaySessionSettingSideEffects", () => {
 		// The full allowlist is diffed: session-level ids whose value changed
 		// apply, every pure TUI id (autocompleteMaxVisible, statusLine.*, …) is
 		// skipped without needing any interactive-mode context.
-		replaySessionSettingSideEffects(session, beforeReplay);
+		await replaySessionSettingSideEffects(session, beforeReplay);
 
 		expect(thinkingLevels).toEqual([{ level: "low", persist: false }]);
 		expect(thinkToolStates).toEqual([true]);
 	});
 
-	it("skips unchanged ids so a session-only thinking level survives a no-op reload", () => {
+	it("skips unchanged ids so a session-only thinking level survives a no-op reload", async () => {
 		settings.set("defaultThinkingLevel", Effort.Low);
 		const beforeReplay = snapshotReplaySettings(settings);
 		const thinkingLevels: Array<{ level: unknown; persist: boolean }> = [];
@@ -216,7 +216,7 @@ describe("replaySessionSettingSideEffects", () => {
 
 		// Nothing changed since the snapshot: replaying would clobber the
 		// session-only override (Shift+Tab) with the unchanged disk default.
-		replaySessionSettingSideEffects(session, beforeReplay);
+		await replaySessionSettingSideEffects(session, beforeReplay);
 
 		expect(thinkingLevels).toEqual([]);
 	});
@@ -235,10 +235,7 @@ describe("replaySessionSettingSideEffects", () => {
 		});
 
 		try {
-			replaySessionSettingSideEffects(session, beforeReplay);
-			await Promise.resolve();
-			await Promise.resolve();
-			await Promise.resolve();
+			await replaySessionSettingSideEffects(session, beforeReplay);
 		} finally {
 			warn.mockRestore();
 		}
@@ -246,7 +243,7 @@ describe("replaySessionSettingSideEffects", () => {
 		expect(warnings.some(w => w.includes("Failed to apply external thinking: Error: boom"))).toBe(true);
 	});
 
-	it("applies memory.backend through the session's backend reconciler", () => {
+	it("applies memory.backend through the session's backend reconciler", async () => {
 		let applied = 0;
 		const session = stubSession({
 			applyMemoryBackend: async () => {
@@ -256,9 +253,63 @@ describe("replaySessionSettingSideEffects", () => {
 		const beforeReplay = snapshotReplaySettings(settings);
 		settings.set("memory.backend", "local");
 
-		replaySessionSettingSideEffects(session, beforeReplay);
+		await replaySessionSettingSideEffects(session, beforeReplay);
 
 		expect(applied).toBe(1);
+	});
+
+	it("resolves only after every replayed session mutation settles", async () => {
+		let releaseThinkTool!: (enabled: boolean) => void;
+		const thinkToolGate = new Promise<boolean>(resolve => {
+			releaseThinkTool = resolve;
+		});
+		let releaseMemoryBackend!: () => void;
+		const memoryGate = new Promise<void>(resolve => {
+			releaseMemoryBackend = resolve;
+		});
+		let thinkSettled = false;
+		let memorySettled = false;
+		let replaySettled = false;
+		const session = stubSession({
+			setThinkToolEnabled: async () => {
+				await thinkToolGate;
+				thinkSettled = true;
+				return true;
+			},
+			applyMemoryBackend: async () => {
+				await memoryGate;
+				memorySettled = true;
+			},
+		});
+		const beforeReplay = snapshotReplaySettings(settings);
+		settings.set("externalThinking", true);
+		settings.set("memory.backend", "local");
+
+		const replayed = replaySessionSettingSideEffects(session, beforeReplay);
+		void replayed.then(() => {
+			replaySettled = true;
+		});
+
+		// Deterministic gates, no wall-clock sleep: while both mutations are in
+		// flight the replay must still be pending — a fire-and-forget replay
+		// would have resolved here and let the host acknowledge the reload
+		// before the tool set / backend actually changed.
+		await Promise.resolve();
+		expect(thinkSettled).toBe(false);
+		expect(memorySettled).toBe(false);
+		expect(replaySettled).toBe(false);
+
+		// Settling one mutation must not settle the replay: every replayed
+		// apply has to land first.
+		releaseMemoryBackend();
+		await Promise.resolve();
+		expect(memorySettled).toBe(true);
+		expect(replaySettled).toBe(false);
+
+		releaseThinkTool(true);
+		await replayed;
+		expect(thinkSettled).toBe(true);
+		expect(replaySettled).toBe(true);
 	});
 
 	it("applies one session-level setting on demand for the selector path", async () => {

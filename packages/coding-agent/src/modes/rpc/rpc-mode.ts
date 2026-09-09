@@ -213,18 +213,20 @@ export async function tryRunRpcSkillCommand(
 }
 
 /**
- * Applies the reload allowlist's changed session-level side effects, then
- * emits the RPC `config_update` frame. RunRpcMode wires this as the builtin
- * runtime's `notifyConfigChanged` with a `snapshotReplaySettings` snapshot
- * taken before the command runs, mirroring the TUI adapter's
- * replay-before-notify contract; exported for tests.
+ * Applies the reload allowlist's changed session-level side effects and
+ * resolves after they have settled, then emits the RPC `config_update` frame
+ * — the host's acknowledgment must not precede the mutations (think tool,
+ * memory backend) landing, or the next prompt runs against the old tool set.
+ * RunRpcMode wires this as the builtin runtime's `notifyConfigChanged` with a
+ * `snapshotReplaySettings` snapshot taken before the command runs, mirroring
+ * the TUI adapter's replay-before-notify contract; exported for tests.
  */
-export function emitRpcConfigUpdate(
+export async function emitRpcConfigUpdate(
 	session: AgentSession,
 	output: (obj: object) => void,
 	beforeReplay: ReadonlyMap<string, unknown>,
-): void {
-	replaySessionSettingSideEffects(session, beforeReplay);
+): Promise<void> {
+	await replaySessionSettingSideEffects(session, beforeReplay);
 	output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 }
 
@@ -1135,9 +1137,7 @@ export async function runRpcMode(
 					notifyTitleChanged: async () => {
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
-					notifyConfigChanged: async () => {
-						emitRpcConfigUpdate(session, output, beforeReplay);
-					},
+					notifyConfigChanged: () => emitRpcConfigUpdate(session, output, beforeReplay),
 				});
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {
