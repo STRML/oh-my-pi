@@ -6,9 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sameScopedModelCycle, toSessionScopedModels } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { REPLAYED_SETTING_IDS } from "@oh-my-pi/pi-coding-agent/modes/controllers/setting-side-effects";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -346,13 +344,6 @@ describe("/reload-settings slash command", () => {
 		}
 	});
 
-	it("replays only ids that are valid setting paths", async () => {
-		const settings = await Settings.init({ cwd: projectDir, agentDir });
-		for (const id of REPLAYED_SETTING_IDS) {
-			expect(() => settings.get(id as SettingPath)).not.toThrow();
-		}
-	});
-
 	it("runs the full reload through the TUI adapter without aborting", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" }, autocompleteMaxVisible: 7 });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -411,6 +402,10 @@ describe("/reload-settings slash command", () => {
 				setAutoCompactEnabled: vi.fn(),
 				updateSettings: vi.fn(),
 			},
+			eventController: {
+				refreshIdleCompactionTimer: vi.fn(),
+				refreshIdleRecapTimer: vi.fn(),
+			},
 			chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 			showStatus: vi.fn(),
 			refreshSlashCommandState: vi.fn(),
@@ -418,6 +413,10 @@ describe("/reload-settings slash command", () => {
 		const result = await executeBuiltinSlashCommand("/reload-settings", { ctx } as never);
 		expect(result).toBe(true);
 		expect(editorSetAutocomplete).toHaveBeenCalledWith(7);
+		// Idle timers cache their delay and captured threshold, so the reload
+		// must re-arm them or a disabled task can still fire.
+		expect(ctx.eventController.refreshIdleCompactionTimer).toHaveBeenCalled();
+		expect(ctx.eventController.refreshIdleRecapTimer).toHaveBeenCalled();
 	});
 
 	it("re-resolves the settings-derived model scope and reports it", async () => {

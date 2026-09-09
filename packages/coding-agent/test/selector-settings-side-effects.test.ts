@@ -145,6 +145,28 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("re-arms idle compaction when an idle compaction setting changes in /settings", () => {
+		const refreshIdleCompactionTimer = vi.fn();
+		const controller = new SelectorController({
+			eventController: { refreshIdleCompactionTimer },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("compaction.idleEnabled", false);
+
+		expect(refreshIdleCompactionTimer).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-arms the idle recap when a recap setting changes in /settings", () => {
+		const refreshIdleRecapTimer = vi.fn();
+		const controller = new SelectorController({
+			eventController: { refreshIdleRecapTimer },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("recap.enabled", false);
+
+		expect(refreshIdleRecapTimer).toHaveBeenCalledTimes(1);
+	});
+
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {

@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- `/reload-settings` now re-arms the idle compaction and idle recap timers, so disabling them or changing their threshold or delay takes effect immediately instead of leaving the previously armed timer running.
 - `/reload-settings` now applies async-execution settings live: `async.enabled`, `bash.autoBackground.*`, and `async.maxJobs` reach the running bash tool and job manager instead of waiting for a restart.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Unset `tiny` model roles now honor the configured `@smol` fallback in direct execution and the `/models` Roles view ([#11311](https://github.com/can1357/oh-my-pi/issues/11311)).

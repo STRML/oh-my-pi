@@ -1,5 +1,5 @@
 import { type ResizeScrollbackMode, setTuiTight } from "@oh-my-pi/pi-tui";
-import { settings } from "../../config/settings";
+import { settings, type SettingPath } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { setColorBlindMode, setMarkdownMermaidRendering, setSymbolPreset, setTheme } from "../../modes/theme/theme";
 import type { ConfiguredThinkingLevel } from "../../thinking";
@@ -51,6 +51,11 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.hyperlinks",
 	"tui.maxInlineImages",
 	"composer.shape",
+	"compaction.idleEnabled",
+	"compaction.idleThresholdTokens",
+	"compaction.idleTimeoutSeconds",
+	"recap.enabled",
+	"recap.idleSeconds",
 	"defaultThinkingLevel",
 	"personality",
 	"tools.xdevDocs",
@@ -64,7 +69,7 @@ export const REPLAYED_SETTING_IDS = [
 	"statusLine.sessionAccent",
 	"statusLine.transparent",
 	"statusLine.compactThinkingLevel",
-] as const;
+] as const satisfies readonly SettingPath[];
 
 /**
  * Applies the live side effects of one setting change against the interactive
@@ -104,6 +109,10 @@ export function applySettingSideEffects(
 		case "compaction.idleThresholdTokens":
 		case "compaction.idleTimeoutSeconds":
 			ctx.eventController.refreshIdleCompactionTimer();
+			break;
+		case "recap.enabled":
+		case "recap.idleSeconds":
+			ctx.eventController.refreshIdleRecapTimer();
 			break;
 		case "composer.shape":
 			ctx.syncComposerShape();
