@@ -53,6 +53,37 @@ const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
 	"tools.format": true,
 	// sdk.ts construction → Agent `#abortOnFabricatedToolResult`.
 	"tools.abortOnFabricatedResult": true,
+	// createTools() filters the default tool roster through isToolAllowed
+	// (tools/index.ts) once at session start and no live registry rebuild
+	// exists, so a flipped gate leaves the startup roster until restart.
+	// security.enabled also feeds the prompt (PROMPT_KEYS), which still
+	// applies live; the restart note covers the roster half.
+	"bash.enabled": true,
+	"glob.enabled": true,
+	"grep.enabled": true,
+	"github.enabled": true,
+	"astGrep.enabled": true,
+	"astEdit.enabled": true,
+	"web_search.enabled": true,
+	"security.enabled": true,
+	"ask.enabled": true,
+	"debug.enabled": true,
+	"todo.enabled": true,
+	"lsp.enabled": true,
+	"checkpoint.enabled": true,
+	"autolearn.enabled": true,
+	// The rebucketed rule set reaches stream matching and rule:// live
+	// (setActiveRules in the handler below), but the sdk prompt closure keeps
+	// its construction-time buckets: bucketRules routes TTSR-conditioned
+	// rules through TtsrManager.addRule, which rejects every rule while
+	// ttsr.enabled is false, so the always-apply/rulebook split — and with it
+	// the injected prompt content — differs per key and stays stale until
+	// restart. Deliberately absent: task.maxRecursionDepth and goal.enabled
+	// (live spawn-time/lazy-registration paths) and memory.backend and
+	// externalThinking (live via the host setting replay).
+	"ttsr.enabled": true,
+	"ttsr.builtinRules": true,
+	"ttsr.disabledRules": true,
 };
 
 export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -78,6 +109,21 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				!Bun.deepEquals(before.get("enabledProviders"), runtime.settings.get("enabledProviders"))
 			) {
 				reconcileProviderSets(runtime.settings);
+			}
+			// Plugin/extension surfaces (skills, file slash commands, task
+			// agents, capability caches, MCP servers) are discovered through
+			// caches seeded at startup; an edited extensions path list or
+			// disabledExtensions set keeps filtering on the startup view. The
+			// runtime hook is the same pipeline /reload-plugins runs, and the
+			// session refreshSkills inside it rebuilds the base prompt, so
+			// extension-driven skill changes reach the prompt in the same pass.
+			// (Extension tools/hooks bound to the runner at session construction
+			// still need a restart; the discovery-driven surfaces do not.)
+			if (
+				!Bun.deepEquals(before.get("extensions"), runtime.settings.get("extensions")) ||
+				!Bun.deepEquals(before.get("disabledExtensions"), runtime.settings.get("disabledExtensions"))
+			) {
+				await runtime.reloadPlugins();
 			}
 			// Refresh AFTER the settings reload so provider discovery sees the new
 			// disabled-provider set: an edit that enables a discovery-backed
@@ -344,9 +390,11 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				// inventory. Re-run the same discovery + bucketRules funnel the
 				// session used at construction and replace the active rule snapshot.
 				// Slash commands only run in main sessions, so the main agent name
-				// matches the construction pass. (The sdk prompt closure keeps its
-				// construction-time buckets until restart; stream matching and
-				// rule:// go live immediately.)
+				// matches the construction pass. Stream matching and rule:// go
+				// live immediately; the sdk prompt closure keeps its
+				// construction-time buckets, so these keys are reported
+				// restart-required (see RESTART_REQUIRED_KEYS) while the
+				// rebucket itself still applies.
 				const ttsrRegistrationChanged =
 					before.get("ttsr.enabled") !== runtime.settings.get("ttsr.enabled") ||
 					before.get("ttsr.builtinRules") !== runtime.settings.get("ttsr.builtinRules") ||

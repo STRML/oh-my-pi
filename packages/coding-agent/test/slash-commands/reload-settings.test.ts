@@ -60,6 +60,7 @@ describe("/reload-settings slash command", () => {
 		output: Mock<(message?: string) => void>;
 		notifyConfigChanged: Mock<() => void>;
 		refreshModels: Mock<() => Promise<void>>;
+		reloadPlugins: Mock<() => Promise<void>>;
 		reapplyModelRoles: Mock<() => void>;
 		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
 		reconcileToolSettings: Mock<() => Promise<boolean>>;
@@ -96,6 +97,7 @@ describe("/reload-settings slash command", () => {
 		expect(command).toBeDefined();
 		const output = vi.fn();
 		const notifyConfigChanged = vi.fn();
+		const reloadPlugins = vi.fn(async () => {});
 		const refreshModels = vi.fn(async () => {});
 		const refreshScopedModels = vi.fn(async () => {});
 		const reapplyModelRoles = vi.fn();
@@ -152,13 +154,14 @@ describe("/reload-settings slash command", () => {
 			cwd: projectDir,
 			output,
 			refreshCommands: async () => {},
-			reloadPlugins: async () => {},
+			reloadPlugins,
 			notifyConfigChanged,
 		} as unknown as SlashCommandRuntime;
 		await command!.handle?.({ name: "reload-settings", args: "", text: "/reload-settings" }, runtime);
 		return {
 			output,
 			notifyConfigChanged,
+			reloadPlugins,
 			refreshModels: session.refreshModels as unknown as Mock<() => Promise<void>>,
 			reapplyModelRoles: session.reapplyModelRoles as unknown as Mock<() => void>,
 			setAdvisorEnabled,
@@ -925,6 +928,105 @@ describe("/reload-settings slash command", () => {
 		// The reload replaces the active rule set, so the seeded registration
 		// must not survive a disabledRules entry naming it.
 		expect(manager.getRules().map(rule => rule.name)).not.toContain("reload-rebucket-seeded");
+	});
+
+	it("runs the plugin reload pipeline when an extensions setting changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledExtensions: ["extension-module:legacy"] });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledExtensions: [] });
+
+		const { reloadPlugins } = await runCommand(settings);
+		expect(reloadPlugins).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves the plugin pipeline alone when no extensions setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, disabledExtensions: ["extension-module:legacy"] });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		const { reloadPlugins } = await runCommand(settings);
+		expect(reloadPlugins).not.toHaveBeenCalled();
+	});
+
+	it("reports construction-only tool enablement as restart-required instead of applied", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			bash: { enabled: true },
+			grep: { enabled: true },
+			todo: { enabled: true },
+			autolearn: { enabled: true },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "2" },
+			bash: { enabled: false },
+			grep: { enabled: false },
+			todo: { enabled: false },
+			autolearn: { enabled: false },
+		});
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		// Control: a live-appliable key changed in the same reload still
+		// reports as applied.
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// isToolAllowed filters these once in createTools() and no live
+		// registry rebuild exists, so claiming them applied would be false.
+		for (const key of ["bash.enabled", "grep.enabled", "todo.enabled", "autolearn.enabled"]) {
+			expect(appliedSection).not.toContain(key);
+			expect(restartSection).toContain(key);
+		}
+	});
+
+	it("reports ttsr bucketing keys as restart-required while the rebucket still applies", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		const manager = new TtsrManager(settings.getGroup("ttsr"));
+		const seeded = {
+			name: "reload-restart-required",
+			path: "/fixture/reload-restart-required.md",
+			content: "seeded",
+			condition: ["RESTART-REQUIRED-"],
+			_source: createSourceMeta("fixture", "/fixture/reload-restart-required.md", "project"),
+		} as Rule;
+		expect(manager.addRule(seeded)).toBe(true);
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			ttsr: { enabled: true, disabledRules: ["reload-restart-required"] },
+		});
+
+		const { output } = await runCommand(settings, {
+			ttsrManager: manager,
+			updateTtsrSettings: (group: unknown) => manager.updateSettings(group as TtsrSettings),
+		});
+
+		// Stream matching still sees the re-bucket: the disabled rule must be
+		// gone from the live manager even though the report defers the prompt
+		// half to a restart.
+		expect(manager.getRules().map(rule => rule.name)).not.toContain("reload-restart-required");
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		expect(appliedSection).not.toContain("ttsr.disabledRules");
+		expect(restartSection).toContain("ttsr.disabledRules");
+	});
+
+	it("reports ttsr.enabled as restart-required because its gate shifts the prompt buckets", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { enabled: true } });
+
+		const { output } = await runCommand(settings);
+
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		expect(appliedSection).not.toContain("ttsr.enabled");
+		expect(restartSection).toContain("ttsr.enabled");
 	});
 
 	it("awaits async setting replays before reporting the reload applied", async () => {
