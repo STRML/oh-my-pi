@@ -1,7 +1,9 @@
-import { type ResizeScrollbackMode, setTuiTight } from "@oh-my-pi/pi-tui";
+import { type ResizeScrollbackMode, setTerminalTextSizing, TERMINAL, setTuiTight } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { settings, type SettingPath } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { setColorBlindMode, setMarkdownMermaidRendering, setSymbolPreset, setTheme } from "../../modes/theme/theme";
+import type { AgentSession } from "../../session/agent-session";
 import type { ConfiguredThinkingLevel } from "../../thinking";
 import {
 	isSearchProviderId,
@@ -10,6 +12,7 @@ import {
 	setSearchProviderOrder,
 } from "../../tools";
 import { applyHyperlinkSetting } from "../../tui/hyperlink";
+import { setTerminalTitleStateEnabled } from "../../utils/title-generator";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -30,6 +33,12 @@ export interface SettingSideEffectOptions {
 	 * undefined.
 	 */
 	pending?: Promise<unknown>[];
+	/**
+	 * Failure sink for async applies. The interactive mode surfaces apply
+	 * failures in the transcript; protocol hosts (ACP/RPC) have no UI and
+	 * omit the sink, which routes failures to the logger.
+	 */
+	onError?: (message: string) => void;
 }
 
 /**
@@ -57,6 +66,9 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.resizeScrollback",
 	"tui.hyperlinks",
 	"tui.maxInlineImages",
+	"showHardwareCursor",
+	"tui.textSizing",
+	"tui.titleState",
 	"composer.shape",
 	"compaction.idleEnabled",
 	"compaction.idleThresholdTokens",
@@ -77,7 +89,79 @@ export const REPLAYED_SETTING_IDS = [
 	"statusLine.transparent",
 	"statusLine.compactThinkingLevel",
 	"statusLine.contextLine",
+	"statusLine.leftSegments",
+	"statusLine.rightSegments",
+	"statusLine.segmentOptions",
 ] as const satisfies readonly SettingPath[];
+
+/**
+ * Applies the session-level side effects of one setting change against any
+ * {@link AgentSession} — no interactive-mode context required. This is the
+ * session subset of {@link applySettingSideEffects}'s switch, kept here so the
+ * TUI path and the headless protocol hosts share one implementation instead of
+ * drifting. Settings without a session-level effect (pure TUI caches, status
+ * line, discovery) are ignored.
+ */
+export function applySessionSettingSideEffects(
+	session: AgentSession,
+	id: string,
+	value: unknown,
+	options: SettingSideEffectOptions = {},
+): void {
+	const report = (message: string): void => {
+		if (options.onError) options.onError(message);
+		else logger.warn(message);
+	};
+	switch (id) {
+		case "thinkingLevel":
+		case "defaultThinkingLevel":
+			session.setThinkingLevel(value as ConfiguredThinkingLevel, options.persist ?? true);
+			break;
+		case "personality": {
+			const rebuild = session.refreshBaseSystemPrompt().catch(err => {
+				report(`Failed to apply personality: ${err}`);
+			});
+			options.pending?.push(rebuild);
+			break;
+		}
+		case "tools.xdevDocs": {
+			const rebuild = session.refreshBaseSystemPrompt().catch(err => {
+				report(`Failed to apply xd:// prompt docs setting: ${err}`);
+			});
+			options.pending?.push(rebuild);
+			break;
+		}
+		case "memory.backend": {
+			const backend = session.applyMemoryBackend().catch(err => {
+				report(`Failed to apply memory backend: ${err}`);
+			});
+			options.pending?.push(backend);
+			break;
+		}
+		case "externalThinking": {
+			const thinkTool = session.setThinkToolEnabled(value as boolean).catch(err => {
+				report(`Failed to apply external thinking: ${err}`);
+			});
+			options.pending?.push(thinkTool);
+			break;
+		}
+	}
+}
+
+/**
+ * Replays every allowlisted setting's session-level side effect against
+ * `session` after a settings reload. The TUI adapter replays the full list
+ * through {@link applySettingSideEffects} (component caches included); the
+ * protocol hosts (ACP/RPC) have no interactive components, so the session
+ * subset is what applies there. Always `persist: false` — the values were just
+ * loaded from disk, and a project-overlay value must not be promoted into
+ * global config.
+ */
+export function replaySessionSettingSideEffects(session: AgentSession): void {
+	for (const id of REPLAYED_SETTING_IDS) {
+		applySessionSettingSideEffects(session, id, session.settings.get(id), { persist: false });
+	}
+}
 
 /**
  * Applies the live side effects of one setting change against the interactive
@@ -147,36 +231,19 @@ export function applySettingSideEffects(
 			break;
 		case "thinkingLevel":
 		case "defaultThinkingLevel":
-			ctx.session.setThinkingLevel(value as ConfiguredThinkingLevel, persist);
+			applySessionSettingSideEffects(ctx.session, id, value, { persist, onError: msg => ctx.showError(msg) });
 			ctx.statusLine.invalidate();
 			ctx.updateEditorBorderColor();
 			break;
-		case "personality": {
-			const rebuild = ctx.session.refreshBaseSystemPrompt().catch(err => {
-				ctx.showError(`Failed to apply personality: ${err}`);
+		case "personality":
+		case "tools.xdevDocs":
+		case "memory.backend":
+		case "externalThinking":
+			applySessionSettingSideEffects(ctx.session, id, value, {
+				persist,
+				onError: msg => ctx.showError(msg),
+				pending: options.pending,
 			});
-			options.pending?.push(rebuild);
-			break;
-		}
-		case "tools.xdevDocs": {
-			const rebuild = ctx.session.refreshBaseSystemPrompt().catch(err => {
-				ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
-			});
-			options.pending?.push(rebuild);
-			break;
-		}
-		case "memory.backend": {
-			const backend = ctx.session.applyMemoryBackend().catch(err => {
-				ctx.showError(`Failed to apply memory backend: ${err}`);
-			});
-			options.pending?.push(backend);
-			break;
-		}
-		case "externalThinking": {
-			const thinkTool = ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
-				ctx.showError(`Failed to apply external thinking: ${err}`);
-			});
-			options.pending?.push(thinkTool);
 			break;
 		}
 
@@ -290,6 +357,21 @@ export function applySettingSideEffects(
 		case "tui.maxInlineImages":
 			ctx.ui.setMaxInlineImages(typeof value === "number" ? value : Number(value));
 			break;
+		case "showHardwareCursor":
+			ctx.ui.setShowHardwareCursor(value === true);
+			ctx.editor.setUseTerminalCursor(value === true);
+			break;
+		case "tui.textSizing":
+			// Same resolve as startup: OSC 66 text-sizing is Kitty-only, so gate the
+			// setting on the terminal's static capability instead of emitting raw
+			// escape sequences on terminals without support.
+			setTerminalTextSizing(value === true && TERMINAL.supportsTextSizing);
+			ctx.ui.invalidate();
+			ctx.ui.requestRender();
+			break;
+		case "tui.titleState":
+			setTerminalTitleStateEnabled(value === true);
+			break;
 
 		case "tui.renderMermaid": {
 			setMarkdownMermaidRendering(value as boolean);
@@ -368,6 +450,9 @@ export function applySettingSideEffects(
 		case "statusLine.transparent":
 		case "statusLine.compactThinkingLevel":
 		case "statusLine.contextLine":
+		case "statusLine.leftSegments":
+		case "statusLine.rightSegments":
+		case "statusLine.segmentOptions":
 		case "statusLineSegments":
 		case "statusLineModelThinking":
 		case "statusLinePathAbbreviate":

@@ -1,0 +1,243 @@
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui";
+import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	applySessionSettingSideEffects,
+	applySettingSideEffects,
+	REPLAYED_SETTING_IDS,
+	replaySessionSettingSideEffects,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/setting-side-effects";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import {
+	getTerminalTitleStateEnabled,
+	setTerminalTitleStateEnabled,
+} from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import type { AgentSession } from "../../../src/session/agent-session";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
+
+describe("applySettingSideEffects replay coverage", () => {
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
+
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		tempDir = TempDir.createSync("@pi-setting-side-effects-");
+		setAgentDir(tempDir.path());
+		await Settings.init({ agentDir: tempDir.path(), inMemory: true });
+	});
+
+	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		await tempDir?.remove();
+	});
+
+	it("allowlists every cached value this suite pins a replay path for", () => {
+		// The replay loop only visits allowlisted ids; an id missing here keeps
+		// the matching consumer cache stale after /reload-settings.
+		for (const id of [
+			"showHardwareCursor",
+			"tui.textSizing",
+			"tui.titleState",
+			"statusLine.leftSegments",
+			"statusLine.rightSegments",
+			"statusLine.segmentOptions",
+		] as const) {
+			expect(REPLAYED_SETTING_IDS).toContain(id);
+		}
+	});
+
+	it("replays statusLine segment keys through the shared status line apply", () => {
+		settings.set("statusLine.leftSegments", ["model"]);
+		settings.set("statusLine.rightSegments", ["token_total"]);
+		settings.set("statusLine.segmentOptions", { model: { showSpeed: true } });
+
+		const updates: Record<string, unknown>[] = [];
+		const ctx = {
+			statusLine: { updateSettings: (next: Record<string, unknown>) => updates.push(next) },
+			ui: { requestRender: () => {} },
+		} as unknown as InteractiveModeContext;
+
+		for (const id of ["statusLine.leftSegments", "statusLine.rightSegments", "statusLine.segmentOptions"]) {
+			applySettingSideEffects(ctx, id, settings.get(id as never), { persist: false });
+		}
+
+		expect(updates).toHaveLength(3);
+		expect(updates[2]).toMatchObject({
+			leftSegments: ["model"],
+			rightSegments: ["token_total"],
+			segmentOptions: { model: { showSpeed: true } },
+		});
+	});
+
+	it("replays showHardwareCursor into the TUI cursor mode and editor glyph mode", () => {
+		const setShowHardwareCursor = vi.fn();
+		const editorCursorModes: boolean[] = [];
+		const ctx = {
+			ui: {
+				setShowHardwareCursor,
+				getShowHardwareCursor: () => false,
+			},
+			editor: { setUseTerminalCursor: (use: boolean) => editorCursorModes.push(use) },
+		} as unknown as InteractiveModeContext;
+
+		applySettingSideEffects(ctx, "showHardwareCursor", false, { persist: false });
+
+		expect(setShowHardwareCursor).toHaveBeenCalledWith(false);
+		expect(editorCursorModes).toEqual([false]);
+	});
+
+	it("replays tui.textSizing gated on the terminal's text-sizing capability", () => {
+		const capability = TERMINAL as unknown as { supportsTextSizing: boolean };
+		const originalCapability = capability.supportsTextSizing;
+		const originalSizing = TERMINAL.textSizing;
+		capability.supportsTextSizing = true;
+		try {
+			const ctx = { ui: { invalidate: () => {}, requestRender: () => {} } } as unknown as InteractiveModeContext;
+
+			applySettingSideEffects(ctx, "tui.textSizing", true, { persist: false });
+			expect(TERMINAL.textSizing).toBe(true);
+
+			applySettingSideEffects(ctx, "tui.textSizing", false, { persist: false });
+			expect(TERMINAL.textSizing).toBe(false);
+		} finally {
+			capability.supportsTextSizing = originalCapability;
+			setTerminalTextSizing(originalSizing);
+		}
+	});
+
+	it("replays tui.titleState into the terminal title run-state gate", () => {
+		const ctx = {} as unknown as InteractiveModeContext;
+		setTerminalTitleStateEnabled(true);
+		try {
+			applySettingSideEffects(ctx, "tui.titleState", false, { persist: false });
+			expect(getTerminalTitleStateEnabled()).toBe(false);
+
+			applySettingSideEffects(ctx, "tui.titleState", true, { persist: false });
+			expect(getTerminalTitleStateEnabled()).toBe(true);
+		} finally {
+			setTerminalTitleStateEnabled(true);
+		}
+	});
+
+	it("routes session-level apply failures to showError in interactive mode", async () => {
+		const refreshBaseSystemPrompt = vi.fn(async () => {
+			throw new Error("boom");
+		});
+		const showError = vi.fn();
+		const ctx = { session: { refreshBaseSystemPrompt }, showError } as unknown as InteractiveModeContext;
+
+		applySettingSideEffects(ctx, "personality", "concise");
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(showError).toHaveBeenCalledWith("Failed to apply personality: Error: boom");
+	});
+});
+
+describe("replaySessionSettingSideEffects", () => {
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
+
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		tempDir = TempDir.createSync("@pi-setting-side-effects-");
+		setAgentDir(tempDir.path());
+		await Settings.init({ agentDir: tempDir.path(), inMemory: true });
+	});
+
+	afterEach(async () => {
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		await tempDir?.remove();
+	});
+
+	function stubSession(overrides: Record<string, unknown> = {}): AgentSession {
+		return {
+			settings,
+			setThinkingLevel: () => {},
+			refreshBaseSystemPrompt: async () => {},
+			applyMemoryBackend: async () => {},
+			setThinkToolEnabled: async () => true,
+			...overrides,
+		} as unknown as AgentSession;
+	}
+
+	it("applies session-level settings with persist=false and ignores TUI-only ids", () => {
+		const thinkingLevels: Array<{ level: unknown; persist: boolean }> = [];
+		const thinkToolStates: boolean[] = [];
+		const session = stubSession({
+			setThinkingLevel: (level: unknown, persist: boolean) => thinkingLevels.push({ level, persist }),
+			setThinkToolEnabled: async (enabled: boolean) => {
+				thinkToolStates.push(enabled);
+				return true;
+			},
+		});
+		settings.set("defaultThinkingLevel", Effort.Low);
+		settings.set("externalThinking", true);
+
+		// The full allowlist is visited: session-level ids apply, every pure TUI
+		// id (autocompleteMaxVisible, statusLine.*, …) must be skipped without
+		// needing any interactive-mode context.
+		replaySessionSettingSideEffects(session);
+
+		expect(thinkingLevels).toEqual([{ level: "low", persist: false }]);
+		expect(thinkToolStates).toEqual([true]);
+	});
+
+	it("logs apply failures through the logger when no error sink is supplied", async () => {
+		const session = stubSession({
+			setThinkToolEnabled: async () => {
+				throw new Error("boom");
+			},
+		});
+		settings.set("externalThinking", true);
+		const warnings: string[] = [];
+		const warn = spyOn(logger, "warn").mockImplementation((...parts: unknown[]) => {
+			warnings.push(parts.map(String).join(" "));
+		});
+
+		try {
+			replaySessionSettingSideEffects(session);
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		} finally {
+			warn.mockRestore();
+		}
+
+		expect(warnings.some(w => w.includes("Failed to apply external thinking: Error: boom"))).toBe(true);
+	});
+
+	it("applies memory.backend through the session's backend reconciler", () => {
+		let applied = 0;
+		const session = stubSession({
+			applyMemoryBackend: async () => {
+				applied++;
+			},
+		});
+		settings.set("memory.backend", "local");
+
+		replaySessionSettingSideEffects(session);
+
+		expect(applied).toBe(1);
+	});
+
+	it("applies one session-level setting on demand for the selector path", async () => {
+		const prompts: number[] = [];
+		const session = stubSession({
+			refreshBaseSystemPrompt: async () => {
+				prompts.push(1);
+			},
+		});
+
+		applySessionSettingSideEffects(session, "tools.xdevDocs", "catalog");
+
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(prompts).toEqual([1]);
+	});
+});
