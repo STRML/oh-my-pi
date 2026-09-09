@@ -1729,6 +1729,54 @@ describe("ModelRegistry", () => {
 			expect(disabledProbeUrls).toEqual([]);
 		});
 	});
+	describe("settings rebind", () => {
+		test("setSettings rebinds disabled-provider policy for a shared registry", async () => {
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			await authStorage.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_test_token_for_rebind",
+					refresh: "ghu_test_token_for_rebind",
+					expires: Date.now() + 60_000,
+				},
+			]);
+			// ACP shape: one registry shared across workspaces, each with a
+			// cloned Settings; the registry starts bound to the startup clone.
+			const startupSettings = Settings.isolated({ disabledProviders: ["github-copilot", "ollama"] });
+			const workspaceSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: startupSettings });
+
+			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(false);
+			expect(registry.getDiscoverableProviders()).not.toContain("ollama");
+			expect(registry.hasProvider("ollama")).toBe(false);
+
+			registry.setSettings(workspaceSettings);
+			await registry.reapplyModelPolicies();
+
+			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(true);
+			expect(registry.getDiscoverableProviders()).toContain("ollama");
+			expect(registry.hasProvider("ollama")).toBe(true);
+		});
+
+		test("setSettings rebinds extendedContext window policy for a shared registry", async () => {
+			const startupSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: startupSettings });
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			registry.setSettings(Settings.isolated({ extendedContext: true }));
+			await registry.reapplyModelPolicies();
+
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+		});
+	});
+
 	describe("extended context", () => {
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
 			const testSettings = Settings.isolated();

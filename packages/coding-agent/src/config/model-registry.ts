@@ -432,6 +432,15 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Re-binds the settings this registry reads policy and discovery flags from.
+	 * ACP workspaces each own a cloned Settings instance while sharing one
+	 * registry, so a session refresh must rebind before recomputing policies.
+	 */
+	setSettings(settings: Settings): void {
+		this.#settings = settings;
+	}
+
+	/**
 	 * Rebuild the catalog after a policy-affecting setting change (e.g.
 	 * `extendedContext`). Forces the static reload past the models.yml mtime
 	 * gate, then restores runtime-discovered models from the SQLite cache —
