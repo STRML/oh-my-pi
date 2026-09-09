@@ -69,6 +69,7 @@ export const REPLAYED_SETTING_IDS = [
 	"statusLine.sessionAccent",
 	"statusLine.transparent",
 	"statusLine.compactThinkingLevel",
+	"statusLine.contextLine",
 ] as const satisfies readonly SettingPath[];
 
 /**
@@ -349,6 +350,7 @@ export function applySettingSideEffects(
 		case "statusLine.sessionAccent":
 		case "statusLine.transparent":
 		case "statusLine.compactThinkingLevel":
+		case "statusLine.contextLine":
 		case "statusLineSegments":
 		case "statusLineModelThinking":
 		case "statusLinePathAbbreviate":
@@ -370,6 +372,7 @@ export function applySettingSideEffects(
 				transparent: settings.get("statusLine.transparent"),
 				segmentOptions: settings.get("statusLine.segmentOptions"),
 				compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+				contextLine: settings.get("statusLine.contextLine"),
 			};
 			ctx.statusLine.updateSettings(statusLineSettings);
 			ctx.ui.requestRender();

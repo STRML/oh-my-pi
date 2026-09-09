@@ -63,6 +63,23 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps statusLine.contextLine when the status line settings are rebuilt", () => {
+		const updateSettings = vi.fn();
+		const controller = new SelectorController({
+			statusLine: { updateSettings },
+			ui: { requestRender: vi.fn() },
+		} as unknown as InteractiveModeContext);
+
+		Settings.instance.override("statusLine.contextLine", "off");
+		controller.handleSettingChange("statusLine.contextLine", "off");
+
+		// updateSettings replaces the whole settings object, so a rebuild that
+		// omits contextLine silently resets the user's choice to "embedded".
+		expect(updateSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ contextLine: Settings.instance.get("statusLine.contextLine") }),
+		);
+	});
+
 	it("invalidates the UI and requests a repaint when tui.tight changes", () => {
 		const invalidate = vi.fn();
 		const requestRender = vi.fn();
