@@ -1469,6 +1469,29 @@ export class SessionTools {
 		});
 	}
 
+	/**
+	 * Re-reads the settings the read and write tools snapshot at construction
+	 * (`read.defaultLimit`, `images.autoResize`, `lsp.*OnWrite`) into the live
+	 * tools; see {@link SessionTools.reconcileBashToolSettings}.
+	 * @returns false when this session has no live read or write tool.
+	 */
+	reconcileToolSettings(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const tools = ["read", "write"]
+				.map(name => this.#toolRegistry.get(name) as { reconfigure?: () => boolean } | undefined)
+				.filter((tool): tool is { reconfigure: () => boolean } => typeof tool?.reconfigure === "function");
+			if (tools.length === 0) return false;
+			let changed = false;
+			for (const tool of tools) {
+				changed = tool.reconfigure() || changed;
+			}
+			// The read description embeds the default limit, so the applied tool
+			// signature differs and the base prompt rebuilds below.
+			if (changed) await this.#applyActiveToolsByName(this.getEnabledToolNames());
+			return true;
+		});
+	}
+
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
 		return this.runToolRegistryMutation(() => this.#refreshBaseSystemPrompt());

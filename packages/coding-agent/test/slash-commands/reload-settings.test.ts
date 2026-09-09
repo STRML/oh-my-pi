@@ -59,6 +59,7 @@ describe("/reload-settings slash command", () => {
 		refreshModels: Mock<() => Promise<void>>;
 		reapplyModelRoles: Mock<() => void>;
 		reconcileBashToolSettings: Mock<() => Promise<boolean>>;
+		reconcileToolSettings: Mock<() => Promise<boolean>>;
 		reconcileSecretObfuscator: Mock<() => Promise<boolean>>;
 		reconcileBrowserIdleClose: Mock<() => void>;
 		reconcileBrowserEnabled: Mock<() => Promise<void>>;
@@ -119,6 +120,7 @@ describe("/reload-settings slash command", () => {
 			setServiceTierFamily,
 			agent: agentFields,
 			reconcileBashToolSettings: vi.fn(async () => true),
+			reconcileToolSettings: vi.fn(async () => true),
 			reconcileSecretObfuscator: vi.fn(async () => true),
 			reconcileBrowserIdleClose: vi.fn(),
 			reconcileBrowserEnabled: vi.fn(async () => {}),
@@ -150,6 +152,7 @@ describe("/reload-settings slash command", () => {
 			setSteeringMode,
 			setServiceTierFamily,
 			reconcileBashToolSettings: session.reconcileBashToolSettings as unknown as Mock<() => Promise<boolean>>,
+			reconcileToolSettings: session.reconcileToolSettings as unknown as Mock<() => Promise<boolean>>,
 			reconcileSecretObfuscator: session.reconcileSecretObfuscator as unknown as Mock<() => Promise<boolean>>,
 			reconcileBrowserIdleClose: session.reconcileBrowserIdleClose as unknown as Mock<() => void>,
 			reconcileBrowserEnabled: session.reconcileBrowserEnabled as unknown as Mock<() => Promise<void>>,
@@ -333,6 +336,24 @@ describe("/reload-settings slash command", () => {
 
 		const { reconcileBashToolSettings } = await runCommand(settings);
 		expect(reconcileBashToolSettings).not.toHaveBeenCalled();
+	});
+
+	it("reconciles the live read and write tools when a tool setting changes", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, read: { defaultLimit: 300 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, read: { defaultLimit: 1000 } });
+
+		const { reconcileToolSettings, output } = await runCommand(settings);
+		expect(reconcileToolSettings).toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("read.defaultLimit"));
+	});
+
+	it("leaves the read and write tools alone when no tool setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		const { reconcileToolSettings } = await runCommand(settings);
+		expect(reconcileToolSettings).not.toHaveBeenCalled();
 	});
 
 	it("rebuilds the secret obfuscator when secrets.enabled flips on disk", async () => {

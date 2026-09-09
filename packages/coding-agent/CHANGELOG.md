@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- `/reload-settings` now applies browser and computer prelude changes, the shared LSP flag, and provider enablement changes without a restart.
+- `/reload-settings` now re-reads the read tool's default limit and image resize behavior and the write tool's LSP formatting and diagnostics settings.
+- `/reload-settings` no longer resets `statusLine.contextLine` when the status line is rebuilt.
 - `/reload-settings` now installs reloaded `thinkingBudgets` on the live agent and re-arms the browser idle-close deadline, so both take effect without a restart.
 - `/reload-settings` now applies per-workspace ACP settings to the shared model catalog, so `disabledProviders` and `extendedContext` edits take effect without restarting the host.
 - `/reload-settings` now rebuilds the session secret obfuscator when `secrets.enabled` changes, so newly enabled secrets.yml and environment secrets are redacted without a restart.

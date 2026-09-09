@@ -160,6 +160,18 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				) {
 					await runtime.session.reconcileBashToolSettings();
 				}
+				// The read and write tools snapshot their limits and LSP write
+				// behavior at construction, so a reloaded value would be reported
+				// as applied while the live tools kept the old one.
+				if (
+					before.get("read.defaultLimit") !== runtime.settings.get("read.defaultLimit") ||
+					before.get("images.autoResize") !== runtime.settings.get("images.autoResize") ||
+					before.get("lsp.formatOnWrite") !== runtime.settings.get("lsp.formatOnWrite") ||
+					before.get("lsp.diagnosticsOnWrite") !== runtime.settings.get("lsp.diagnosticsOnWrite") ||
+					before.get("lsp.diagnosticsDeduplicate") !== runtime.settings.get("lsp.diagnosticsDeduplicate")
+				) {
+					await runtime.session.reconcileToolSettings();
+				}
 				if (before.get("async.maxJobs") !== runtime.settings.get("async.maxJobs")) {
 					runtime.session.asyncJobManager?.setMaxRunningJobs(runtime.settings.get("async.maxJobs"));
 				}

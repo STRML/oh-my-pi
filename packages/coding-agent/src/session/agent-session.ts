@@ -5382,6 +5382,11 @@ export class AgentSession {
 		return this.#tools.reconcileBashToolSettings();
 	}
 
+	/** Re-reads read/write tool settings into the live tools; see {@link SessionTools.reconcileToolSettings}. */
+	reconcileToolSettings(): Promise<boolean> {
+		return this.#tools.reconcileToolSettings();
+	}
+
 	/** Rebuilds the secret obfuscator after `secrets.enabled` changes so a reload redacts without a restart. */
 	async reconcileSecretObfuscator(): Promise<boolean> {
 		const enabled = this.settings.get("secrets.enabled") === true;
