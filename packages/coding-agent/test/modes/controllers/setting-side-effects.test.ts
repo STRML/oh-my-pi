@@ -7,6 +7,7 @@ import {
 	applySettingSideEffects,
 	REPLAYED_SETTING_IDS,
 	replaySessionSettingSideEffects,
+	snapshotReplaySettings,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/setting-side-effects";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
@@ -38,6 +39,7 @@ describe("applySettingSideEffects replay coverage", () => {
 		// The replay loop only visits allowlisted ids; an id missing here keeps
 		// the matching consumer cache stale after /reload-settings.
 		for (const id of [
+			"compaction.enabled",
 			"showHardwareCursor",
 			"tui.textSizing",
 			"tui.titleState",
@@ -47,6 +49,21 @@ describe("applySettingSideEffects replay coverage", () => {
 		] as const) {
 			expect(REPLAYED_SETTING_IDS).toContain(id);
 		}
+	});
+
+	it("replays compaction.enabled into the status line's cached auto-compact flag", () => {
+		const setAutoCompactEnabled = vi.fn();
+		// The status line caches the session's effective flag (enabled AND a
+		// resolvable method order), not the raw setting value: `true` with no
+		// configured method must still read as off.
+		const ctx = {
+			session: { autoCompactionEnabled: false },
+			statusLine: { setAutoCompactEnabled },
+		} as unknown as InteractiveModeContext;
+
+		applySettingSideEffects(ctx, "compaction.enabled", true, { persist: false });
+
+		expect(setAutoCompactEnabled).toHaveBeenCalledWith(false);
 	});
 
 	it("replays statusLine segment keys through the shared status line apply", () => {
@@ -176,16 +193,32 @@ describe("replaySessionSettingSideEffects", () => {
 				return true;
 			},
 		});
+		const beforeReplay = snapshotReplaySettings(settings);
 		settings.set("defaultThinkingLevel", Effort.Low);
 		settings.set("externalThinking", true);
 
-		// The full allowlist is visited: session-level ids apply, every pure TUI
-		// id (autocompleteMaxVisible, statusLine.*, …) must be skipped without
-		// needing any interactive-mode context.
-		replaySessionSettingSideEffects(session);
+		// The full allowlist is diffed: session-level ids whose value changed
+		// apply, every pure TUI id (autocompleteMaxVisible, statusLine.*, …) is
+		// skipped without needing any interactive-mode context.
+		replaySessionSettingSideEffects(session, beforeReplay);
 
 		expect(thinkingLevels).toEqual([{ level: "low", persist: false }]);
 		expect(thinkToolStates).toEqual([true]);
+	});
+
+	it("skips unchanged ids so a session-only thinking level survives a no-op reload", () => {
+		settings.set("defaultThinkingLevel", Effort.Low);
+		const beforeReplay = snapshotReplaySettings(settings);
+		const thinkingLevels: Array<{ level: unknown; persist: boolean }> = [];
+		const session = stubSession({
+			setThinkingLevel: (level: unknown, persist: boolean) => thinkingLevels.push({ level, persist }),
+		});
+
+		// Nothing changed since the snapshot: replaying would clobber the
+		// session-only override (Shift+Tab) with the unchanged disk default.
+		replaySessionSettingSideEffects(session, beforeReplay);
+
+		expect(thinkingLevels).toEqual([]);
 	});
 
 	it("logs apply failures through the logger when no error sink is supplied", async () => {
@@ -194,6 +227,7 @@ describe("replaySessionSettingSideEffects", () => {
 				throw new Error("boom");
 			},
 		});
+		const beforeReplay = snapshotReplaySettings(settings);
 		settings.set("externalThinking", true);
 		const warnings: string[] = [];
 		const warn = spyOn(logger, "warn").mockImplementation((...parts: unknown[]) => {
@@ -201,7 +235,7 @@ describe("replaySessionSettingSideEffects", () => {
 		});
 
 		try {
-			replaySessionSettingSideEffects(session);
+			replaySessionSettingSideEffects(session, beforeReplay);
 			await Promise.resolve();
 			await Promise.resolve();
 			await Promise.resolve();
@@ -219,9 +253,10 @@ describe("replaySessionSettingSideEffects", () => {
 				applied++;
 			},
 		});
+		const beforeReplay = snapshotReplaySettings(settings);
 		settings.set("memory.backend", "local");
 
-		replaySessionSettingSideEffects(session);
+		replaySessionSettingSideEffects(session, beforeReplay);
 
 		expect(applied).toBe(1);
 	});

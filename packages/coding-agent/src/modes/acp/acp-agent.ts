@@ -82,7 +82,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
-import { replaySessionSettingSideEffects } from "../controllers/setting-side-effects";
+import { replaySessionSettingSideEffects, snapshotReplaySettings } from "../controllers/setting-side-effects";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -968,6 +968,11 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		// Snapshot before the command runs so notifyConfigChanged replays only
+		// what the command actually changed — same before/after filter the TUI
+		// adapter applies; a no-op /reload-settings must not clobber a
+		// session-only thinking level with the unchanged disk default.
+		const beforeReplay = snapshotReplaySettings(record.session.settings);
 		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
@@ -1003,7 +1008,7 @@ export class AcpAgent implements Agent {
 				// the session-level subset — otherwise externalThinking,
 				// memory.backend, and the thinking-level default stay stale while
 				// /reload-settings reports success.
-				replaySessionSettingSideEffects(record.session);
+				replaySessionSettingSideEffects(record.session, beforeReplay);
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});

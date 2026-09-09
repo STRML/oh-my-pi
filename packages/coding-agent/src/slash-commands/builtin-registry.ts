@@ -3,6 +3,7 @@ import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import {
 	applySettingSideEffectsAwaitingCompletion,
 	REPLAYED_SETTING_IDS,
+	snapshotReplaySettings,
 } from "../modes/controllers/setting-side-effects";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
@@ -161,8 +162,7 @@ export async function executeBuiltinSlashCommand(
 		// Snapshot the replay ids before the command runs so notifyConfigChanged
 		// can replay only what the command actually changed. Contexts without a
 		// readable settings object (read-only builtins) never reach the replay.
-		const replayGet = ctx.settings?.get.bind(ctx.settings);
-		const beforeReplay = replayGet ? new Map(REPLAYED_SETTING_IDS.map(id => [id, replayGet(id)])) : undefined;
+		const beforeReplay = ctx.settings ? snapshotReplaySettings(ctx.settings) : undefined;
 		const adapted: SlashCommandRuntime = {
 			session: ctx.session,
 			sessionManager: ctx.sessionManager,

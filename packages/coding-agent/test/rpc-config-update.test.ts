@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { snapshotReplaySettings } from "@oh-my-pi/pi-coding-agent/modes/controllers/setting-side-effects";
 import { emitRpcConfigUpdate } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../src/session/agent-session";
@@ -22,7 +24,7 @@ describe("emitRpcConfigUpdate", () => {
 		await tempDir?.remove();
 	});
 
-	it("replays session settings before emitting the config_update frame", () => {
+	it("replays changed session settings before emitting the config_update frame", () => {
 		const order: string[] = [];
 		const session = {
 			settings,
@@ -40,21 +42,56 @@ describe("emitRpcConfigUpdate", () => {
 			model: { provider: "anthropic", id: "claude" },
 			thinkingLevel: "high",
 		} as unknown as AgentSession;
+		const beforeReplay = snapshotReplaySettings(settings);
 		settings.set("externalThinking", true);
 		settings.set("memory.backend", "local");
 
 		const frames: object[] = [];
-		emitRpcConfigUpdate(session, obj => {
-			order.push("frame");
-			frames.push(obj);
-		});
+		emitRpcConfigUpdate(
+			session,
+			obj => {
+				order.push("frame");
+				frames.push(obj);
+			},
+			beforeReplay,
+		);
 
-		// The replay of every session-level setting precedes the host update.
+		// The replay of every changed session-level setting precedes the host update.
 		expect(order[order.length - 1]).toBe("frame");
 		expect(order.filter(entry => entry.startsWith("think:"))).toEqual(["think:true"]);
 		expect(order.filter(entry => entry === "memory")).toEqual(["memory"]);
 		expect(frames).toEqual([
 			{ type: "config_update", model: { provider: "anthropic", id: "claude" }, thinkingLevel: "high" },
+		]);
+	});
+
+	it("does not reset a session-only thinking level when nothing changed", () => {
+		settings.set("defaultThinkingLevel", Effort.High);
+		const thinkingLevels: unknown[] = [];
+		const session = {
+			settings,
+			setThinkingLevel: (level: unknown) => {
+				thinkingLevels.push(level);
+			},
+			model: { provider: "anthropic", id: "claude" },
+			thinkingLevel: "low",
+		} as unknown as AgentSession;
+		// Snapshot after the disk value settled: the reload is a no-op, so the
+		// session-only "low" must survive and the frame still emits.
+		const beforeReplay = snapshotReplaySettings(settings);
+
+		const frames: object[] = [];
+		emitRpcConfigUpdate(
+			session,
+			obj => {
+				frames.push(obj);
+			},
+			beforeReplay,
+		);
+
+		expect(thinkingLevels).toEqual([]);
+		expect(frames).toEqual([
+			{ type: "config_update", model: { provider: "anthropic", id: "claude" }, thinkingLevel: "low" },
 		]);
 	});
 });

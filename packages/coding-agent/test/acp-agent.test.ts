@@ -1845,13 +1845,18 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("replays session-level settings when /reload-settings reports success", async () => {
+	it("does not reset session-only state when /reload-settings changes nothing", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId);
 		if (!session) throw new Error("Expected session to exist");
+		// Disk values already match what a reload loads, so the reload is a
+		// no-op: the before/after filter must replay nothing. The old
+		// replay-all path clobbered a session-only thinking level (and emitted
+		// a spurious thinking_level_change) on every reload.
 		Settings.instance.set("externalThinking", true);
 		Settings.instance.set("memory.backend", "local");
+		session.setThinkingLevel("high");
 
 		await harness.agent.prompt({
 			sessionId: created.sessionId,
@@ -1859,8 +1864,9 @@ describe("ACP agent", () => {
 			prompt: [{ type: "text", text: "/reload-settings" }],
 		} as PromptRequest);
 
-		expect(session.setThinkToolEnabledCalls).toEqual([true]);
-		expect(session.applyMemoryBackendCalls).toBe(1);
+		expect(session.thinkingLevel).toBe("high");
+		expect(session.setThinkToolEnabledCalls).toEqual([]);
+		expect(session.applyMemoryBackendCalls).toBe(0);
 		expect(session.reapplyModelRolesCalls).toBe(1);
 		harness.abortController.abort();
 	});

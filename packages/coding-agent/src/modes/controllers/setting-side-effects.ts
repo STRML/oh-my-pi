@@ -1,6 +1,6 @@
 import { type ResizeScrollbackMode, setTerminalTextSizing, TERMINAL, setTuiTight } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
-import { settings, type SettingPath } from "../../config/settings";
+import { settings, type SettingPath, type Settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { setColorBlindMode, setMarkdownMermaidRendering, setSymbolPreset, setTheme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
@@ -70,7 +70,7 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.textSizing",
 	"tui.titleState",
 	"composer.shape",
-	"compaction.idleEnabled",
+	"compaction.enabled",
 	"compaction.idleThresholdTokens",
 	"compaction.idleTimeoutSeconds",
 	"recap.enabled",
@@ -149,17 +149,32 @@ export function applySessionSettingSideEffects(
 }
 
 /**
- * Replays every allowlisted setting's session-level side effect against
+ * Snapshots every replayed id's current value so a host can diff the settings
+ * a command actually changed. Capture this before the command runs; pass the
+ * map to {@link replaySessionSettingSideEffects} so a no-op reload replays
+ * nothing instead of clobbering session-only overrides (a Shift+Tab thinking
+ * level, a session-scoped model) with unchanged disk values.
+ */
+export function snapshotReplaySettings(snapshotSettings: Settings): Map<string, unknown> {
+	return new Map(REPLAYED_SETTING_IDS.map(id => [id, snapshotSettings.get(id)]));
+}
+
+/**
+ * Replays the allowlisted settings whose value changed since `before` against
  * `session` after a settings reload. The TUI adapter replays the full list
  * through {@link applySettingSideEffects} (component caches included); the
  * protocol hosts (ACP/RPC) have no interactive components, so the session
- * subset is what applies there. Always `persist: false` — the values were just
- * loaded from disk, and a project-overlay value must not be promoted into
- * global config.
+ * subset is what applies there — filtered through the same before/after diff
+ * the TUI adapter applies, or a no-op `/reload-settings` would reset a
+ * session-only thinking level and append a `thinking_level_change`. Always
+ * `persist: false` — the values were just loaded from disk, and a
+ * project-overlay value must not be promoted into global config.
  */
-export function replaySessionSettingSideEffects(session: AgentSession): void {
+export function replaySessionSettingSideEffects(session: AgentSession, before: ReadonlyMap<string, unknown>): void {
 	for (const id of REPLAYED_SETTING_IDS) {
-		applySessionSettingSideEffects(session, id, session.settings.get(id), { persist: false });
+		const value = session.settings.get(id);
+		if (Bun.deepEquals(before.get(id), value)) continue;
+		applySessionSettingSideEffects(session, id, value, { persist: false });
 	}
 }
 
@@ -196,6 +211,14 @@ export function applySettingSideEffects(
 		case "autoCompact":
 			ctx.session.setAutoCompactionEnabled(value as boolean);
 			ctx.statusLine.setAutoCompactEnabled(value as boolean);
+			break;
+		case "compaction.enabled":
+			// The status line snapshots the effective flag at construction
+			// (interactive-mode) to gate the context bar's compaction boundary
+			// markers; the session's own gating re-reads the setting live. Push
+			// the effective getter so a value enabled but methodless still reads
+			// as off, matching the construction-time snapshot's semantics.
+			ctx.statusLine.setAutoCompactEnabled(ctx.session.autoCompactionEnabled);
 			break;
 		case "compaction.idleEnabled":
 		case "compaction.idleThresholdTokens":

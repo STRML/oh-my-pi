@@ -31,7 +31,7 @@ import {
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
-import { replaySessionSettingSideEffects } from "../controllers/setting-side-effects";
+import { replaySessionSettingSideEffects, snapshotReplaySettings } from "../controllers/setting-side-effects";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -213,13 +213,18 @@ export async function tryRunRpcSkillCommand(
 }
 
 /**
- * Applies the reload allowlist's session-level side effects, then emits the RPC
- * `config_update` frame. RunRpcMode wires this as the builtin runtime's
- * `notifyConfigChanged`, mirroring the TUI adapter's replay-before-notify
- * contract; exported for tests.
+ * Applies the reload allowlist's changed session-level side effects, then
+ * emits the RPC `config_update` frame. RunRpcMode wires this as the builtin
+ * runtime's `notifyConfigChanged` with a `snapshotReplaySettings` snapshot
+ * taken before the command runs, mirroring the TUI adapter's
+ * replay-before-notify contract; exported for tests.
  */
-export function emitRpcConfigUpdate(session: AgentSession, output: (obj: object) => void): void {
-	replaySessionSettingSideEffects(session);
+export function emitRpcConfigUpdate(
+	session: AgentSession,
+	output: (obj: object) => void,
+	beforeReplay: ReadonlyMap<string, unknown>,
+): void {
+	replaySessionSettingSideEffects(session, beforeReplay);
 	output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 }
 
@@ -1115,6 +1120,9 @@ export async function runRpcMode(
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
+				// Snapshot before the command runs so the replay only applies
+				// settings the command actually changed (TUI-adapter parity).
+				const beforeReplay = snapshotReplaySettings(session.settings);
 				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
 					session,
 					sessionManager: session.sessionManager,
@@ -1128,7 +1136,7 @@ export async function runRpcMode(
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
 					notifyConfigChanged: async () => {
-						emitRpcConfigUpdate(session, output);
+						emitRpcConfigUpdate(session, output, beforeReplay);
 					},
 				});
 				if (builtinResult !== false) {
