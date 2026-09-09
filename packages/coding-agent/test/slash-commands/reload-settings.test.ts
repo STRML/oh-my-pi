@@ -13,7 +13,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { sameScopedModelCycle, toSessionScopedModels } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings, type TtsrSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -65,6 +66,9 @@ describe("/reload-settings slash command", () => {
 		reconcileBrowserEnabled: Mock<() => Promise<void>>;
 		reconcileComputerEnabled: Mock<() => Promise<void>>;
 		reconcileSharedLsp: Mock<() => void>;
+		refreshSkills: Mock<() => Promise<void>>;
+		refreshBaseSystemPrompt: Mock<() => Promise<void>>;
+		updateTtsrSettings: Mock<(settings: unknown) => boolean>;
 		setMaxRunningJobs: Mock<(value: number) => void>;
 		setAdvisorEnabled: Mock<(enabled: boolean) => void>;
 		setSteeringMode: Mock<(mode: "all" | "one-at-a-time", persist?: boolean) => void>;
@@ -126,6 +130,9 @@ describe("/reload-settings slash command", () => {
 			reconcileBrowserEnabled: vi.fn(async () => {}),
 			reconcileComputerEnabled: vi.fn(async () => {}),
 			reconcileSharedLsp: vi.fn(),
+			refreshSkills: vi.fn(async () => {}),
+			refreshBaseSystemPrompt: vi.fn(async () => {}),
+			updateTtsrSettings: vi.fn(() => false),
 			asyncJobManager: { setMaxRunningJobs: vi.fn() },
 			...sessionOverrides,
 		};
@@ -158,6 +165,9 @@ describe("/reload-settings slash command", () => {
 			reconcileBrowserEnabled: session.reconcileBrowserEnabled as unknown as Mock<() => Promise<void>>,
 			reconcileComputerEnabled: session.reconcileComputerEnabled as unknown as Mock<() => Promise<void>>,
 			reconcileSharedLsp: session.reconcileSharedLsp as unknown as Mock<() => void>,
+			refreshSkills: session.refreshSkills as unknown as Mock<() => Promise<void>>,
+			refreshBaseSystemPrompt: session.refreshBaseSystemPrompt as unknown as Mock<() => Promise<void>>,
+			updateTtsrSettings: session.updateTtsrSettings as unknown as Mock<(settings: unknown) => boolean>,
 			setMaxRunningJobs: session.asyncJobManager.setMaxRunningJobs as unknown as Mock<(value: number) => void>,
 			agent: agentFields,
 		};
@@ -448,6 +458,102 @@ describe("/reload-settings slash command", () => {
 		expect(reconcileSharedLsp).not.toHaveBeenCalled();
 	});
 
+	it("refreshes skills when a skills.* setting changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, skills: { enableCodexUser: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, skills: { enableCodexUser: true } });
+
+		const { refreshSkills, refreshBaseSystemPrompt, output } = await runCommand(settings);
+		expect(refreshSkills).toHaveBeenCalledTimes(1);
+		// refreshSkills rebuilds the base prompt as part of its pass; a second
+		// direct rebuild in the same reload would be redundant work.
+		expect(refreshBaseSystemPrompt).not.toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("skills.enableCodexUser"));
+	});
+
+	it("leaves skills alone when no skills.* setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, skills: { enableCodexUser: false } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		// An unrelated effective change still reloads; only skills.* keys may
+		// trigger the capability reset and filesystem re-read.
+		await writeSettings({ advisor: { syncBacklog: "3" }, skills: { enableCodexUser: false } });
+
+		const { refreshSkills } = await runCommand(settings);
+		expect(refreshSkills).not.toHaveBeenCalled();
+	});
+
+	it("pushes a reloaded ttsr manager setting into the live manager", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { repeatGap: 10 } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { repeatGap: 25 } });
+
+		const { updateTtsrSettings } = await runCommand(settings);
+		expect(updateTtsrSettings).toHaveBeenCalledTimes(1);
+		expect(updateTtsrSettings).toHaveBeenCalledWith(settings.getGroup("ttsr"));
+	});
+
+	it("leaves the ttsr manager alone when only a bucketing-only ttsr key changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { builtinRules: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		// builtinRules/disabledRules are re-read by bucketRules on every reload;
+		// the manager consumes none of them, so they must not wake it.
+		await writeSettings({ advisor: { syncBacklog: "1" }, ttsr: { builtinRules: false } });
+
+		const { updateTtsrSettings } = await runCommand(settings);
+		expect(updateTtsrSettings).not.toHaveBeenCalled();
+	});
+
+	it("rebuilds the base prompt when prompt-affecting settings change on disk", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			skillful: true,
+			personality: "default",
+			task: { batch: true },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			skillful: false,
+			personality: "pragmatic",
+			task: { batch: false },
+		});
+
+		const { refreshBaseSystemPrompt, refreshSkills, output } = await runCommand(settings);
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+		expect(refreshSkills).not.toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("skillful"));
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("task.batch"));
+	});
+
+	it("leaves the base prompt alone when no prompt-affecting setting changed", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, skillful: true });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "3" }, skillful: true });
+
+		const { refreshBaseSystemPrompt } = await runCommand(settings);
+		expect(refreshBaseSystemPrompt).not.toHaveBeenCalled();
+	});
+
+	it("rebuilds the prompt once when skills and prompt settings change together", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			skillful: true,
+			skills: { enableCodexUser: false },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			skillful: false,
+			skills: { enableCodexUser: true },
+		});
+
+		const { refreshSkills, refreshBaseSystemPrompt } = await runCommand(settings);
+		expect(refreshSkills).toHaveBeenCalledTimes(1);
+		// The skills path already picks up the prompt-affecting key, so the
+		// combined reload must not stack a direct rebuild on top of it.
+		expect(refreshBaseSystemPrompt).not.toHaveBeenCalled();
+	});
+
 	it("re-seeds the capability provider sets when disabledProviders changes", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -539,6 +645,8 @@ describe("/reload-settings slash command", () => {
 				reconcileBrowserEnabled: vi.fn(async () => {}),
 				reconcileComputerEnabled: vi.fn(async () => {}),
 				reconcileSharedLsp: vi.fn(),
+				refreshSkills: vi.fn(async () => {}),
+				updateTtsrSettings: vi.fn(() => false),
 				setAutoCompactionEnabled: vi.fn(),
 				serviceTierByFamily: {},
 				setServiceTierFamily: vi.fn(),
@@ -677,5 +785,39 @@ describe("session scope helpers", () => {
 		expect(
 			sameScopedModelCycle(a, [{ model: fakeModel("p", "x"), thinkingLevel: "low" as ThinkingLevel }, a[1]]),
 		).toBe(false);
+	});
+});
+
+describe("TtsrManager.updateSettings", () => {
+	// settings.getGroup("ttsr") always fills every manager-level key, so the
+	// fixture mirrors the complete shape the handler passes through.
+	const ttsrGroup = (overrides: Partial<TtsrSettings> = {}): TtsrSettings => ({
+		enabled: true,
+		contextMode: "discard",
+		interruptMode: "always",
+		repeatMode: "once",
+		repeatGap: 10,
+		...overrides,
+	});
+
+	it("re-merges defaults, adopts reloaded manager settings, and reports the change", () => {
+		const manager = new TtsrManager();
+		expect(manager.updateSettings(ttsrGroup({ enabled: false, repeatGap: 30 }))).toBe(true);
+		expect(manager.getSettings().enabled).toBe(false);
+		expect(manager.getSettings().repeatGap).toBe(30);
+		// Keys absent from the reloaded group keep their constructor defaults.
+		expect(manager.getSettings().contextMode).toBe("discard");
+		expect(manager.getSettings().repeatMode).toBe("once");
+	});
+
+	it("reports no change for a group that matches the current manager settings", () => {
+		const manager = new TtsrManager(ttsrGroup({ repeatGap: 20 }));
+		expect(manager.updateSettings(ttsrGroup({ repeatGap: 20 }))).toBe(false);
+		expect(manager.getSettings().repeatGap).toBe(20);
+	});
+
+	it("reports no change when only bucketing-only keys differ", () => {
+		const manager = new TtsrManager();
+		expect(manager.updateSettings({ ...ttsrGroup(), builtinRules: false, disabledRules: ["legacy"] })).toBe(false);
 	});
 });

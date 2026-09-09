@@ -13,6 +13,24 @@ function optionalNumber(raw: unknown): number | undefined {
 	return num >= 0 ? num : undefined;
 }
 
+/**
+ * Settings consumed only while the base system prompt is being rebuilt: their
+ * readers pull the live values at rebuild time, so a reloaded value needs
+ * exactly one prompt rebuild to take effect.
+ */
+const PROMPT_KEYS: Partial<Record<SettingPath, true>> = {
+	skillful: true,
+	"task.batch": true,
+	"task.maxConcurrency": true,
+	"task.disabledAgents": true,
+	"task.eager": true,
+	"security.enabled": true,
+	includeModelInPrompt: true,
+	personality: true,
+	"tui.reactions": true,
+	"tools.xdevDocs": true,
+};
+
 export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "reload-settings",
@@ -212,6 +230,47 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				// secrets newly enabled by this reload still ship to the provider unredacted.
 				if (before.get("secrets.enabled") !== runtime.settings.get("secrets.enabled")) {
 					await runtime.session.reconcileSecretObfuscator();
+				}
+				// Skill discovery and every prompt-affecting input are read live by
+				// the prompt rebuild, but only when something asks for one:
+				// refreshSkills() re-reads the skill directories AND rebuilds the
+				// base prompt in the same pass, so it absorbs a simultaneously
+				// reloaded prompt key and the two paths never double-rebuild. A
+				// prompt key without a skills change rebuilds directly.
+				let skillsChanged = false;
+				let promptChanged = false;
+				for (const [key, previous] of before) {
+					if (Bun.deepEquals(previous, runtime.settings.get(key))) {
+						continue;
+					}
+					if (key.startsWith("skills.")) {
+						skillsChanged = true;
+					} else if (PROMPT_KEYS[key]) {
+						promptChanged = true;
+					}
+					if (skillsChanged && promptChanged) {
+						break;
+					}
+				}
+				if (!skillsChanged && promptChanged) {
+					await runtime.session.refreshBaseSystemPrompt();
+				}
+				if (skillsChanged) {
+					await runtime.session.refreshSkills();
+				}
+				// The TtsrManager merges the ttsr group once in its constructor and
+				// reads that snapshot on every match/repeat decision, so a reloaded
+				// manager-level key would keep the old behavior until restart. The
+				// bucketing-only builtinRules/disabledRules are consumed per reload
+				// by bucketRules and need no manager update.
+				if (
+					before.get("ttsr.enabled") !== runtime.settings.get("ttsr.enabled") ||
+					before.get("ttsr.contextMode") !== runtime.settings.get("ttsr.contextMode") ||
+					before.get("ttsr.interruptMode") !== runtime.settings.get("ttsr.interruptMode") ||
+					before.get("ttsr.repeatMode") !== runtime.settings.get("ttsr.repeatMode") ||
+					before.get("ttsr.repeatGap") !== runtime.settings.get("ttsr.repeatGap")
+				) {
+					runtime.session.updateTtsrSettings(runtime.settings.getGroup("ttsr"));
 				}
 			}
 			const changed: SettingPath[] = [];

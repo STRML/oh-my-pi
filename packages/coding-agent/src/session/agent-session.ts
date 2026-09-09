@@ -112,7 +112,7 @@ import {
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings, SkillsSettings, TtsrSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
@@ -2153,6 +2153,15 @@ export class AgentSession {
 	/** TTSR manager for time-traveling stream rules */
 	get ttsrManager(): TtsrManager | undefined {
 		return this.#ttsr.manager;
+	}
+
+	/**
+	 * Re-applies a reloaded `ttsr.*` settings group to the live TTSR manager.
+	 * Returns whether a manager-level value changed; false when TTSR is
+	 * unavailable in this session and there is nothing to update.
+	 */
+	updateTtsrSettings(settings?: TtsrSettings): boolean {
+		return this.ttsrManager?.updateSettings(settings) ?? false;
 	}
 
 	/** Secret obfuscator, when secrets are configured; /share redaction reuses it. */
