@@ -59,6 +59,8 @@ export interface SettingSideEffectOptions {
 export const REPLAYED_SETTING_IDS = [
 	"autocompleteMaxVisible",
 	"tui.imeSafeCursor",
+	"tui.vimMode",
+	"tui.vimModeDisplay",
 	"spelling.typoDetection",
 	"spelling.autocomplete",
 	"spelling.autocorrect",
@@ -300,6 +302,10 @@ export function applySettingSideEffects(
 			break;
 		case "tui.imeSafeCursor":
 			ctx.editor.setImeSafeCursorLayout(value === true);
+			break;
+		case "tui.vimMode":
+		case "tui.vimModeDisplay":
+			ctx.applyVimModeSetting();
 			break;
 		case "spelling.typoDetection":
 		case "spelling.autocomplete":
