@@ -148,6 +148,7 @@ describe("/reload-settings slash command", () => {
 				getAdditionalDirectories: vi.fn(() => []),
 				addWorkspaceDirectory: vi.fn(async () => null),
 				removeWorkspaceDirectory: vi.fn(async () => null),
+				isSessionSuppliedDirectory: vi.fn(() => false),
 				...sessionManagerOverrides,
 			},
 			settings,
@@ -691,6 +692,7 @@ describe("/reload-settings slash command", () => {
 				getCwd: () => projectDir,
 				getAdditionalDirectories: vi.fn(() => []),
 				setAdditionalDirectories: vi.fn(async () => {}),
+				isSessionSuppliedDirectory: vi.fn(() => false),
 			},
 			settings,
 			ui: {
@@ -1091,6 +1093,7 @@ describe("/reload-settings slash command", () => {
 				getCwd: () => projectDir,
 				getAdditionalDirectories: vi.fn(() => []),
 				setAdditionalDirectories: vi.fn(async () => {}),
+				isSessionSuppliedDirectory: vi.fn(() => false),
 			},
 			settings,
 			ui: {
@@ -1171,7 +1174,7 @@ describe("/reload-settings slash command", () => {
 		);
 
 		expect(addWorkspaceDirectory).toHaveBeenCalledTimes(1);
-		expect(addWorkspaceDirectory).toHaveBeenCalledWith("/settings/added");
+		expect(addWorkspaceDirectory).toHaveBeenCalledWith("/settings/added", "settings");
 		// A wholesale replace would drop the session-added root; the delta
 		// application never removes anything here.
 		expect(removeWorkspaceDirectory).not.toHaveBeenCalled();
@@ -1204,6 +1207,37 @@ describe("/reload-settings slash command", () => {
 		expect(addWorkspaceDirectory).not.toHaveBeenCalled();
 		expect(removeWorkspaceDirectory).toHaveBeenCalledWith("/settings/gone");
 	});
+
+	it("keeps a root another source still supplies when settings withdraw it", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only", "/settings/gone", "/dually/supplied"] },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			workspace: { additionalDirectories: ["/settings/only"] },
+		});
+
+		const removeWorkspaceDirectory = vi.fn(async () => "/settings/gone");
+		await runCommand(
+			settings,
+			{},
+			{
+				getAdditionalDirectories: vi.fn(() => ["/settings/only", "/settings/gone", "/dually/supplied"]),
+				// /dually/supplied is also claimed by --add-dir, a resumed session
+				// header, or a later /add-dir, so the manager reports it session-supplied.
+				isSessionSuppliedDirectory: vi.fn((directory: string) => directory === "/dually/supplied"),
+				addWorkspaceDirectory: vi.fn(async () => null),
+				removeWorkspaceDirectory,
+			},
+		);
+
+		// The dually-supplied root survives; the settings-only root is still withdrawn.
+		expect(removeWorkspaceDirectory).toHaveBeenCalledTimes(1);
+		expect(removeWorkspaceDirectory).toHaveBeenCalledWith("/settings/gone");
+	});
+
 	it("preserves a session /advisor override when advisor.enabled is unchanged", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1", enabled: true } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });

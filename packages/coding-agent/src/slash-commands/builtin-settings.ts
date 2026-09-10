@@ -257,10 +257,19 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				let rootsChanged = false;
 				for (const root of nextRoots) {
 					if (previousRootSet.has(root)) continue;
-					if ((await runtime.sessionManager.addWorkspaceDirectory(root)) !== null) rootsChanged = true;
+					// "settings" source: a delta add must not claim the root as
+					// session-supplied — only /add-dir and header restores do.
+					if ((await runtime.sessionManager.addWorkspaceDirectory(root, "settings")) !== null) {
+						rootsChanged = true;
+					}
 				}
 				for (const root of previousRoots) {
 					if (nextRootSet.has(root)) continue;
+					// A root another source still supplies (--add-dir, a resumed
+					// session header, a later /add-dir) is deduplicated into the same
+					// manager entry; withdrawing it from settings must not revoke
+					// that other source's claim.
+					if (runtime.sessionManager.isSessionSuppliedDirectory(root)) continue;
 					if ((await runtime.sessionManager.removeWorkspaceDirectory(root)) !== null) rootsChanged = true;
 				}
 				if (rootsChanged) {
