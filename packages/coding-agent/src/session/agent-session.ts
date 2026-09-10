@@ -8358,6 +8358,14 @@ export class AgentSession {
 		// never capture another workspace's policy pointer.
 		await this.#modelRegistry.reapplyModelPolicies(this.settings);
 		await this.#modelRegistry.refresh(strategy, this.settings);
+		// The refreshed catalog is now installed: reconcile retry.fallbackChains
+		// warnings against it, so a reload that makes a selector resolvable
+		// retracts its stale warning and one that invalidates a selector
+		// surfaces a new one, instead of leaving construction-time verdicts in
+		// place while /reload-settings reports the setting as applied.
+		if (this.#recovery.reconcileRetryFallbackChains()) {
+			this.#emit({ type: "config_warnings_changed" });
+		}
 		// refresh() does not reject on a malformed models.yml: the custom layer
 		// comes back empty with a configError. Surface it so callers never report
 		// success while the live custom providers were dropped.
@@ -10921,7 +10929,7 @@ export class AgentSession {
 		if (this.#isDisposed || !this.#recovery.hasPendingDiscoveryDeferredFallbackValidation()) return;
 		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
 		if (this.#isDisposed) return;
-		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
+		if (this.#recovery.reconcileRetryFallbackChains()) {
 			this.#emit({ type: "config_warnings_changed" });
 		}
 	}
