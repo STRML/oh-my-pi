@@ -160,6 +160,8 @@ export interface AgentSessionConfig {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Frozen `--models` scope patterns: when set, the CLI scope never re-resolves on reload; undefined means settings-derived, re-resolved live. */
 	cliModelScope?: readonly string[];
+	/** The `scopedModels` scope was supplied programmatically by an SDK embedder: a settings-driven reload must never clear it. The CLI resolves `enabledModels` into the same `scopedModels` field but leaves this unset, so clearing the setting unfreezes the cycle. */
+	sdkScopedModels?: boolean;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */

@@ -428,6 +428,8 @@ export interface CreateAgentSessionOptions {
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
+	/** Marks `scopedModels` as a programmatic (SDK-embedder) scope: a settings-driven reload must never clear it. The CLI resolves `enabledModels` into `scopedModels` without this flag, so clearing the setting unfreezes the cycle. */
+	sdkScopedModels?: boolean;
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
@@ -3748,6 +3750,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			scopedModels: options.scopedModels,
 			cliModelScope: options.cliModelScope,
 			promptTemplates,
+			sdkScopedModels: options.sdkScopedModels,
 			slashCommands,
 			extensionRunner,
 			getEvalPreludes,

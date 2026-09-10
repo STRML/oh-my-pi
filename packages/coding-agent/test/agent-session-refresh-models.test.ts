@@ -113,6 +113,7 @@ describe("AgentSession.refreshScopedModels active-model rebind", () => {
 		cliModelScope?: readonly string[],
 		settings: Settings = Settings.isolated({}),
 		scopedModels?: Array<{ model: Model }>,
+		sdkScopedModels?: boolean,
 	): Promise<AgentSession> {
 		tempDir = TempDir.createSync("@pi-scoped-rebind-");
 		authStorage = createInMemoryAuthStorage();
@@ -134,6 +135,7 @@ describe("AgentSession.refreshScopedModels active-model rebind", () => {
 			modelRegistry,
 			...(cliModelScope ? { cliModelScope } : {}),
 			...(scopedModels ? { scopedModels } : {}),
+			...(sdkScopedModels ? { sdkScopedModels: true } : {}),
 		});
 		return session;
 	}
@@ -167,13 +169,33 @@ describe("AgentSession.refreshScopedModels active-model rebind", () => {
 	});
 
 	it("keeps an SDK-supplied scope when a reload would clear the settings scope", async () => {
-		const current = await createSession(undefined, undefined, [{ model: createMockModel({ provider: "testprov" }) }]);
+		const current = await createSession(
+			undefined,
+			undefined,
+			[{ model: createMockModel({ provider: "testprov" }) }],
+			true,
+		);
 		expect(current.scopedModels.length).toBe(1);
 
 		// No enabledModels configured: a settings-driven reload clears only
 		// settings-derived scopes, never a programmatic (embedder-supplied) one.
 		expect(await current.refreshScopedModels()).toBe(false);
 		expect(current.scopedModels.length).toBe(1);
+	});
+
+	it("clears a CLI-resolved settings-derived scope once enabledModels is cleared", async () => {
+		// The CLI resolves enabledModels into the same scopedModels field SDK
+		// embedders use, but without sdkScopedModels provenance: clearing the
+		// setting must unfreeze the cycle instead of preserving the stale
+		// entries as if they were programmatic.
+		const current = await createSession(undefined, Settings.isolated({ enabledModels: ["testprov/m1"] }), [
+			{ model: createMockModel({ provider: "testprov" }) },
+		]);
+		expect(current.scopedModels.length).toBe(1);
+
+		current.settings.override("enabledModels", []);
+		expect(await current.refreshScopedModels()).toBe(true);
+		expect(current.scopedModels.length).toBe(0);
 	});
 
 	it("clears the settings-derived scope when the new patterns resolve to zero models", async () => {

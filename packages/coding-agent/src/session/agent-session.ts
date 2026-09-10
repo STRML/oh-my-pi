@@ -736,7 +736,7 @@ export class AgentSession {
 	#modelRegistry: ModelRegistry;
 	/** `--models` scope patterns: user-owned, outranks settings; re-resolved against the rebuilt catalog on each reload. */
 	#cliModelScope: readonly string[] | undefined;
-	/** Programmatic (SDK-supplied) scope from `config.scopedModels`; a settings-driven reload must never clear it. */
+	/** Explicit SDK-supplied scope provenance (`config.sdkScopedModels`); a settings-driven reload must never clear it. */
 	#sdkScopedModels = false;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
@@ -1361,7 +1361,7 @@ export class AgentSession {
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
 		this.#cliModelScope = config.cliModelScope;
-		this.#sdkScopedModels = (config.scopedModels?.length ?? 0) > 0;
+		this.#sdkScopedModels = config.sdkScopedModels === true;
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
