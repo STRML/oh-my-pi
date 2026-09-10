@@ -2,7 +2,7 @@ import { reconcileProviderSets } from "../capability";
 import { bucketRules } from "../capability/rule-buckets";
 import { MAIN_AGENT_RULE_NAME, ruleCapability, setActiveRules, type Rule } from "../capability/rule";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import { serviceTierSettingToTier } from "../config/service-tier";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings";
 import { loadCapability } from "../discovery";
 import { additionalWorkspaceDirectories, normalizeSessionWorkspace } from "../session/session-workspace";
@@ -217,28 +217,19 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 				if (agent.hideThinkingSummary !== nextOmitThinking) {
 					agent.hideThinkingSummary = nextOmitThinking;
 				}
-				// Service tiers snapshot into ModelControls at construction; rebuild
-				// the per-family map from the reloaded `tier.*` settings and apply
-				// per-family changes so requests use the new tier without a restart.
-				// setServiceTierFamily does not persist — it mutates the live map.
-				// Guarded on the tier.* values actually changing: the live
-				// serviceTierByFamily also carries session-only /fast overrides that
-				// a no-op reload must not reset to the settings default.
-				if (
-					before.get("tier.openai") !== runtime.settings.get("tier.openai") ||
-					before.get("tier.anthropic") !== runtime.settings.get("tier.anthropic") ||
-					before.get("tier.google") !== runtime.settings.get("tier.google")
-				) {
-					const nextTierByFamily = buildServiceTierByFamily(
-						runtime.settings.get("tier.openai"),
-						runtime.settings.get("tier.anthropic"),
-						runtime.settings.get("tier.google"),
-					);
-					for (const family of ["openai", "anthropic", "google"] as const) {
-						const next = nextTierByFamily[family];
-						if (runtime.session.serviceTierByFamily[family] !== next) {
-							runtime.session.setServiceTierFamily(family, next);
-						}
+				// Service tiers snapshot into ModelControls at construction; apply
+				// per-family changes from the reloaded `tier.*` settings so requests
+				// use the new tier without a restart. setServiceTierFamily does not
+				// persist — it mutates the live map. Gated per family on that
+				// family's own setting changing: the live serviceTierByFamily also
+				// carries session-only /fast overrides that a sibling family's edit
+				// (or a no-op reload) must not reset to the settings default.
+				for (const family of ["openai", "anthropic", "google"] as const) {
+					const key: SettingPath = `tier.${family}`;
+					if (before.get(key) === runtime.settings.get(key)) continue;
+					const next = serviceTierSettingToTier(runtime.settings.get(key));
+					if (runtime.session.serviceTierByFamily[family] !== next) {
+						runtime.session.setServiceTierFamily(family, next);
 					}
 				}
 				// Workspace roots snapshot into SessionManager at construction

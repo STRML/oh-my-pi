@@ -339,6 +339,19 @@ describe("/reload-settings slash command", () => {
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("tier.openai"));
 	});
 
+	it("preserves a session-only service tier when a different family's tier changes", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, tier: { openai: "flex" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, tier: { openai: "priority" } });
+
+		// Session-only /fast override on anthropic; tier.anthropic is untouched on disk.
+		const { setServiceTierFamily } = await runCommand(settings, {
+			serviceTierByFamily: { anthropic: "priority" },
+		});
+		expect(setServiceTierFamily).toHaveBeenCalledWith("openai", "priority");
+		expect(setServiceTierFamily.mock.calls.some(([family]) => family === "anthropic")).toBe(false);
+	});
+
 	it("reconciles the live bash tool when an async-execution setting changes", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -1191,7 +1204,6 @@ describe("/reload-settings slash command", () => {
 		expect(addWorkspaceDirectory).not.toHaveBeenCalled();
 		expect(removeWorkspaceDirectory).toHaveBeenCalledWith("/settings/gone");
 	});
-
 	it("preserves a session /advisor override when advisor.enabled is unchanged", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1", enabled: true } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
