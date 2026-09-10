@@ -28,6 +28,11 @@ const PROMPT_KEYS: Partial<Record<SettingPath, true>> = {
 	"task.maxConcurrency": true,
 	"task.disabledAgents": true,
 	"security.enabled": true,
+	// The prompt rebuild reads the live obfuscator state (slice C makes the
+	// sdk closure read it live instead of the construction-time constant),
+	// and this handler reconciles the obfuscator before the prompt pass, so
+	// a flipped gate reaches the prompt without a restart.
+	"secrets.enabled": true,
 	includeModelInPrompt: true,
 	personality: true,
 	"tui.reactions": true,
@@ -84,6 +89,27 @@ const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
 	"ttsr.enabled": true,
 	"ttsr.builtinRules": true,
 	"ttsr.disabledRules": true,
+	// sdk.ts captures includeWorkspaceTree once at startup: the flag decides
+	// whether workspaceTreePromise builds a tree (empty placeholder when off),
+	// and the prompt closure keeps its own construction-time copy, so a
+	// flipped flag leaves the startup tree and prompt block until restart.
+	includeWorkspaceTree: true,
+	// SnapcompactInlineTransformer is constructed once from the startup
+	// snapcompact group; neither its render modes nor its shape re-read
+	// settings, so imaged prompt/tool-result output keeps the startup
+	// behavior until restart.
+	"snapcompact.systemPrompt": true,
+	"snapcompact.toolResults": true,
+	"snapcompact.shape": true,
+	// SDK-init-time closure constants (see session-tools.ts): the prompt
+	// rebuild reads the captured values, not the live settings, and the
+	// first two also snapshot into private Agent request fields, so prompt
+	// rebuilds and requests keep the construction-time decisions.
+	// task.eager's eager-task prelude re-reads live, but the prompt's
+	// delegation-guidance half (eagerTasks/eagerTasksAlways) stays stale.
+	inlineToolDescriptors: true,
+	"tools.intentTracing": true,
+	"task.eager": true,
 };
 
 export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -119,9 +145,17 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 			// extension-driven skill changes reach the prompt in the same pass.
 			// (Extension tools/hooks bound to the runner at session construction
 			// still need a restart; the discovery-driven surfaces do not.)
+			// mcp.enableProjectConfig rides the same pipeline: initial MCP
+			// discovery snapshots the flag into the manager, while the TUI
+			// reload pipeline's MCP re-discovery (MCPCommandController) re-reads
+			// it live, so a flipped flag re-discovers project MCP servers under
+			// the current value instead of waiting for a restart. ACP/RPC wire
+			// reloadPlugins to a plugin-only pipeline that never touches MCP, so
+			// there the trigger is a no-op and the flag still needs a restart.
 			if (
 				!Bun.deepEquals(before.get("extensions"), runtime.settings.get("extensions")) ||
-				!Bun.deepEquals(before.get("disabledExtensions"), runtime.settings.get("disabledExtensions"))
+				!Bun.deepEquals(before.get("disabledExtensions"), runtime.settings.get("disabledExtensions")) ||
+				!Bun.deepEquals(before.get("mcp.enableProjectConfig"), runtime.settings.get("mcp.enableProjectConfig"))
 			) {
 				await runtime.reloadPlugins();
 			}

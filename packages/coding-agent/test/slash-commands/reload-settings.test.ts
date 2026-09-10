@@ -548,6 +548,20 @@ describe("/reload-settings slash command", () => {
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("task.batch"));
 	});
 
+	it("rebuilds the base prompt when only secrets.enabled changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, secrets: { enabled: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, secrets: { enabled: false } });
+
+		const { refreshBaseSystemPrompt, reconcileSecretObfuscator, output } = await runCommand(settings);
+		// The handler reconciles the obfuscator first, then PROMPT_KEYS routes
+		// the flip into the prompt rebuild, so the guidance about opaque tokens
+		// tracks the gate without a restart.
+		expect(reconcileSecretObfuscator).toHaveBeenCalledTimes(1);
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("secrets.enabled"));
+	});
+
 	it("leaves the base prompt alone when no prompt-affecting setting changed", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" }, skillful: true });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -962,6 +976,20 @@ describe("/reload-settings slash command", () => {
 		expect(reloadPlugins).not.toHaveBeenCalled();
 	});
 
+	it("runs the plugin reload pipeline when only mcp.enableProjectConfig changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, mcp: { enableProjectConfig: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, mcp: { enableProjectConfig: false } });
+
+		const { output, reloadPlugins } = await runCommand(settings);
+		// Initial MCP discovery snapshots the flag into the manager; the reload
+		// pipeline's MCP re-discovery is what re-reads it live, so the flip must
+		// route through reloadPlugins instead of being reported applied with no
+		// rediscovery.
+		expect(reloadPlugins).toHaveBeenCalledTimes(1);
+		expect(output).toHaveBeenCalledWith(expect.stringContaining("Applied: mcp.enableProjectConfig"));
+	});
+
 	it("reports construction-only tool enablement as restart-required instead of applied", async () => {
 		await writeSettings({
 			advisor: { syncBacklog: "1" },
@@ -990,6 +1018,79 @@ describe("/reload-settings slash command", () => {
 		// isToolAllowed filters these once in createTools() and no live
 		// registry rebuild exists, so claiming them applied would be false.
 		for (const key of ["bash.enabled", "grep.enabled", "todo.enabled", "autolearn.enabled"]) {
+			expect(appliedSection).not.toContain(key);
+			expect(restartSection).toContain(key);
+		}
+	});
+
+	it("reports includeWorkspaceTree as restart-required instead of applied", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, includeWorkspaceTree: false });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "2" }, includeWorkspaceTree: true });
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		// Control: a live-appliable key changed in the same reload still
+		// reports as applied.
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// sdk.ts builds workspaceTreePromise from the startup flag and the
+		// prompt closure keeps a construction-time copy; no live rebuild exists.
+		expect(appliedSection).not.toContain("includeWorkspaceTree");
+		expect(restartSection).toContain("includeWorkspaceTree");
+	});
+
+	it("reports snapcompact inline settings as restart-required instead of applied", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			snapcompact: { systemPrompt: "none", toolResults: false, shape: "auto" },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "2" },
+			snapcompact: { systemPrompt: "all", toolResults: true, shape: "8x8r-bw" },
+		});
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// SnapcompactInlineTransformer is constructed once from the startup
+		// group; its render modes and shape never re-read settings.
+		for (const key of ["snapcompact.systemPrompt", "snapcompact.toolResults", "snapcompact.shape"]) {
+			expect(appliedSection).not.toContain(key);
+			expect(restartSection).toContain(key);
+		}
+	});
+
+	it("reports captured prompt controls as restart-required instead of applied", async () => {
+		await writeSettings({
+			advisor: { syncBacklog: "1" },
+			inlineToolDescriptors: "auto",
+			tools: { intentTracing: true },
+			task: { eager: "default" },
+		});
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "2" },
+			inlineToolDescriptors: "off",
+			tools: { intentTracing: false },
+			task: { eager: "always" },
+		});
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// The prompt rebuild reads the captured closure constants, not the live
+		// settings, and the first two also snapshot into private Agent fields.
+		for (const key of ["inlineToolDescriptors", "tools.intentTracing", "task.eager"]) {
 			expect(appliedSection).not.toContain(key);
 			expect(restartSection).toContain(key);
 		}
