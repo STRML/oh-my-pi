@@ -6393,6 +6393,8 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 	});
