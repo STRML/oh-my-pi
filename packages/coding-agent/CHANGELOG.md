@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- `/reload-settings` now changes only the service-tier families whose `tier.*` setting changed, so a session-only `/fast` override for another family survives.
+- `/reload-settings` no longer revokes a workspace root that another source still supplies when it is withdrawn from `workspace.additionalDirectories`.
 - `/reload-settings` now reloads the plugin pipeline when `extensions` or `disabledExtensions` changes, and awaits headless replays before ACP and RPC acknowledge the reload.
 - `/reload-settings` now reports construction-only tool enablement (`bash.enabled`, `glob.enabled`, `grep.enabled`, and the other tool gates) and the TTSR bucketing keys as restart-required instead of claiming they were applied.
 - `/reload-settings` now clears a `--models` scope whose patterns stop resolving after a catalog reload.
