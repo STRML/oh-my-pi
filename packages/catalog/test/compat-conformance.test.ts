@@ -19,6 +19,8 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"vllm",
 	"openai-codex-device",
+	// Public Provider API discovery via commandCodeModelManagerOptions.
+	"commandcode",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
@@ -99,7 +101,7 @@ describe("compat rules conformance", () => {
 	test("every rules/**/*.kdl file was compiled", async () => {
 		const rulesDir = path.join(import.meta.dir, "../src/compat/rules");
 		const onDisk: string[] = [];
-		for (const group of ["taxonomy", "classes", "providers", "runtime"]) {
+		for (const group of ["taxonomy", "classes", "providers", "runtime", "auth"]) {
 			for (const name of await fs.readdir(path.join(rulesDir, group))) {
 				if (name.endsWith(".kdl")) onDisk.push(`${group}/${name}`);
 			}
