@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- A root passed with `--add-dir` is no longer revoked by `/reload-settings` when the same path is withdrawn from `workspace.additionalDirectories`; CLI-supplied roots now carry their own provenance instead of being treated as settings-derived.
+- `/reload-settings` now revalidates `retry.fallbackChains` against the refreshed catalog, so a repaired chain stops warning and a newly invalid selector starts warning.
+- `/reload-settings` now reports `generate_image.enabled` and `speechgen.enabled` as needing a restart instead of claiming they were applied.
 - `/reload-settings` now reports `includeWorkspaceTree`, `snapcompact.*`, `inlineToolDescriptors`, `tools.intentTracing`, and `task.eager` as needing a restart instead of claiming they were applied, and rebuilds the base prompt when `secrets.enabled` changes so the opaque-token guidance matches the live redaction.
 - `/reload-settings` now replays `compaction.idleEnabled` and MCP notification subscriptions in ACP and RPC hosts.
 - `/reload-settings` now tells a CLI-resolved model scope apart from an SDK-supplied one, so clearing `enabledModels` clears the derived scope instead of keeping a stale cycle.

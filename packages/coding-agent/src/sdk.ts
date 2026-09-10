@@ -1493,7 +1493,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
 		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
 		: undefined;
-	const secretsEnabled = obfuscator?.hasSecrets() === true;
 
 	// An abnormal process exit after a non-terminal message tail is durable
 	// evidence that the old process can no longer finish that turn. Preserve the
