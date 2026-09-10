@@ -71,6 +71,7 @@ export const REPLAYED_SETTING_IDS = [
 	"tui.titleState",
 	"composer.shape",
 	"compaction.enabled",
+	"compaction.idleEnabled",
 	"compaction.idleThresholdTokens",
 	"compaction.idleTimeoutSeconds",
 	"recap.enabled",

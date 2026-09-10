@@ -40,6 +40,7 @@ describe("applySettingSideEffects replay coverage", () => {
 		// the matching consumer cache stale after /reload-settings.
 		for (const id of [
 			"compaction.enabled",
+			"compaction.idleEnabled",
 			"showHardwareCursor",
 			"tui.textSizing",
 			"tui.titleState",
@@ -64,6 +65,18 @@ describe("applySettingSideEffects replay coverage", () => {
 		applySettingSideEffects(ctx, "compaction.enabled", true, { persist: false });
 
 		expect(setAutoCompactEnabled).toHaveBeenCalledWith(false);
+	});
+
+	it("replays compaction.idleEnabled into the idle compaction timer refresh", () => {
+		const refreshIdleCompactionTimer = vi.fn();
+		const ctx = { eventController: { refreshIdleCompactionTimer } } as unknown as InteractiveModeContext;
+
+		// Disabling must tear down an armed idle timer and enabling must arm one;
+		// both route through the event controller's single re-arm entry point.
+		applySettingSideEffects(ctx, "compaction.idleEnabled", false, { persist: false });
+		applySettingSideEffects(ctx, "compaction.idleEnabled", true, { persist: false });
+
+		expect(refreshIdleCompactionTimer).toHaveBeenCalledTimes(2);
 	});
 
 	it("replays statusLine segment keys through the shared status line apply", () => {
