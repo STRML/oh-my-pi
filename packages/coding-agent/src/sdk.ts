@@ -1482,7 +1482,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
-	const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
+	// `let` on purpose: `rebuildSecretObfuscator` swaps in the rebuilt instance
+	// after a `secrets.enabled` reload, and the system-prompt rebuild below
+	// re-reads this binding so the redaction guidance tracks the obfuscator
+	// actually in effect rather than a construction-time snapshot.
+	let obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
 		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
 		: undefined;
 	const secretsEnabled = obfuscator?.hasSecrets() === true;
@@ -3205,7 +3209,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
-				secretsEnabled,
+				secretsEnabled: obfuscator?.hasSecrets() === true,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
@@ -3825,8 +3829,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
-			rebuildSecretObfuscator: async () =>
-				settings.get("secrets.enabled") ? await buildSecretObfuscator(cwd, agentDir, options.agentDir) : undefined,
+			rebuildSecretObfuscator: async () => {
+				// Keep the sdk-side binding in lockstep with the session's live
+				// obfuscator: the reload handler runs this before the prompt pass,
+				// so the system-prompt rebuild below reads the post-reload instance.
+				obfuscator = settings.get("secrets.enabled")
+					? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
+					: undefined;
+				return obfuscator;
+			},
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
