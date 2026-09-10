@@ -77,6 +77,13 @@ const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
 	"lsp.enabled": true,
 	"checkpoint.enabled": true,
 	"autolearn.enabled": true,
+	// sdk.ts mounts the image-generation tools and the TTS tool into the
+	// session's custom-tools extension only while building the initial
+	// registry (createAgentSessionScoped); no reload reconciler adds or
+	// removes custom tools, so a flipped gate keeps the startup tool set
+	// until restart.
+	"generate_image.enabled": true,
+	"speechgen.enabled": true,
 	// The rebucketed rule set reaches stream matching and rule:// live
 	// (setActiveRules in the handler below), but the sdk prompt closure keeps
 	// its construction-time buckets: bucketRules routes TTSR-conditioned

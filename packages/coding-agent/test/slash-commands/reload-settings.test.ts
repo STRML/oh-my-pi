@@ -882,6 +882,31 @@ describe("/reload-settings slash command", () => {
 		expect(restartSection).toContain("tools.abortOnFabricatedResult");
 	});
 
+	it("reports media-tool gates as restart-required instead of applied", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({
+			advisor: { syncBacklog: "2" },
+			generate_image: { enabled: true },
+			speechgen: { enabled: true },
+		});
+
+		const { output } = await runCommand(settings);
+		const messages = output.mock.calls.map(call => String(call[0]));
+		const message = messages.find(text => text.includes("Applied:") || text.includes("Restart required:"));
+		if (!message) throw new Error("Expected a reload result message");
+		const [appliedSection, restartSection] = message.split(" Restart required:");
+		// Control: a live-appliable key changed in the same reload still
+		// reports as applied.
+		expect(appliedSection).toContain("Applied: advisor.syncBacklog");
+		// sdk.ts registers generate_image and the TTS tool only while building
+		// the initial custom-tools registry; no reload reconciler mounts or
+		// unmounts them, so reporting applied would be false until restart.
+		expect(appliedSection).not.toContain("generate_image.enabled");
+		expect(appliedSection).not.toContain("speechgen.enabled");
+		expect(restartSection).toContain("generate_image.enabled");
+		expect(restartSection).toContain("speechgen.enabled");
+	});
 	it("applies a persisted value that appears over a host-default override", async () => {
 		await writeSettings({ advisor: { syncBacklog: "1" } });
 		const settings = await Settings.init({ cwd: projectDir, agentDir });
