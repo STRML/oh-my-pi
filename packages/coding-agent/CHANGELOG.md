@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- `/reload-settings` now reports `includeWorkspaceTree`, `snapcompact.*`, `inlineToolDescriptors`, `tools.intentTracing`, and `task.eager` as needing a restart instead of claiming they were applied, and rebuilds the base prompt when `secrets.enabled` changes so the opaque-token guidance matches the live redaction.
+- `/reload-settings` now replays `compaction.idleEnabled` and MCP notification subscriptions in ACP and RPC hosts.
+- `/reload-settings` now tells a CLI-resolved model scope apart from an SDK-supplied one, so clearing `enabledModels` clears the derived scope instead of keeping a stale cycle.
+- `/reload-settings` now re-discovers project MCP servers when `mcp.enableProjectConfig` changes (TUI hosts; ACP and RPC still need a restart).
 - `/reload-settings` now changes only the service-tier families whose `tier.*` setting changed, so a session-only `/fast` override for another family survives.
 - `/reload-settings` no longer revokes a workspace root that another source still supplies when it is withdrawn from `workspace.additionalDirectories`.
 - `/reload-settings` now reloads the plugin pipeline when `extensions` or `disabledExtensions` changes, and awaits headless replays before ACP and RPC acknowledge the reload.
