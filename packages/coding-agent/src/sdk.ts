@@ -379,6 +379,8 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute or cwd-relative. */
 	additionalDirectories?: string[];
+	/** Marks roots in `additionalDirectories` that this caller itself supplied (the CLI's `--add-dir`). They are seeded as session-supplied so a settings-driven reload withdrawal cannot revoke them; embedders passing only `additionalDirectories` leave their roots settings-owned. */
+	sessionSuppliedDirectories?: string[];
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
@@ -1441,14 +1443,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const sessionSuppliedDirs = options.sessionSuppliedDirectories ?? [];
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");
-	if (configuredDirs.length > 0) {
+	const seededDirs = [...new Set([...configuredDirs, ...sessionSuppliedDirs])];
+	if (seededDirs.length > 0) {
 		// Merge with any roots restored from the session header (resume/fork), not replace.
 		const existing = sessionManager.getAdditionalDirectories();
-		const merged = [...new Set([...existing, ...configuredDirs])];
-		await sessionManager.setAdditionalDirectories(merged);
+		const merged = [...new Set([...existing, ...seededDirs])];
+		await sessionManager.setAdditionalDirectories(merged, sessionSuppliedDirs);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const forkCacheShapeChanged =

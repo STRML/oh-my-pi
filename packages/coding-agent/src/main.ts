@@ -1089,6 +1089,13 @@ export async function buildSessionOptions(
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {
 		options.additionalDirectories = [...new Set([...cliDirs, ...settingsDirs])];
 	}
+	if (cliDirs.length > 0) {
+		// Provenance rides with the roots: without it sdk.ts seeds the merged
+		// list settings-owned and a reload that withdraws the same path from
+		// workspace.additionalDirectories would revoke a root the user passed
+		// on the command line.
+		options.sessionSuppliedDirectories = cliDirs;
+	}
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}

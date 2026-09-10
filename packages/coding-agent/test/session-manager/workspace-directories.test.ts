@@ -243,4 +243,19 @@ describe("SessionManager workspace directories", () => {
 		await session.setAdditionalDirectories([path.resolve("/seeded")]);
 		expect(session.isSessionSuppliedDirectory("/claimed")).toBe(false);
 	});
+
+	it("setAdditionalDirectories claims explicitly session-supplied seeds and a settings withdrawal cannot revoke them", async () => {
+		const session = SessionManager.inMemory();
+		const cliRoot = path.resolve("/cli-supplied");
+		const settingsRoot = path.resolve("/settings-supplied");
+		// Startup seeding: the CLI passes its own roots next to settings-derived ones.
+		await session.setAdditionalDirectories([cliRoot, settingsRoot], [cliRoot]);
+		expect(session.isSessionSuppliedDirectory(cliRoot)).toBe(true);
+		expect(session.isSessionSuppliedDirectory(settingsRoot)).toBe(false);
+
+		// The /reload-settings delta removes exactly the roots this guard does
+		// not protect: the settings root goes, the CLI root survives.
+		await session.removeWorkspaceDirectory(settingsRoot);
+		expect(session.getAdditionalDirectories()).toEqual([cliRoot]);
+	});
 });

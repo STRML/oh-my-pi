@@ -2064,14 +2064,20 @@ export class SessionManager {
 		return resolved;
 	}
 
-	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). */
-	async setAdditionalDirectories(directories: string[]): Promise<void> {
+	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). `sessionSupplied` names roots owned by a non-settings source (the CLI's `--add-dir`): entries that land in the seeded list are claimed so a later settings-side withdrawal cannot revoke them. */
+	async setAdditionalDirectories(directories: string[], sessionSupplied?: readonly string[]): Promise<void> {
 		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
 		const next = additionalWorkspaceDirectories(workspace);
-		// Keep claims only for roots this list retains; newly seeded entries are
-		// settings-derived (sdk.ts merges header roots, which are already present
-		// and keep their claims) and default to settings-owned.
-		this.#sessionSuppliedDirectories = new Set([...this.#sessionSuppliedDirectories].filter(d => next.includes(d)));
+		const claimed = new Set(
+			(sessionSupplied ?? []).map(d => normalizeWorkspaceDirectory(d, this.#cwd)).filter(d => next.includes(d)),
+		);
+		// Keep claims only for roots this list retains; entries are settings-derived
+		// unless explicitly claimed session-supplied (sdk.ts merges header roots,
+		// which are already present and keep their claims).
+		this.#sessionSuppliedDirectories = new Set([
+			...[...this.#sessionSuppliedDirectories].filter(d => next.includes(d)),
+			...claimed,
+		]);
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			this.#additionalDirectories = next;
