@@ -1,20 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui";
-import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	applySessionSettingSideEffects,
 	applySettingSideEffects,
-	REPLAYED_SETTING_IDS,
 	replaySessionSettingSideEffects,
 	snapshotReplaySettings,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/setting-side-effects";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import {
 	getTerminalTitleStateEnabled,
 	setTerminalTitleStateEnabled,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import type { AgentSession } from "../../../src/session/agent-session";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
 
@@ -35,20 +38,134 @@ describe("applySettingSideEffects replay coverage", () => {
 		await tempDir?.remove();
 	});
 
-	it("allowlists every cached value this suite pins a replay path for", () => {
-		// The replay loop only visits allowlisted ids; an id missing here keeps
-		// the matching consumer cache stale after /reload-settings.
-		for (const id of [
-			"compaction.enabled",
-			"compaction.idleEnabled",
-			"showHardwareCursor",
-			"tui.textSizing",
-			"tui.titleState",
-			"statusLine.leftSegments",
-			"statusLine.rightSegments",
-			"statusLine.segmentOptions",
-		] as const) {
-			expect(REPLAYED_SETTING_IDS).toContain(id);
+	it("replays on-disk changes through /reload-settings into the cached components", async () => {
+		const projectDir = tempDir.join("project");
+		const agentDir = tempDir.join("agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
+		const configPath = path.join(agentDir, "config.yml");
+		const writeConfig = (values: Record<string, unknown>) => Bun.write(configPath, YAML.stringify(values, null, 2));
+
+		// The TUI dispatcher snapshots ctx.settings before the command runs and
+		// replays only the ids whose value changed; membership in
+		// REPLAYED_SETTING_IDS is what routes each key here, so dropping one
+		// leaves that component stale and fails the matching assertion below.
+		resetSettingsForTest();
+		await writeConfig({
+			compaction: { enabled: true, idleEnabled: true },
+			showHardwareCursor: true,
+			tui: { textSizing: false, titleState: true },
+			statusLine: { leftSegments: ["model"], rightSegments: [], segmentOptions: {} },
+		});
+		const settingsInstance = await Settings.init({ cwd: projectDir, agentDir });
+		await writeConfig({
+			compaction: { enabled: false, idleEnabled: false },
+			showHardwareCursor: false,
+			tui: { textSizing: true, titleState: false },
+			statusLine: {
+				leftSegments: ["model", "token_total"],
+				rightSegments: ["token_total"],
+				segmentOptions: { model: { showSpeed: true } },
+			},
+		});
+
+		const capability = TERMINAL as unknown as { supportsTextSizing: boolean };
+		const originalCapability = capability.supportsTextSizing;
+		const originalSizing = TERMINAL.textSizing;
+		capability.supportsTextSizing = true;
+		setTerminalTitleStateEnabled(true);
+		try {
+			// The status line caches the session's effective flag, not the raw
+			// reloaded value: the push must carry this getter's `true` even
+			// though the reloaded compaction.enabled is false.
+			const session = {
+				autoCompactionEnabled: true,
+				refreshModels: async () => {},
+				refreshScopedModels: async () => false,
+				reapplyModelRoles: () => {},
+				isAdvisorEnabled: () => true,
+				setAdvisorEnabled: () => {},
+				steeringMode: "one-at-a-time",
+				followUpMode: "one-at-a-time",
+				interruptMode: "wait",
+				setSteeringMode: () => {},
+				setFollowUpMode: () => {},
+				setInterruptMode: () => {},
+				serviceTierByFamily: {},
+				setServiceTierFamily: () => {},
+				agent: {},
+				reconcileBashToolSettings: async () => true,
+				reconcileToolSettings: async () => true,
+				reconcileSecretObfuscator: async () => true,
+				reconcileBrowserIdleClose: () => {},
+				reconcileBrowserEnabled: async () => {},
+				reconcileComputerEnabled: async () => {},
+				reconcileSharedLsp: () => {},
+				refreshSkills: async () => {},
+				refreshBaseSystemPrompt: async () => {},
+				updateTtsrSettings: () => false,
+				ttsrManager: undefined,
+				asyncJobManager: { setMaxRunningJobs: () => {} },
+			};
+			const setAutoCompactEnabled = vi.fn();
+			const refreshIdleCompactionTimer = vi.fn();
+			const setShowHardwareCursor = vi.fn();
+			const editorCursorModes: boolean[] = [];
+			const statusLineUpdates: Record<string, unknown>[] = [];
+			const ctx = {
+				settings: settingsInstance,
+				session,
+				sessionManager: {
+					getCwd: () => projectDir,
+					getAdditionalDirectories: () => [],
+					addWorkspaceDirectory: async () => null,
+					removeWorkspaceDirectory: async () => null,
+					isSessionSuppliedDirectory: () => false,
+				},
+				editor: {
+					setText: () => {},
+					setUseTerminalCursor: (use: boolean) => editorCursorModes.push(use),
+				},
+				ui: {
+					setShowHardwareCursor,
+					getShowHardwareCursor: () => false,
+					invalidate: () => {},
+					requestRender: () => {},
+				},
+				statusLine: {
+					setAutoCompactEnabled,
+					updateSettings: (next: Record<string, unknown>) => statusLineUpdates.push(next),
+				},
+				eventController: { refreshIdleCompactionTimer },
+				showStatus: () => {},
+				refreshSlashCommandState: () => {},
+			} as unknown as InteractiveModeContext;
+
+			expect(await executeBuiltinSlashCommand("/reload-settings", { ctx })).toBe(true);
+
+			// compaction.enabled → the status line's cached effective flag.
+			expect(setAutoCompactEnabled).toHaveBeenCalledTimes(1);
+			expect(setAutoCompactEnabled).toHaveBeenCalledWith(true);
+			// compaction.idleEnabled → the idle compaction timer re-arm.
+			expect(refreshIdleCompactionTimer).toHaveBeenCalledTimes(1);
+			// showHardwareCursor → TUI cursor mode and editor glyph mode.
+			expect(setShowHardwareCursor).toHaveBeenCalledWith(false);
+			expect(editorCursorModes).toEqual([false]);
+			// tui.textSizing → the terminal's global text-sizing mode.
+			expect(TERMINAL.textSizing).toBe(true);
+			// tui.titleState → the terminal title run-state gate.
+			expect(getTerminalTitleStateEnabled()).toBe(false);
+			// statusLine segments → the shared status-line apply, once per key.
+			expect(statusLineUpdates).toHaveLength(3);
+			expect(statusLineUpdates[2]).toMatchObject({
+				leftSegments: ["model", "token_total"],
+				rightSegments: ["token_total"],
+				segmentOptions: { model: { showSpeed: true } },
+			});
+		} finally {
+			capability.supportsTextSizing = originalCapability;
+			setTerminalTextSizing(originalSizing);
+			setTerminalTitleStateEnabled(true);
 		}
 	});
 
