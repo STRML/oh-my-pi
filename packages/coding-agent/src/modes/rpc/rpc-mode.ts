@@ -30,8 +30,13 @@ import {
 	type Skill,
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { MCPManager } from "../../mcp";
 import { type Theme, theme } from "../../modes/theme/theme";
-import { replaySessionSettingSideEffects, snapshotReplaySettings } from "../controllers/setting-side-effects";
+import {
+	type SettingSideEffectOptions,
+	replaySessionSettingSideEffects,
+	snapshotReplaySettings,
+} from "../controllers/setting-side-effects";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -219,14 +224,17 @@ export async function tryRunRpcSkillCommand(
  * memory backend) landing, or the next prompt runs against the old tool set.
  * RunRpcMode wires this as the builtin runtime's `notifyConfigChanged` with a
  * `snapshotReplaySettings` snapshot taken before the command runs, mirroring
- * the TUI adapter's replay-before-notify contract; exported for tests.
+ * the TUI adapter's replay-before-notify contract, and the process MCP manager
+ * instance so a changed `mcp.notifications` reuses `setNotificationsEnabled`
+ * on the live connections; exported for tests.
  */
 export async function emitRpcConfigUpdate(
 	session: AgentSession,
 	output: (obj: object) => void,
 	beforeReplay: ReadonlyMap<string, unknown>,
+	options: SettingSideEffectOptions = {},
 ): Promise<void> {
-	await replaySessionSettingSideEffects(session, beforeReplay);
+	await replaySessionSettingSideEffects(session, beforeReplay, options);
 	output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 }
 
@@ -1137,7 +1145,8 @@ export async function runRpcMode(
 					notifyTitleChanged: async () => {
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
-					notifyConfigChanged: () => emitRpcConfigUpdate(session, output, beforeReplay),
+					notifyConfigChanged: () =>
+						emitRpcConfigUpdate(session, output, beforeReplay, { mcpManager: MCPManager.instance() }),
 				});
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {

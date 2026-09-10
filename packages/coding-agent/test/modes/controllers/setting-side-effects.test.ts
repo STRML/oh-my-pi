@@ -271,6 +271,22 @@ describe("replaySessionSettingSideEffects", () => {
 		expect(applied).toBe(1);
 	});
 
+	it("replays mcp.notifications through the host-supplied MCP manager", async () => {
+		const notificationStates: boolean[] = [];
+		const session = stubSession();
+		const beforeReplay = snapshotReplaySettings(settings);
+		settings.set("mcp.notifications", true);
+
+		await replaySessionSettingSideEffects(session, beforeReplay, {
+			mcpManager: { setNotificationsEnabled: enabled => notificationStates.push(enabled) },
+		});
+
+		// Exactly one apply for the one changed id: an unchanged value stays
+		// behind the diff filter, and the replay reuses the manager's
+		// setNotificationsEnabled instead of reimplementing the subscription sweep.
+		expect(notificationStates).toEqual([true]);
+	});
+
 	it("resolves only after every replayed session mutation settles", async () => {
 		let releaseThinkTool!: (enabled: boolean) => void;
 		const thinkToolGate = new Promise<boolean>(resolve => {

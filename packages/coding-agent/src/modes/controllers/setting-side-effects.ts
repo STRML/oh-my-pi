@@ -2,6 +2,7 @@ import { type ResizeScrollbackMode, setTerminalTextSizing, TERMINAL, setTuiTight
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings, type SettingPath, type Settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
+import type { MCPManager } from "../../mcp";
 import { setColorBlindMode, setMarkdownMermaidRendering, setSymbolPreset, setTheme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import type { ConfiguredThinkingLevel } from "../../thinking";
@@ -39,6 +40,14 @@ export interface SettingSideEffectOptions {
 	 * omit the sink, which routes failures to the logger.
 	 */
 	onError?: (message: string) => void;
+	/**
+	 * Live MCP manager for the `mcp.notifications` apply: `setNotificationsEnabled`
+	 * owns the subscribe/unsubscribe sweep across connected servers, so a replay
+	 * reuses it instead of duplicating that logic. The interactive path reads
+	 * `ctx.mcpManager` directly; protocol hosts thread their manager here
+	 * (optional — hosts with no MCP configured skip the apply).
+	 */
+	mcpManager?: Pick<MCPManager, "setNotificationsEnabled">;
 }
 
 /**
@@ -146,6 +155,9 @@ export function applySessionSettingSideEffects(
 			options.pending?.push(thinkTool);
 			break;
 		}
+		case "mcp.notifications":
+			options.mcpManager?.setNotificationsEnabled(value as boolean);
+			break;
 	}
 }
 
@@ -175,16 +187,19 @@ export function snapshotReplaySettings(snapshotSettings: Settings): Map<string, 
  * session-only thinking level and append a `thinking_level_change`. Always
  * `persist: false` — the values were just loaded from disk, and a
  * project-overlay value must not be promoted into global config.
+ * Hosts with a live MCP manager thread it through `options.mcpManager` so a
+ * changed `mcp.notifications` reuses `MCPManager.setNotificationsEnabled`.
  */
 export async function replaySessionSettingSideEffects(
 	session: AgentSession,
 	before: ReadonlyMap<string, unknown>,
+	options: SettingSideEffectOptions = {},
 ): Promise<void> {
 	const pending: Promise<unknown>[] = [];
 	for (const id of REPLAYED_SETTING_IDS) {
 		const value = session.settings.get(id);
 		if (Bun.deepEquals(before.get(id), value)) continue;
-		applySessionSettingSideEffects(session, id, value, { persist: false, pending });
+		applySessionSettingSideEffects(session, id, value, { ...options, persist: false, pending });
 	}
 	await Promise.all(pending);
 }

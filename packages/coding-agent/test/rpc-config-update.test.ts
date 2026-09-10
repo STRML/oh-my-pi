@@ -65,6 +65,39 @@ describe("emitRpcConfigUpdate", () => {
 		]);
 	});
 
+	it("replays mcp.notifications through the host-supplied manager before the frame", async () => {
+		const order: string[] = [];
+		const session = {
+			settings,
+			setThinkingLevel: () => {},
+			refreshBaseSystemPrompt: async () => {},
+			applyMemoryBackend: async () => {},
+			setThinkToolEnabled: async () => true,
+			model: { provider: "anthropic", id: "claude" },
+			thinkingLevel: "high",
+		} as unknown as AgentSession;
+		const beforeReplay = snapshotReplaySettings(settings);
+		settings.set("mcp.notifications", true);
+
+		const frames: object[] = [];
+		await emitRpcConfigUpdate(
+			session,
+			obj => {
+				order.push("frame");
+				frames.push(obj);
+			},
+			beforeReplay,
+			{ mcpManager: { setNotificationsEnabled: enabled => order.push(`mcp:${enabled}`) } },
+		);
+
+		// The subscription sweep runs inside the replay, before the host ack —
+		// the next prompt must not start against stale subscription state.
+		expect(order).toEqual(["mcp:true", "frame"]);
+		expect(frames).toEqual([
+			{ type: "config_update", model: { provider: "anthropic", id: "claude" }, thinkingLevel: "high" },
+		]);
+	});
+
 	it("does not reset a session-only thinking level when nothing changed", async () => {
 		settings.set("defaultThinkingLevel", Effort.High);
 		const thinkingLevels: unknown[] = [];
