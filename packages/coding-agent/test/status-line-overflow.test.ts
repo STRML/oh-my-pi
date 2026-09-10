@@ -609,7 +609,7 @@ describe("status line two-line overflow", () => {
 		expect(border.width).toBe(Math.max(...lineWidths));
 	});
 
-	it("moves popped right segments to a second line instead of losing them", () => {
+	it("moves popped right segments to a second line, clamped to the requested width", () => {
 		const session = createStatusLineSession("Right session", `MODEL_RIGHT_${"z".repeat(24)}`);
 		const component = new StatusLineComponent(session);
 		component.updateSettings({
@@ -634,9 +634,14 @@ describe("status line two-line overflow", () => {
 		expect(lines.length).toBe(2);
 		expect(stripAnsi(lines[0])).not.toContain("Right session");
 		const line2 = stripAnsi(lines[1]);
-		// Line-1 budgeting may truncate the elastic title before it pops;
-		// it must still land on the overflow row instead of being lost.
-		expect(line2).toContain("Right s");
-		expect(line2).toContain("MODEL_RIGHT_");
+		// Both rows answer to the requested width. The overflow row is framed at
+		// line 1's width, so a wider second row would wrap in the terminal and
+		// desync the border from the width it reports; the tail is truncated (with
+		// the ellipsis marker) instead of the row growing past the budget or the
+		// popped segment being dropped.
+		expect(visibleWidth(lines[1])).toBeLessThanOrEqual(8);
+		expect(border.width).toBeLessThanOrEqual(8);
+		expect(line2).toContain("MODEL");
+		expect(line2.endsWith("…")).toBe(true);
 	});
 });

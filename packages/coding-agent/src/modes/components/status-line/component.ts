@@ -2439,9 +2439,16 @@ export class StatusLineComponent implements Component {
 		// first, then right group — joined by the dot separator. Each part is
 		// already self-contained ANSI from renderSegment, so no bg group or
 		// powerline caps are needed; the editor frames/pads this row.
+		//
+		// The row is framed at line 1's width, so it answers to the same budget: a
+		// wider second row wraps in the terminal and desynchronizes the border from
+		// the width it reports (getTopBorder reports the widest line). Truncating
+		// the tail — ellipsis included — keeps that invariant while preserving the
+		// shed segments up to the room the row actually has, the same
+		// truncate-before-dropping rule line 1 applies to its elastic segments.
 		const overflowParts = [...overflowLeft.reverse(), ...overflowRight.reverse()];
 		if (overflowParts.length === 0) return line1;
-		return `${line1}\n${overflowParts.join(theme.sep.dot)}`;
+		return `${line1}\n${truncateToWidth(overflowParts.join(theme.sep.dot), topFillWidth)}`;
 	}
 
 	/**
