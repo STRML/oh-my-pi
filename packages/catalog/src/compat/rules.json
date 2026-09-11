@@ -9671,6 +9671,9 @@
 						"value": "deepseek-v4-flash-vision-exp"
 					}
 				],
+				"wire": {
+					"clampOutputToModelMax": true
+				},
 				"catalog": {
 					"timeBased": {
 						"offPeakMultiplier": 0.5,
@@ -9696,7 +9699,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:44",
+				"source": "providers/deepseek.kdl:45",
 				"providers": [
 					"deepseek"
 				],
@@ -9714,7 +9717,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:51",
+				"source": "providers/deepseek.kdl:52",
 				"providers": [
 					"deepseek"
 				],
@@ -9758,7 +9761,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:84",
+				"source": "providers/deepseek.kdl:85",
 				"providers": [
 					"deepseek"
 				],
@@ -13026,7 +13029,32 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:15",
+				"source": "providers/opencode-go.kdl:10",
+				"providers": [
+					"opencode-go"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "deepseek-v4.1-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/opencode-go.kdl:25",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -13037,7 +13065,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:13",
+				"source": "providers/opencode-go.kdl:23",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -13047,7 +13075,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:20",
+				"source": "providers/opencode-go.kdl:30",
 				"providers": [
 					"opencode-go"
 				],
@@ -13062,7 +13090,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:26",
+				"source": "providers/opencode-go.kdl:36",
 				"providers": [
 					"opencode-go"
 				],
@@ -13084,7 +13112,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:32",
+				"source": "providers/opencode-go.kdl:42",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -13094,7 +13122,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:35",
+				"source": "providers/opencode-go.kdl:45",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -13104,7 +13132,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:39",
+				"source": "providers/opencode-go.kdl:49",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13115,7 +13143,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:38",
+				"source": "providers/opencode-go.kdl:48",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13125,7 +13153,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:46",
+				"source": "providers/opencode-go.kdl:56",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13151,7 +13179,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:50",
+				"source": "providers/opencode-go.kdl:60",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13177,7 +13205,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:56",
+				"source": "providers/opencode-go.kdl:66",
 				"providers": [
 					"opencode-go"
 				],
@@ -13202,7 +13230,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:61",
+				"source": "providers/opencode-go.kdl:71",
 				"providers": [
 					"opencode-go"
 				],
@@ -13222,7 +13250,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:66",
+				"source": "providers/opencode-go.kdl:76",
 				"providers": [
 					"opencode-go"
 				],
@@ -13244,7 +13272,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:71",
+				"source": "providers/opencode-go.kdl:81",
 				"providers": [
 					"opencode-go"
 				],
@@ -13265,7 +13293,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:75",
+				"source": "providers/opencode-go.kdl:85",
 				"providers": [
 					"opencode-go"
 				],
@@ -13292,7 +13320,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:79",
+				"source": "providers/opencode-go.kdl:89",
 				"providers": [
 					"opencode-go"
 				],
@@ -13314,7 +13342,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:84",
+				"source": "providers/opencode-go.kdl:94",
 				"providers": [
 					"opencode-go"
 				],
@@ -13329,7 +13357,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:88",
+				"source": "providers/opencode-go.kdl:98",
 				"providers": [
 					"opencode-go"
 				],

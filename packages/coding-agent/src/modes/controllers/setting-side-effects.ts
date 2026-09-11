@@ -307,6 +307,9 @@ export function applySettingSideEffects(
 		case "tui.vimModeDisplay":
 			ctx.applyVimModeSetting();
 			break;
+		case "display.pinnedAgents":
+			ctx.applyPinnedAgentsSetting();
+			break;
 		case "spelling.typoDetection":
 		case "spelling.autocomplete":
 		case "spelling.autocorrect":
