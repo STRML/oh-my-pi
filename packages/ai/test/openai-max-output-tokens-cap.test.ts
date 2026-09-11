@@ -210,6 +210,15 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(2_048);
 	});
 
+	it.each(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+		"lets first-party DeepSeek %s requests use the documented 384k output cap",
+		async id => {
+			const model = getBundledModel("deepseek", id) as Model<"openai-completions">;
+			const body = await captureCompletionsBody(model, model.maxTokens ?? undefined);
+			expect(body.max_tokens).toBe(384_000);
+		},
+	);
+
 	it("clamps non-aggregator completions output to the 64k ceiling", async () => {
 		const body = await captureCompletionsBody(directCompletionsModel(131_072), 131_072);
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
