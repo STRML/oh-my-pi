@@ -2096,6 +2096,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
@@ -4912,6 +4924,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,
@@ -5823,7 +5860,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
