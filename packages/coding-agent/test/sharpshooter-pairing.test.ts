@@ -87,32 +87,46 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(instructions).toContain("Keep storage project-scoped.");
 	});
 
-	it("starts, clears and enqueues both backends", async () => {
+	it("starts and enqueues both backends", async () => {
 		const calls: string[] = [];
 		const start = spyOn(sharpshooterBackend, "start").mockImplementation(() => {
 			calls.push("sharpshooter start");
-		});
-		const clear = spyOn(sharpshooterBackend, "clear").mockImplementation(async () => {
-			calls.push("sharpshooter clear");
 		});
 		const enqueue = spyOn(sharpshooterBackend, "enqueue").mockImplementation(async () => {
 			calls.push("sharpshooter enqueue");
 		});
 		const paired = withSharpshooter(stubPrimary(calls));
 		paired.start({} as MemoryBackendStartOptions);
-		await paired.clear("/agent", "/cwd");
 		await paired.enqueue("/agent", "/cwd");
 		// start is fire-and-forget, so let its microtasks settle before asserting.
 		await Promise.resolve();
 		expect(calls).toContain("start");
 		expect(calls).toContain("sharpshooter start");
-		expect(calls).toContain("clear");
-		expect(calls).toContain("sharpshooter clear");
 		expect(calls).toContain("enqueue");
 		expect(calls).toContain("sharpshooter enqueue");
 		expect(start).toHaveBeenCalled();
-		expect(clear).toHaveBeenCalled();
 		expect(enqueue).toHaveBeenCalled();
+	});
+
+	it("clears the selected backend without touching the decision files", async () => {
+		const root = await makeTempDir("sharpshooter-pairing-clear");
+		const agentDir = path.join(root, "agent");
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const bankDir = sharpshooterBankDir(agentDir, cwd);
+		await fs.mkdir(bankDir, { recursive: true });
+		const decisions = path.join(bankDir, "architecture.md");
+		await Bun.write(decisions, "- Keep storage project-scoped.\n");
+
+		// No spy here: the point is that the real files are still on disk afterwards.
+		// They are rewritten whole by a model and kept in no history, so a wipe is
+		// unrecoverable (see #10200).
+		const calls: string[] = [];
+		const paired = withSharpshooter(stubPrimary(calls));
+		await paired.clear(agentDir, cwd);
+
+		expect(calls).toContain("clear");
+		await expect(Bun.file(decisions).text()).resolves.toBe("- Keep storage project-scoped.\n");
 	});
 
 	it("keeps the primary's turn prompt, save and compaction hooks", async () => {
@@ -151,13 +165,29 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(status?.message).toContain("sharpshooter — architecture.md: 3 lines");
 	});
 
+	it("still surfaces a failure from the selected backend", async () => {
+		const failing: MemoryBackend = {
+			...stubPrimary([]),
+			enqueue: async () => {
+				throw new Error("retain failed");
+			},
+			buildDeveloperInstructions: async () => {
+				throw new Error("instructions failed");
+			},
+		};
+		const paired = withSharpshooter(failing);
+		// Pairing must not turn a real failure into a logged one the caller never sees.
+		await expect(paired.enqueue("/agent", "/cwd")).rejects.toThrow("retain failed");
+		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).rejects.toThrow("instructions failed");
+	});
+
 	it("keeps the primary working when the paired backend throws", async () => {
 		spyOn(sharpshooterBackend, "buildDeveloperInstructions").mockRejectedValue(new Error("sharpshooter is broken"));
-		spyOn(sharpshooterBackend, "clear").mockRejectedValue(new Error("sharpshooter is broken"));
+		spyOn(sharpshooterBackend, "enqueue").mockRejectedValue(new Error("sharpshooter is broken"));
 		const calls: string[] = [];
 		const paired = withSharpshooter(stubPrimary(calls));
 		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).resolves.toBe("PRIMARY INSTRUCTIONS");
-		await paired.clear("/agent", "/cwd");
-		expect(calls).toContain("clear");
+		await paired.enqueue("/agent", "/cwd");
+		expect(calls).toContain("enqueue");
 	});
 });
