@@ -28,9 +28,9 @@ sharpshooter:
   enabled: true
 ```
 
-The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory sync`, `/memory stats`, `/memory diagnose` and `/memory queue` then cover both, and `/memory search` returns hits from both. The flag is ignored when `memory.backend` is already `sharpshooter`. A failure in either one is logged and does not stop the other.
+The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory stats`, `/memory diagnose` and `/memory queue` report on both, and memory search through the SDK returns hits from both. The flag is ignored when `memory.backend` is already `sharpshooter`. A Sharpshooter failure is logged and does not stop the selected backend; the selected backend's own failures surface as they always did.
 
-`/memory clear` is the exception: while paired it clears the selected backend only. Sharpshooter's decision files are rewritten whole by a model on every consolidation and are kept in no history, so a wipe cannot be undone. To clear them deliberately, select `sharpshooter` as the backend and clear it there.
+`/memory clear` and `/memory sync` stay on the selected backend. Sharpshooter rewrites all three decision files whole on every consolidation and keeps no history, so neither a wipe nor a bad rewrite can be undone, and an action aimed at the store should not be able to cause one. Sharpshooter still consolidates on its own interval, so nothing is stranded. To clear or consolidate the decision files deliberately, select `sharpshooter` as the backend and use the command there.
 
 Both write on their own schedule and each calls a model to do it, so a paired session runs two background writers. Sharpshooter uses `sharpshooter.model` and consolidates every `sharpshooter.intervalMinutes`.
 
