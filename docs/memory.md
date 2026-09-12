@@ -32,7 +32,7 @@ The selected backend keeps its identity and its tools; Sharpshooter adds its own
 
 `/memory clear` and `/memory sync` stay on the selected backend. Sharpshooter rewrites all three decision files whole on every consolidation and keeps no history, so neither a wipe nor a bad rewrite can be undone, and an action aimed at the store should not be able to cause one. Sharpshooter still consolidates on its own interval, so nothing is stranded. To clear or consolidate the decision files deliberately, select `sharpshooter` as the backend and use the command there.
 
-Both write on their own schedule and each calls a model to do it, so a paired session runs two background writers. Sharpshooter uses `sharpshooter.model` and consolidates every `sharpshooter.intervalMinutes`.
+Sharpshooter writes on its own schedule and calls a model to do it, using `sharpshooter.model` and consolidating every `sharpshooter.intervalMinutes`. Pairing it with a backend that also writes on a schedule, such as `mnemopi` or `local`, gives the session two model-driven background writers; pairing with `off` gives it one.
 
 ## Usage
 

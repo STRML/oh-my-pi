@@ -92,6 +92,7 @@ export const REPLAYED_SETTING_IDS = [
 	"tools.xdevDocs",
 	"externalThinking",
 	"memory.backend",
+	"sharpshooter.enabled",
 	"mcp.notifications",
 	"git.enabled",
 	"statusLine.preset",
@@ -148,6 +149,20 @@ export function applySessionSettingSideEffects(
 				report(`Failed to apply memory backend: ${err}`);
 			});
 			options.pending?.push(backend);
+			break;
+		}
+		// The flag decides what `resolveMemoryBackend` returns, so a live toggle has
+		// to re-apply it or later status and search disagree with the running
+		// scheduler and prompt. When sharpshooter is itself the backend the flag
+		// changes nothing, and re-applying would dispose and restart it: the fresh
+		// scheduler ticks immediately, so a setting documented as ignored could spend
+		// a model call and rewrite the decision files.
+		case "sharpshooter.enabled": {
+			if (settings.get("memory.backend") === "sharpshooter") break;
+			const paired = session.applyMemoryBackend().catch(err => {
+				report(`Failed to apply memory backend: ${err}`);
+			});
+			options.pending?.push(paired);
 			break;
 		}
 		case "externalThinking": {
