@@ -19,9 +19,15 @@ import type {
  * The wrapper keeps the primary's `id`. Tool gating across the agent reads
  * `memory.backend` directly rather than the resolved backend, and sharpshooter
  * appears in none of those checks, so the primary's tools stay exactly as they
- * were. Only the methods sharpshooter actually implements are combined:
- * `beforeAgentStartPrompt`, `save` and `preCompactionContext` belong to the
- * primary alone, and `queuePreview` to sharpshooter alone.
+ * were.
+ *
+ * Nothing that rewrites or removes the decision files fans out. Sharpshooter
+ * replaces all three whole on every consolidation and keeps no history, so a
+ * bad rewrite is unrecoverable: #10200 fixed a consolidation that returned
+ * all-empty content, truncated every file, consumed the queued deltas and
+ * recorded success, and that guard still admits a replacement that empties one
+ * file out of three. An action aimed at the selected backend must not be able
+ * to trigger either. `clear` and `enqueue` therefore reach the primary alone.
  */
 export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 	/**
@@ -29,8 +35,7 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 	 *
 	 * Only the paired backend is shielded. The selected backend's errors propagate
 	 * exactly as they did before pairing: a caller that would have seen a failed
-	 * retain or a failed consolidation must still see it, or pairing turns real
-	 * failures into silent ones.
+	 * retain must still see it, or pairing turns real failures into silent ones.
 	 */
 	const paired = async <T>(label: string, run: () => Promise<T> | T): Promise<T | undefined> => {
 		try {
@@ -40,12 +45,34 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			return undefined;
 		}
 	};
-	const both = async (label: string, run: (backend: MemoryBackend) => Promise<unknown> | unknown): Promise<void> => {
-		await run(primary);
-		await paired(label, () => run(sharpshooterBackend));
+	/**
+	 * Run both legs, then report the primary's outcome.
+	 *
+	 * Sharpshooter runs whether or not the primary threw, so one backend failing
+	 * cannot quietly skip the other; the primary's error still reaches the caller.
+	 */
+	const legs = async <T>(
+		label: string,
+		runPrimary: () => Promise<T>,
+		runPaired: () => Promise<T | undefined>,
+	): Promise<[T | undefined, T | undefined]> => {
+		const settled = await Promise.allSettled([runPrimary()]);
+		const extra = await paired(label, runPaired);
+		const [result] = settled;
+		if (result?.status === "rejected") throw result.reason;
+		return [result?.value, extra];
 	};
-	const joined = async (run: (backend: MemoryBackend) => Promise<string | undefined>): Promise<string | undefined> => {
-		const parts = [await run(primary), await paired("section", () => run(sharpshooterBackend))]
+	const joined = async (
+		label: string,
+		run: (backend: MemoryBackend) => Promise<string | undefined>,
+	): Promise<string | undefined> => {
+		const parts = (
+			await legs(
+				label,
+				() => run(primary),
+				() => run(sharpshooterBackend),
+			)
+		)
 			.map(part => part?.trim())
 			.filter((part): part is string => Boolean(part));
 		return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -54,31 +81,44 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 	return {
 		id: primary.id,
 
-		start(options: MemoryBackendStartOptions): void {
-			void both("start", backend => backend.start(options));
+		/**
+		 * Returns the promise rather than detaching it. Session lifecycle awaits
+		 * `start`, and a detached start can still be registering sharpshooter's
+		 * subscription and scheduler after disposal has already released them,
+		 * leaving the per-bank scheduler refcount held for the life of the process.
+		 */
+		async start(options: MemoryBackendStartOptions): Promise<void> {
+			await legs(
+				"start",
+				async () => await primary.start(options),
+				async () => sharpshooterBackend.start(options),
+			);
 		},
 
 		buildDeveloperInstructions(agentDir, settings, session) {
-			return joined(backend => backend.buildDeveloperInstructions(agentDir, settings, session));
+			return joined("instructions", backend => backend.buildDeveloperInstructions(agentDir, settings, session));
 		},
 
 		/**
-		 * Clears the selected backend only.
-		 *
-		 * Sharpshooter's decision files are rewritten whole by a model on every
-		 * consolidation and kept in no history, so there is nothing to restore them
-		 * from. #10200 is the precedent: a consolidation that returned all-empty
-		 * content truncated all three files, consumed the queued deltas, and recorded
-		 * success. Wiping them as a side effect of clearing a different backend would
-		 * be the same loss with a different trigger. Select sharpshooter as the
-		 * backend to clear its files deliberately.
+		 * Clears the selected backend only; see the note on the wrapper. Select
+		 * sharpshooter as the backend to clear its decision files deliberately.
 		 */
 		async clear(agentDir, cwd, session): Promise<void> {
 			await primary.clear(agentDir, cwd, session);
 		},
 
+		/**
+		 * Consolidates the selected backend only.
+		 *
+		 * Sharpshooter's `enqueue` forces a consolidation, which asks a model to
+		 * rewrite all three decision files and then consumes the queued deltas. A
+		 * reply that empties one file passes the all-empty guard and is written, so
+		 * `/memory sync` aimed at the store would be able to erode rules it was
+		 * never pointed at. Sharpshooter's own scheduler still consolidates on its
+		 * interval, so nothing is stranded.
+		 */
 		async enqueue(agentDir, cwd, session): Promise<void> {
-			await both("enqueue", backend => backend.enqueue(agentDir, cwd, session));
+			await primary.enqueue(agentDir, cwd, session);
 		},
 
 		async status(context: MemoryBackendOperationContext) {
@@ -89,7 +129,13 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			const message = [status.message, extra?.message ? `sharpshooter — ${extra.message}` : undefined]
 				.filter(Boolean)
 				.join("; ");
-			return { ...status, ...(message ? { message } : {}) };
+			return {
+				...status,
+				// This wrapper answers search from sharpshooter even when the selected
+				// backend cannot, so a caller must not be told search is unavailable.
+				searchable: status.searchable || Boolean(extra?.searchable),
+				...(message ? { message } : {}),
+			};
 		},
 
 		async search(context: MemoryBackendOperationContext, query: string, options?: MemoryBackendSearchOptions) {
@@ -103,19 +149,21 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 		},
 
 		stats(agentDir, cwd, session) {
-			return joined(backend => Promise.resolve(backend.stats?.(agentDir, cwd, session)));
+			return joined("stats", backend => Promise.resolve(backend.stats?.(agentDir, cwd, session)));
 		},
 
 		diagnose(agentDir, cwd, session) {
-			return joined(backend => Promise.resolve(backend.diagnose?.(agentDir, cwd, session)));
+			return joined("diagnose", backend => Promise.resolve(backend.diagnose?.(agentDir, cwd, session)));
 		},
 
 		queuePreview(context: MemoryBackendOperationContext) {
-			return joined(backend => Promise.resolve(backend.queuePreview?.(context)));
+			return joined("queue", backend => Promise.resolve(backend.queuePreview?.(context)));
 		},
 
 		...(primary.save ? { save: primary.save.bind(primary) } : {}),
-		...(primary.beforeAgentStartPrompt ? { beforeAgentStartPrompt: primary.beforeAgentStartPrompt.bind(primary) } : {}),
+		...(primary.beforeAgentStartPrompt
+			? { beforeAgentStartPrompt: primary.beforeAgentStartPrompt.bind(primary) }
+			: {}),
 		...(primary.preCompactionContext ? { preCompactionContext: primary.preCompactionContext.bind(primary) } : {}),
 	};
 }
