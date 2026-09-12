@@ -6,6 +6,7 @@
 
 - Added extension loading to `omp usage` (mirroring `omp models`), so extension-registered providers that declare a `usage` entry appear in the per-account usage breakdown.
 - `sharpshooter.enabled` runs Sharpshooter beside the selected memory backend, so a session can have searchable recall and always-on project decisions at once. Sharpshooter distills decisions rather than storing memories, so it needs none of what the backend slot provides. The wrapper keeps the selected backend's id, which leaves tool gating that reads `memory.backend` unchanged, and combines only the methods Sharpshooter implements. The flag is ignored when Sharpshooter is already the backend.
+- `sharpshooter.enabled` runs Sharpshooter beside the selected memory backend, so a session can have searchable recall and always-on project decisions at once. Sharpshooter distills decisions rather than storing memories, so it needs none of what the backend slot provides. The wrapper keeps the selected backend's id, which leaves tool gating that reads `memory.backend` unchanged, and combines only the methods Sharpshooter implements. `/memory clear` stays on the selected backend alone, because the decision files are rewritten whole on each consolidation and kept in no history. The flag is ignored when Sharpshooter is already the backend.
 
 ### Fixed
 
