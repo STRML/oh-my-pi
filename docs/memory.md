@@ -28,7 +28,9 @@ sharpshooter:
   enabled: true
 ```
 
-The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory stats`, `/memory diagnose` and `/memory queue` report on both, and memory search through the SDK returns hits from both. The flag is ignored when `memory.backend` is already `sharpshooter`. A Sharpshooter failure is logged and does not stop the selected backend; the selected backend's own failures surface as they always did.
+The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory stats`, `/memory diagnose` and `/memory queue` report on both. Memory search through the SDK adds Sharpshooter's hits to whatever the selected backend returns, which for `hindsight` is nothing, since it exposes no search of its own; its `recall` tool is unaffected. The flag is ignored when `memory.backend` is already `sharpshooter`.
+
+A Sharpshooter failure never stops the selected backend, and the selected backend's own failures surface as they always did. Where a Sharpshooter failure shows up depends on which one it is: the wrapper logs a warning when Sharpshooter throws at a paired call, while a background consolidation that fails records itself in the bank's state and reaches you through `/memory stats` and `/memory diagnose` rather than the log.
 
 `/memory clear` and `/memory sync` stay on the selected backend. Sharpshooter rewrites all three decision files whole on every consolidation and keeps no history, so neither a wipe nor a bad rewrite can be undone, and an action aimed at the store should not be able to cause one. Sharpshooter still consolidates on its own interval, so nothing is stranded. To clear or consolidate the decision files deliberately, select `sharpshooter` as the backend and use the command there.
 
