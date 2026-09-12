@@ -37,8 +37,19 @@ function stubPrimary(calls: string[]): MemoryBackend {
 		enqueue: async () => {
 			calls.push("enqueue");
 		},
-		status: async () => ({ backend: "mnemopi" as const, active: true, writable: true, searchable: true, message: "primary status" }),
-		search: async (_context, query) => ({ backend: "mnemopi" as const, query, count: 1, items: [{ content: "primary hit" }] }),
+		status: async () => ({
+			backend: "mnemopi" as const,
+			active: true,
+			writable: true,
+			searchable: true,
+			message: "primary status",
+		}),
+		search: async (_context, query) => ({
+			backend: "mnemopi" as const,
+			query,
+			count: 1,
+			items: [{ content: "primary hit" }],
+		}),
 		save: async () => ({ backend: "mnemopi" as const, stored: 1 }),
 		beforeAgentStartPrompt: async () => "PRIMARY TURN PROMPT",
 		preCompactionContext: async () => "PRIMARY COMPACTION",
@@ -87,25 +98,71 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(instructions).toContain("Keep storage project-scoped.");
 	});
 
-	it("starts and enqueues both backends", async () => {
+	it("starts both backends and awaits them", async () => {
 		const calls: string[] = [];
 		const start = spyOn(sharpshooterBackend, "start").mockImplementation(() => {
 			calls.push("sharpshooter start");
 		});
+		const paired = withSharpshooter(stubPrimary(calls));
+		// The returned promise must cover sharpshooter's registration; a detached
+		// start can register a scheduler after disposal has already released it.
+		await paired.start({} as MemoryBackendStartOptions);
+		expect(calls).toEqual(["start", "sharpshooter start"]);
+		expect(start).toHaveBeenCalled();
+	});
+
+	it("consolidates the selected backend without forcing a decision-file rewrite", async () => {
+		const calls: string[] = [];
 		const enqueue = spyOn(sharpshooterBackend, "enqueue").mockImplementation(async () => {
 			calls.push("sharpshooter enqueue");
 		});
 		const paired = withSharpshooter(stubPrimary(calls));
-		paired.start({} as MemoryBackendStartOptions);
 		await paired.enqueue("/agent", "/cwd");
-		// start is fire-and-forget, so let its microtasks settle before asserting.
-		await Promise.resolve();
-		expect(calls).toContain("start");
-		expect(calls).toContain("sharpshooter start");
-		expect(calls).toContain("enqueue");
-		expect(calls).toContain("sharpshooter enqueue");
-		expect(start).toHaveBeenCalled();
-		expect(enqueue).toHaveBeenCalled();
+		// Forcing consolidation rewrites all three files whole, and a reply that
+		// empties one of them passes the all-empty guard (#10200). An action aimed
+		// at the store must not be able to trigger it.
+		expect(calls).toEqual(["enqueue"]);
+		expect(enqueue).not.toHaveBeenCalled();
+	});
+
+	it("runs the sharpshooter leg even when the selected backend throws", async () => {
+		const seen: string[] = [];
+		spyOn(sharpshooterBackend, "buildDeveloperInstructions").mockImplementation(async () => {
+			seen.push("sharpshooter");
+			return "SHARPSHOOTER RULES";
+		});
+		const failing: MemoryBackend = {
+			...stubPrimary([]),
+			buildDeveloperInstructions: async () => {
+				throw new Error("instructions failed");
+			},
+		};
+		const paired = withSharpshooter(failing);
+		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).rejects.toThrow("instructions failed");
+		expect(seen).toEqual(["sharpshooter"]);
+	});
+
+	it("reports the context as searchable when only sharpshooter can search", async () => {
+		spyOn(sharpshooterBackend, "status").mockResolvedValue({
+			backend: "sharpshooter",
+			active: true,
+			writable: false,
+			searchable: true,
+			message: "architecture.md: 3 lines",
+		});
+		const unsearchable: MemoryBackend = {
+			...stubPrimary([]),
+			status: async () => ({
+				backend: "local" as const,
+				active: true,
+				writable: true,
+				searchable: false,
+				message: "local",
+			}),
+		};
+		const paired = withSharpshooter(unsearchable);
+		const status = await paired.status?.({ agentDir: "/agent", cwd: "/cwd" });
+		expect(status?.searchable).toBe(true);
 	});
 
 	it("clears the selected backend without touching the decision files", async () => {
@@ -133,7 +190,9 @@ describe("sharpshooter paired with a store backend", () => {
 		const paired = withSharpshooter(stubPrimary([]));
 		await expect(paired.beforeAgentStartPrompt?.({} as never, "prompt")).resolves.toBe("PRIMARY TURN PROMPT");
 		await expect(paired.preCompactionContext?.([], {} as never)).resolves.toBe("PRIMARY COMPACTION");
-		await expect(paired.save?.({ agentDir: "/agent", cwd: "/cwd" }, { content: "note" })).resolves.toMatchObject({ stored: 1 });
+		await expect(paired.save?.({ agentDir: "/agent", cwd: "/cwd" }, { content: "note" })).resolves.toMatchObject({
+			stored: 1,
+		});
 	});
 
 	it("merges search hits from both backends", async () => {
@@ -183,11 +242,13 @@ describe("sharpshooter paired with a store backend", () => {
 
 	it("keeps the primary working when the paired backend throws", async () => {
 		spyOn(sharpshooterBackend, "buildDeveloperInstructions").mockRejectedValue(new Error("sharpshooter is broken"));
-		spyOn(sharpshooterBackend, "enqueue").mockRejectedValue(new Error("sharpshooter is broken"));
+		spyOn(sharpshooterBackend, "start").mockImplementation(() => {
+			throw new Error("sharpshooter is broken");
+		});
 		const calls: string[] = [];
 		const paired = withSharpshooter(stubPrimary(calls));
 		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).resolves.toBe("PRIMARY INSTRUCTIONS");
-		await paired.enqueue("/agent", "/cwd");
-		expect(calls).toContain("enqueue");
+		await paired.start({} as MemoryBackendStartOptions);
+		expect(calls).toContain("start");
 	});
 });
