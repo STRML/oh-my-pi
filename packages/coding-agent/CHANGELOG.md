@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Sharpshooter consolidation no longer lets a partial `replace_memory_files` reply lose decisions: a reply that omits files carries the untouched ones through from their current content, and one that empties a file which still has content is refused unless it covered all three. Previously only the returned files were written while the deltas meant for the rest were consumed and the run recorded success, and [#10200](https://github.com/can1357/oh-my-pi/pull/10200)'s guard rejected a replacement only when every returned file was empty.
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
 
