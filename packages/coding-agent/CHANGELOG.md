@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `sharpshooter.enabled` runs Sharpshooter beside the selected memory backend, so a session can have searchable recall and always-on project decisions at once. Sharpshooter distills decisions rather than storing memories, so it needs none of what the backend slot provides. The wrapper keeps the selected backend's id, which leaves tool gating that reads `memory.backend` unchanged, and combines only the methods Sharpshooter implements. The flag is ignored when Sharpshooter is already the backend.
+
 ### Fixed
 
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
