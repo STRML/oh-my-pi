@@ -32,7 +32,9 @@ The selected backend keeps its identity and its tools; Sharpshooter adds its own
 
 `/memory clear` and `/memory sync` stay on the selected backend. Sharpshooter rewrites all three decision files whole on every consolidation and keeps no history, so neither a wipe nor a bad rewrite can be undone, and an action aimed at the store should not be able to cause one. Sharpshooter still consolidates on its own interval, so nothing is stranded. To clear or consolidate the decision files deliberately, select `sharpshooter` as the backend and use the command there.
 
-Sharpshooter writes on its own schedule and calls a model to do it, using `sharpshooter.model` and consolidating every `sharpshooter.intervalMinutes`. Pairing it with a backend that also writes on a schedule, such as `mnemopi` or `local`, gives the session two model-driven background writers; pairing with `off` gives it one.
+Sharpshooter writes on its own schedule and calls a model to do it, using `sharpshooter.model` and consolidating every `sharpshooter.intervalMinutes`. Whether the session ends up with a second model-driven writer depends on the backend: `local` and `hindsight` write through a model, `mnemopi` does so only when `mnemopi.llmMode` is not `none`, and `off` adds nothing.
+
+Enabling the flag starts Sharpshooter for a project that was not running it before, which exposes a Sharpshooter-side consolidation limit worth knowing. Its tool schema accepts a replacement covering fewer than three files, and only the files it returns are written: the deltas destined for the others are consumed and the run records success, so a queued decision can be dropped without a trace. A file returned empty alongside a non-empty one is also written empty, because the guard added in [#10200](https://github.com/can1357/oh-my-pi/pull/10200) rejects only a replacement that is empty across all three. This predates pairing and applies equally when Sharpshooter is the selected backend, but the flag is what turns it on for a session that would not otherwise have it.
 
 ## Usage
 
