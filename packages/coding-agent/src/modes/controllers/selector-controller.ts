@@ -562,7 +562,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
+			// Both decide what `resolveMemoryBackend` returns, so both re-apply it.
+			// Without the second case the flag changes later status and search while
+			// the scheduler and the prompt still reflect the old pairing.
 			case "memory.backend":
+			case "sharpshooter.enabled":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
 				});

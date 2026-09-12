@@ -82,17 +82,23 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 		id: primary.id,
 
 		/**
-		 * Returns the promise rather than detaching it. Session lifecycle awaits
-		 * `start`, and a detached start can still be registering sharpshooter's
-		 * subscription and scheduler after disposal has already released them,
-		 * leaving the per-bank scheduler refcount held for the life of the process.
+		 * Registers sharpshooter before yielding, then awaits the primary.
+		 *
+		 * `sharpshooterBackend.start` is synchronous, and calling it before the
+		 * first await means its subscription and scheduler exist by the time this
+		 * returns a promise at all. That matters because the SDK discards the
+		 * returned promise (`sdk.ts`, the non-autolearn branch) while disposal
+		 * releases sharpshooter unconditionally: a registration that happened after
+		 * an awaited hop could land past the release and strand the per-bank
+		 * scheduler refcount for the life of the process.
 		 */
-		async start(options: MemoryBackendStartOptions): Promise<void> {
-			await legs(
-				"start",
-				async () => await primary.start(options),
-				async () => sharpshooterBackend.start(options),
-			);
+		start(options: MemoryBackendStartOptions): Promise<void> {
+			try {
+				sharpshooterBackend.start(options);
+			} catch (error) {
+				logger.warn("Sharpshooter start failed while paired", { backend: primary.id, error: String(error) });
+			}
+			return Promise.resolve(primary.start(options));
 		},
 
 		buildDeveloperInstructions(agentDir, settings, session) {
@@ -122,10 +128,21 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 		},
 
 		async status(context: MemoryBackendOperationContext) {
-			const status = primary.status
-				? await primary.status(context)
-				: { backend: primary.id, active: primary.id !== "off", writable: false, searchable: false };
-			const extra = await paired("status", () => sharpshooterBackend.status?.(context));
+			// Through `legs`, so a primary that throws still lets sharpshooter report.
+			const [primaryStatus, extra] = await legs(
+				"status",
+				async () =>
+					primary.status
+						? await primary.status(context)
+						: { backend: primary.id, active: primary.id !== "off", writable: false, searchable: false },
+				async () => sharpshooterBackend.status?.(context),
+			);
+			const status = primaryStatus ?? {
+				backend: primary.id,
+				active: primary.id !== "off",
+				writable: false,
+				searchable: false,
+			};
 			const message = [status.message, extra?.message ? `sharpshooter — ${extra.message}` : undefined]
 				.filter(Boolean)
 				.join("; ");
@@ -139,12 +156,20 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 		},
 
 		async search(context: MemoryBackendOperationContext, query: string, options?: MemoryBackendSearchOptions) {
-			const result = primary.search
-				? await primary.search(context, query, options)
-				: { backend: primary.id, query, count: 0, items: [] };
-			const extra = await paired("search", () => sharpshooterBackend.search?.(context, query, options));
+			const [primaryResult, extra] = await legs(
+				"search",
+				async () =>
+					primary.search
+						? await primary.search(context, query, options)
+						: { backend: primary.id, query, count: 0, items: [] },
+				async () => sharpshooterBackend.search?.(context, query, options),
+			);
+			const result = primaryResult ?? { backend: primary.id, query, count: 0, items: [] };
 			if (!extra || extra.items.length === 0) return result;
-			const items = [...result.items, ...extra.items];
+			// Both backends apply the caller's limit to their own results, so the
+			// merged set has to be trimmed again or two halves become twice the limit.
+			const merged = [...result.items, ...extra.items];
+			const items = options?.limit !== undefined ? merged.slice(0, Math.max(0, options.limit)) : merged;
 			return { ...result, items, count: items.length };
 		},
 
