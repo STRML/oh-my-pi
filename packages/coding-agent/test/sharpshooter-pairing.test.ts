@@ -73,6 +73,9 @@ describe("sharpshooter paired with a store backend", () => {
 	it("never wraps sharpshooter around itself", async () => {
 		const settings = Settings.isolated({ "memory.backend": "sharpshooter", "sharpshooter.enabled": true });
 		expect(await resolveMemoryBackend(settings)).toBe(sharpshooterBackend);
+		// And with the flag off, so the resolver ignores it in both directions.
+		const off = Settings.isolated({ "memory.backend": "sharpshooter", "sharpshooter.enabled": false });
+		expect(await resolveMemoryBackend(off)).toBe(sharpshooterBackend);
 	});
 
 	it("pairs with the off backend without turning memory tools on", async () => {

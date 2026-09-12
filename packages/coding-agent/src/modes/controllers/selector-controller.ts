@@ -562,11 +562,19 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
-			// Both decide what `resolveMemoryBackend` returns, so both re-apply it.
-			// Without the second case the flag changes later status and search while
-			// the scheduler and the prompt still reflect the old pairing.
 			case "memory.backend":
+				void this.ctx.session.applyMemoryBackend().catch(err => {
+					this.ctx.showError(`Failed to apply memory backend: ${err}`);
+				});
+				break;
+			// The flag decides what `resolveMemoryBackend` returns, so a live toggle
+			// has to re-apply it or later status and search disagree with the running
+			// scheduler and prompt. When sharpshooter is itself the backend the flag
+			// changes nothing, and re-applying would dispose and restart it: the fresh
+			// scheduler ticks immediately, so a setting documented as ignored could
+			// spend a model call and rewrite the decision files.
 			case "sharpshooter.enabled":
+				if (settings.get("memory.backend") === "sharpshooter") break;
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
 				});
