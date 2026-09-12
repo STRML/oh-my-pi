@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic OAuth usage fetching for renamed providers: the fetch no longer hard-codes the `anthropic` name, so extension-registered second-subscription providers (e.g. `pi.registerProvider("anthropic-sam", { usage: … })` delegating to `claudeUsageProvider`) report their own 5h/7d windows instead of being silently dropped.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

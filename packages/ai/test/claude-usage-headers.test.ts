@@ -28,7 +28,10 @@ function getHeaderCaseInsensitive(
 	return undefined;
 }
 
-async function fetchClaudeUsageReport(payload: Record<string, unknown>): Promise<UsageReport | null> {
+async function fetchClaudeUsageReport(
+	payload: Record<string, unknown>,
+	provider = "anthropic",
+): Promise<UsageReport | null> {
 	const fetchMock = (async () => {
 		return new Response(
 			JSON.stringify({
@@ -41,7 +44,7 @@ async function fetchClaudeUsageReport(payload: Record<string, unknown>): Promise
 
 	return claudeUsageProvider.fetchUsage(
 		{
-			provider: "anthropic",
+			provider,
 			credential: {
 				type: "oauth",
 				accessToken: "oat-test-access-token",
@@ -67,6 +70,26 @@ function legacyExtraUsage(usedCredits: number, monthlyLimit: number | null) {
 		currency: "USD",
 	};
 }
+
+describe("claude usage provider-name relay", () => {
+	it("labels reports for renamed extension providers instead of dropping them", async () => {
+		const report = await fetchClaudeUsageReport({}, "anthropic-sam");
+
+		expect(report?.provider).toBe("anthropic-sam");
+		const fiveHour = report?.limits.find(limit => limit.scope.windowId === "5h");
+		expect(fiveHour).toBeDefined();
+		expect(fiveHour?.scope.shared).toBe(true);
+		expect(report?.metadata?.email).toBe("user@example.com");
+	});
+
+	it("keeps the default provider's supports scoped to the canonical name", () => {
+		const { supports } = claudeUsageProvider;
+		if (!supports) throw new Error("claudeUsageProvider.supports is required");
+		const credential = { type: "oauth" as const, accessToken: "tok" };
+		expect(supports({ provider: "anthropic-sam", credential })).toBe(false);
+		expect(supports({ provider: "anthropic", credential })).toBe(true);
+	});
+});
 
 describe("claude usage request headers", () => {
 	it("sends aligned anthropic fingerprint and bearer auth headers", async () => {

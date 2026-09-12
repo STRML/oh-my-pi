@@ -19,11 +19,14 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
+import { discoverAndLoadExtensions } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { EventBus } from "../utils/event-bus";
 
 const BAR_WIDTH = 28;
 
@@ -1100,7 +1103,28 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
+		// Extension-registered providers (e.g. a second Anthropic subscription via
+		// pi.registerProvider with a usage entry) must be registered before the
+		// fetch so their usage providers resolve; mirrors the omp models CLI.
+		const cwd = getProjectDir();
+		const settings = await Settings.init({ cwd });
+		const extensionsResult = await discoverAndLoadExtensions(
+			settings.get("extensions") ?? [],
+			cwd,
+			new EventBus(),
+			settings.get("disabledExtensions") ?? [],
+			{ ambient: true, includeAmbientHooks: false },
+		);
 		const modelRegistry = new ModelRegistry(authStorage);
+		const activeSources = extensionsResult.extensions.map(extension => extension.path);
+		modelRegistry.syncExtensionSources(activeSources);
+		for (const sourceId of new Set(activeSources)) {
+			modelRegistry.clearSourceRegistrations(sourceId);
+		}
+		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+			modelRegistry.registerProvider(name, config, sourceId);
+		}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
 		const reports =
 			(await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),

@@ -604,7 +604,9 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 }
 
 async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-	if (params.provider !== "anthropic") return null;
+	// The provider-name gate lives in each UsageProvider's `supports`; this
+	// fetch only shapes Anthropic OAuth requests, so renamed providers
+	// (e.g. extension-registered second-subscription names) label correctly.
 	const credential = params.credential;
 	if (credential.type !== "oauth" || !credential.accessToken) return null;
 
