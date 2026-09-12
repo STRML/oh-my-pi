@@ -17,6 +17,21 @@ memory:
   backend: local
 ```
 
+## Running Sharpshooter alongside a backend
+
+The backends above are mutually exclusive, with one exception. Sharpshooter distills project decisions into three markdown files instead of storing memories, so it needs nothing the backend slot provides and can run beside a store. Set `sharpshooter.enabled` to get searchable recall and always-on project decisions in the same session:
+
+```yaml
+memory:
+  backend: mnemopi
+sharpshooter:
+  enabled: true
+```
+
+The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory clear`, `/memory sync`, `/memory stats` and `/memory diagnose` then cover both, and `/memory search` returns hits from both. The flag is ignored when `memory.backend` is already `sharpshooter`. A failure in either one is logged and does not stop the other.
+
+Both write on their own schedule and each calls a model to do it, so a paired session runs two background writers. Sharpshooter uses `sharpshooter.model` and consolidates every `sharpshooter.intervalMinutes`.
+
 ## Usage
 
 ### What gets injected
