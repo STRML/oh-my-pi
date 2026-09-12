@@ -331,7 +331,8 @@ export function applySettingSideEffects(
 			}
 			ctx.chatContainer.setToolActivityVisible(!hidden);
 			if (hidden) ctx.ui.clearInlineImages();
-			ctx.ui.requestRender(true);
+			// Match the shortcut path: visibility changes must rebuild retired terminal history.
+			ctx.ui.resetDisplay();
 			break;
 		}
 		case "terminal.showImages":
