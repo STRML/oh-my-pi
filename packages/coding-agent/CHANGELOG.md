@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `sharpshooter.enabled` runs Sharpshooter beside the selected memory backend, so a session can have searchable recall and always-on project decisions at once. Sharpshooter distills decisions rather than storing memories, so it needs none of what the backend slot provides. The wrapper keeps the selected backend's id, which leaves tool gating that reads `memory.backend` unchanged, and combines only the methods Sharpshooter implements. The flag is ignored when Sharpshooter is already the backend.
+
 ### Fixed
 
 - A root passed with `--add-dir` is no longer revoked by `/reload-settings` when the same path is withdrawn from `workspace.additionalDirectories`; CLI-supplied roots now carry their own provenance instead of being treated as settings-derived.
