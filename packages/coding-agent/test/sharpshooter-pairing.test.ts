@@ -104,10 +104,10 @@ describe("sharpshooter paired with a store backend", () => {
 			calls.push("sharpshooter start");
 		});
 		const paired = withSharpshooter(stubPrimary(calls));
-		// The returned promise must cover sharpshooter's registration; a detached
-		// start can register a scheduler after disposal has already released it.
 		await paired.start({} as MemoryBackendStartOptions);
-		expect(calls).toEqual(["start", "sharpshooter start"]);
+		// Sharpshooter registers first, before any await, so a caller that drops the
+		// returned promise cannot dispose ahead of its registration.
+		expect(calls).toEqual(["sharpshooter start", "start"]);
 		expect(start).toHaveBeenCalled();
 	});
 
@@ -140,6 +140,68 @@ describe("sharpshooter paired with a store backend", () => {
 		const paired = withSharpshooter(failing);
 		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).rejects.toThrow("instructions failed");
 		expect(seen).toEqual(["sharpshooter"]);
+	});
+
+	it("registers sharpshooter before yielding, so a discarded promise still starts it", () => {
+		const calls: string[] = [];
+		spyOn(sharpshooterBackend, "start").mockImplementation(() => {
+			calls.push("sharpshooter start");
+		});
+		const slowPrimary: MemoryBackend = {
+			...stubPrimary(calls),
+			start: async () => {
+				await Bun.sleep(20);
+				calls.push("start");
+			},
+		};
+		const paired = withSharpshooter(slowPrimary);
+		// The SDK drops this promise on the floor. Sharpshooter must already be
+		// registered by the time it does, or disposal can outrun its registration.
+		void paired.start({} as MemoryBackendStartOptions);
+		expect(calls).toEqual(["sharpshooter start"]);
+	});
+
+	it("runs the sharpshooter leg for status and search when the primary throws", async () => {
+		spyOn(sharpshooterBackend, "status").mockResolvedValue({
+			backend: "sharpshooter",
+			active: true,
+			writable: false,
+			searchable: true,
+			message: "architecture.md: 3 lines",
+		});
+		const seen: string[] = [];
+		spyOn(sharpshooterBackend, "search").mockImplementation(async () => {
+			seen.push("sharpshooter search");
+			return { backend: "sharpshooter", query: "q", count: 0, items: [] };
+		});
+		const failing: MemoryBackend = {
+			...stubPrimary([]),
+			status: async () => {
+				throw new Error("status failed");
+			},
+			search: async () => {
+				throw new Error("search failed");
+			},
+		};
+		const paired = withSharpshooter(failing);
+		await expect(paired.status?.({ agentDir: "/agent", cwd: "/cwd" })).rejects.toThrow("status failed");
+		await expect(paired.search?.({ agentDir: "/agent", cwd: "/cwd" }, "q")).rejects.toThrow("search failed");
+		expect(seen).toEqual(["sharpshooter search"]);
+	});
+
+	it("keeps the caller's search limit across both backends", async () => {
+		spyOn(sharpshooterBackend, "search").mockResolvedValue({
+			backend: "sharpshooter",
+			query: "deploy",
+			count: 1,
+			items: [{ content: "- Deploy through the script.", source: "architecture.md" }],
+		});
+		const paired = withSharpshooter(stubPrimary([]));
+		// Each backend applies the limit to its own results, so the merge has to
+		// re-apply it or a limit of 1 returns two items.
+		const result = await paired.search?.({ agentDir: "/agent", cwd: "/cwd" }, "deploy", { limit: 1 });
+		expect(result?.items).toHaveLength(1);
+		expect(result?.count).toBe(1);
 	});
 
 	it("reports the context as searchable when only sharpshooter can search", async () => {
