@@ -174,10 +174,7 @@ async function consolidateLocked(
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
 		}
 
-		const files = parseReplacementFiles(
-			response.content,
-			Object.values(currentFiles).map(content => ({ content })),
-		);
+		const files = parseReplacementFiles(response.content, currentFiles);
 		await applyReplacementFiles(bankDir, files);
 
 		const consumedFiles = groups.flatMap(group => group.deltas.map(item => item.file));
@@ -231,7 +228,9 @@ async function readProjectDocs(cwd: string): Promise<string> {
 
 function parseReplacementFiles(
 	content: readonly unknown[],
-	currentFiles: readonly { content: string }[],
+	// Keyed by name, not a bare list: carrying an omitted file through needs its
+	// current content looked up by which file it is.
+	currentFiles: Readonly<Record<SharpshooterMemoryFile, string>>,
 ): ReplacementFile[] {
 	const toolCalls = content.filter(
 		(block): block is { type: "toolCall"; name: string; arguments: unknown } =>
@@ -270,7 +269,7 @@ function parseReplacementFiles(
 		files.push({ name, content: redacted });
 	}
 	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
-	if (totalChars === 0 && currentFiles.some(file => file.content.trim().length > 0)) {
+	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
 		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
 	}
 	// The tool schema accepts any-length array, and only returned files are written,
