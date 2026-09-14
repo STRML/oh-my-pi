@@ -4,14 +4,25 @@
 
 ### Fixed
 
-- Fixed Kimi Code's 7-day rate-limiting window being mislabeled as "Total quota" in `omp usage`, causing accounts whose monthly subscription pool is exhausted to appear 100% free while chat completions fail; parsed `totalQuota` add-on packs into the true "Total quota" row when present, and recognized Kimi's HTTP 403 `access_terminated_error` as a credential-rotatable usage limit. ([#11827](https://github.com/can1357/oh-my-pi/pull/11827) by [@revofusion](https://github.com/revofusion))
-- Fixed provider streams that die after emitting `toolcall_start` but before any argument content failing validation with empty `{}` arguments; the uncommitted attempt is now discarded and retried ([#11823](https://github.com/can1357/oh-my-pi/pull/11823) by [@justdoGIT](https://github.com/justdoGIT)).
+- 400-request debug dumps now redact provider-specific auth headers (`x-goog-api-key`, `x-amz-security-token`, and any header whose name carries a key/token/secret), not just a fixed allow-list, so a shared dump can no longer leak a live API key ([#12007](https://github.com/can1357/oh-my-pi/issues/12007)).
+
+## [18.1.20] - 2026-09-13
+
+### Fixed
+
+- Fixed Windows OAuth sign-in failing on every attempt after an upgrade when a previous run left a stale native callback registration behind; handlers registered by older binaries are now recognized as owned and rolled back instead of blocking recovery ([#11967](https://github.com/can1357/oh-my-pi/pull/11967) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.19] - 2026-09-12
+
 ### Added
 
 - Charm Hyper accounts now report their remaining prepaid credit balance in `/usage` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 
 ### Fixed
 
+- Fixed Kimi Code's 7-day rate-limiting window being mislabeled as "Total quota" in `omp usage`, causing accounts whose monthly subscription pool is exhausted to appear 100% free while chat completions fail; parsed `totalQuota` add-on packs into the true "Total quota" row when present, and recognized Kimi's HTTP 403 `access_terminated_error` as a credential-rotatable usage limit. ([#11827](https://github.com/can1357/oh-my-pi/pull/11827) by [@revofusion](https://github.com/revofusion))
+- Fixed provider streams that die after emitting `toolcall_start` but before any argument content failing validation with empty `{}` arguments; the uncommitted attempt is now discarded and retried ([#11823](https://github.com/can1357/oh-my-pi/pull/11823) by [@justdoGIT](https://github.com/justdoGIT)).
+- Fixed Windows `zcode://` (Z.AI coding-plan) OAuth sign-in never completing after a successful browser authorization: the native callback handler is now registered with a path the Windows shell can launch, so the `zcode://zai-auth/callback` redirect reaches omp instead of being silently dropped by the browser ([#11907](https://github.com/can1357/oh-my-pi/pull/11907) by [@oldschoola](https://github.com/oldschoola)).
 - Codex OAuth login now accepts valid account tokens that expose an email but omit `chatgpt_account_id`, without fabricating a workspace header ([#11847](https://github.com/can1357/oh-my-pi/pull/11847) by [@nguyennguyenit](https://github.com/nguyennguyenit)).
 - Fixed Muse Code login failing when Meta returns no assigned subscription tier (`subs_tier_id`/`subs_tier_name` as null); sign-in now succeeds and usage is reported without a tier ([#11843](https://github.com/can1357/oh-my-pi/pull/11843) by [@John-Cusack](https://github.com/John-Cusack)).
 

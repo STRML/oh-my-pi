@@ -1,15 +1,85 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added a privacy warning to memory reports reminding users to review data for secrets before sharing
+- `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
+
+### Changed
+
+- Pressing `c` on a `/btw` answer now shows a green "✓ Copied to clipboard" confirmation in the panel and history detail, and BTW history accepts `Ctrl+/` to switch panes ([#12052](https://github.com/can1357/oh-my-pi/pull/12052) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
+
+## [18.1.21] - 2026-09-14
+
+### Fixed
+
+- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
+- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
+- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
+- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
+- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
+- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
+- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+## [18.1.20] - 2026-09-13
+
+### Added
+
+- Added `collab.autoStart` (`off` | `view` | `control`): every local interactive session hosts itself as it starts and rotates its room on `/new`, `/resume`, fork, or branch, so a phone or dashboard can reach any running session without running `/collab` first ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
+- Added `omp collab list [--json]` and `/collab list` to enumerate every live local Collab host (instance, generation, session, cwd, model, participants, relay/attention state, access) without exposing links, plus `omp collab link <instanceId|pid> [--view]` to fetch one generation-bound browser URL from a private per-room Unix socket/named pipe registry; room keys, write tokens, and URLs never touch disk ([#6099](https://github.com/can1357/oh-my-pi/issues/6099); [#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm) and [@sorphwer](https://github.com/sorphwer)).
+
+### Changed
+
+- Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
+
+### Fixed
+
+- The hidden notice announcing a mid-session tool-availability change now states that it lists only what changed, so an additions-only notice no longer reads as the complete tool set and the model keeps using tools that are still callable ([#11824](https://github.com/can1357/oh-my-pi/issues/11824) by [@camjac251](https://github.com/camjac251)).
+- TTSR stream buffers now reset at every assistant message boundary, not only at turn start, so a `scope: text` or tool-argument rule can no longer fire on a later message because of text streamed by an earlier response in the same turn ([#11957](https://github.com/can1357/oh-my-pi/pull/11957) by [@srobroek](https://github.com/srobroek)).
+- Eval `completion()` calls now use configured retry fallback chains when their role model fails ([#11989](https://github.com/can1357/oh-my-pi/issues/11989)).
+- Eval `completion()` fallback chains now also apply to unqualified role models, walk into a failed fallback's own model chain, stop at `retry.maxRetries`, and resolve session-sticky credentials with the session id ([#11989](https://github.com/can1357/oh-my-pi/issues/11989)).
+- Eval `completion()` fallbacks now keep depth-first chain order, inherit the failed candidate's effort for bare nested entries, and skip keyless candidates without spending `retry.maxRetries` budget ([#11989](https://github.com/can1357/oh-my-pi/issues/11989)).
+- Eval `completion()` fallbacks reached at different efforts now each walk their shared descendants instead of truncating the later effort's path ([#11989](https://github.com/can1357/oh-my-pi/issues/11989)).
+- Fixed ranged grep rejecting existing files with glob characters in their names ([#11977](https://github.com/can1357/oh-my-pi/issues/11977)).
+- Notified Collab guests when admitted prompts are discarded, including room retirement during a session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
+- Preserved pending Collab dialog answers across session-switch rollback without accepting them after commit, stop, or writer departure ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed prompts awaiting setup crossing a fork, branch, or tree-navigation commit, multi-question extension dialogs moving later questions to a replacement Collab room, and stale rooms blocking `/collab` or `/join` after a failed session change ([#11908](https://github.com/can1357/oh-my-pi/pull/11908) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
+- Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
+
+## [18.1.19] - 2026-09-12
+
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
 
 ### Added
 
+- Added default-off speculative execution for validated local reads, including reads projected from nested JavaScript and Python eval cells.
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 - Retry fallback chains now support per-model reasoning efforts: a fallback entry may carry an explicit thinking suffix (`"default": ["openai/gpt-5-mini:low"]`), and pressing `t` on a fallback row in `/models` sets or clears it. Bare entries keep inheriting the failing turn's effort. ([#11842](https://github.com/can1357/oh-my-pi/pull/11842) by [@H4vC](https://github.com/H4vC)).
+- Added `task.agentServiceTierOverrides` for sparse exact-name service-tier overrides on task/eval agents, so selected agents can use priority/Fast mode without accelerating every subagent ([#9668](https://github.com/can1357/oh-my-pi/pull/9668) by [@alphastorm](https://github.com/alphastorm)).
+- Added session-local `/btw` history with persistent answers and follow-ups; bare `/btw` reopens history, Escape cancels running answers before closing, and new questions no longer replace an in-progress answer.
+- Added `f follow up` in BTW history to continue a selected side conversation with an English input prompt, persistent multi-turn history, and no changes to the main conversation.
+- Completed inline BTW answers now support `f follow up` directly; history uses `Tab` for pane navigation and `Enter` or `f` to start a follow-up.
+- Codex web search now accepts valid email-only OAuth credentials without requiring or fabricating a `ChatGPT-Account-Id` header ([#11847](https://github.com/can1357/oh-my-pi/pull/11847) by [@nguyennguyenit](https://github.com/nguyennguyenit)).
+- Sessions now stay alive when their working directory is removed instead of crashing while preparing shell tools ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+- MCP tool calls spelled with the Claude Code doubled separator (`mcp__server__tool`) now reach their registered tool ([#11516](https://github.com/can1357/oh-my-pi/issues/11516) by [@oldschoola](https://github.com/oldschoola)).
+- MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
+- `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
+- Sloppy-mode edits now drop a copied `[N more lines in ...]` read notice the same way they already drop the other read-metadata rows, so a pasted projection can no longer leak into the matched pattern or the written text ([#11797](https://github.com/can1357/oh-my-pi/pull/11797) by [@vasyza](https://github.com/vasyza)).
+- `/usage` now honors a provider's configured `baseUrl` when checking credentials before any model has been discovered, so a proxy-scoped API key is no longer sent to the provider's canonical host ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 
 ### Fixed
 
+- Fixed automatic custom-tool loading trying to execute package metadata and declarative files, including metadata shadowing an executable tool with the same name ([#11864](https://github.com/can1357/oh-my-pi/pull/11864) by [@moodiness](https://github.com/moodiness)).
+- Fixed successful Python kernel shutdowns being reported as unconfirmed and leaving spawned child processes running ([#11865](https://github.com/can1357/oh-my-pi/pull/11865) by [@moodiness](https://github.com/moodiness)).
+- Fixed completed tool cards reverting to pending after refocusing live sessions, and tool output collapsing behind finished reasoning segments ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
+- Invalid `WATCHDOG.yml` entries now produce startup/editor warnings while healthy advisors remain available ([#11882](https://github.com/can1357/oh-my-pi/pull/11882) by [@olegpulatov](https://github.com/olegpulatov)).
 - Claude Code session imports now preserve typed user text stored alongside tool results ([#11854](https://github.com/can1357/oh-my-pi/issues/11854)).
 - Extension commands now settle BTW writes before creating, switching, or branching sessions, preventing side requests from outliving their source session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
 - Session selection and active-session deletion now settle BTW writes before switching or removing history, preventing stale saves from blocking the next session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
@@ -26,19 +96,16 @@
 - `/wt` now checks BTW migration availability before creating a branch or checkout, preventing unused worktrees when a side conversation is busy.
 - `/move` now checks BTW migration availability before confirming or creating a missing target directory, preventing leftover directories after a refused move.
 - BTW errors now shorten embedded home paths and sanitize control characters and oversized text before display, while retaining original diagnostic errors.
-- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
-### Added
-
-- Added session-local `/btw` history with persistent answers and follow-ups; bare `/btw` reopens history, Escape cancels running answers before closing, and new questions no longer replace an in-progress answer.
-- Added `f follow up` in BTW history to continue a selected side conversation with an English input prompt, persistent multi-turn history, and no changes to the main conversation.
-- Completed inline BTW answers now support `f follow up` directly; history uses `Tab` for pane navigation and `Enter` or `f` to start a follow-up.
-- Marketplace plugins that share a repository root now load only their declared skills instead of every skill in the repository ([#11513](https://github.com/can1357/oh-my-pi/issues/11513)).
-- Codex web search now accepts valid email-only OAuth credentials without requiring or fabricating a `ChatGPT-Account-Id` header ([#11847](https://github.com/can1357/oh-my-pi/pull/11847) by [@nguyennguyenit](https://github.com/nguyennguyenit)).
-- Sessions now stay alive when their working directory is removed instead of crashing while preparing shell tools ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
-- MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
-- `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
-- Sloppy-mode edits now drop a copied `[N more lines in ...]` read notice the same way they already drop the other read-metadata rows, so a pasted projection can no longer leak into the matched pattern or the written text ([#11797](https://github.com/can1357/oh-my-pi/pull/11797) by [@vasyza](https://github.com/vasyza)).
-- `/usage` now honors a provider's configured `baseUrl` when checking credentials before any model has been discovered, so a proxy-scoped API key is no longer sent to the provider's canonical host ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Speculative reads now open the authorized resolved target while rendering the requested path, so enabling speculation no longer changes read output for symlinks; video targets are declined at authorization ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- JavaScript speculation now verifies the retained tool-bridge dispatcher and string-coercion intrinsic identities before projecting reads ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- Speculative eval sessions are now discarded at reconciliation when a hook or transform appends source the stream never verified, instead of releasing reads planned from the original code ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- Speculative reads now classify format and rendering by the requested path while opening the resolved target, so symlinks with a different extension read exactly like ordinary reads ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- JavaScript speculation now validates coercion intrinsics used by `String()` and `.join()` inputs, not just template and `+` operands ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- Speculative reads now infer the summary language from the requested path while reading the resolved target, so cross-language symlinks summarize exactly like ordinary reads (by [@h4vc](https://github.com/h4vc)).
+- The structural summary cache now keys on the parser language path, so one file read through different extensions no longer reuses a stale summary (by [@h4vc](https://github.com/h4vc)).
+- Fixed the Windows installer failing on Windows PowerShell 5.1: OS architecture detection no longer depends on the .NET `RuntimeInformation` type that only resolves reliably on PowerShell 7, and the script now requires PowerShell 5.1+ with a clear upgrade message instead of failing cryptically ([#11905](https://github.com/can1357/oh-my-pi/pull/11905) by [@h4vc](https://github.com/h4vc)).
+- Speculative reads now infer the summary language from the requested path while reading the resolved target, so cross-language symlinks summarize exactly like ordinary reads ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
+- The structural summary cache now keys on the parser language path, so one file read through different extensions no longer reuses a stale summary ([#11892](https://github.com/can1357/oh-my-pi/pull/11892) by [@h4vc](https://github.com/h4vc)).
 
 ### Fixed
 
@@ -99,9 +166,6 @@
 - Hiding tool activity (its shortcut or `display.hideToolActivity` in `/settings`) now replays native history, so blocks already retired to the terminal hide on the same keypress instead of waiting for another display toggle ([#11734](https://github.com/can1357/oh-my-pi/pull/11734) by [@notnotype](https://github.com/notnotype)).
 - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
-
-### Fixed
-
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
 ## [18.1.17] - 2026-09-10
@@ -2034,3 +2098,4 @@
 - Replaced the `inspect_image.enabled` boolean with the tri-state `inspect_image.mode` (`auto`|`on`|`off`, default `auto`). In `auto` the tool is registered only when the active model lacks native image input, so vision-capable models (e.g. `kimi-code/k3`) read images inline with their own capabilities instead of delegating to a separate vision model; the tool set is re-evaluated on every model switch with a status notice when it flips. The `read` tool now follows the effective state dynamically rather than the raw setting, so it returns decoded image blocks again whenever `inspect_image` is hidden. Existing `inspect_image.enabled: true/false` configs migrate to `inspect_image.mode: on/off`.
 
 Older entries are archived in [packages\coding-agent\CHANGELOG.md@82055ba68d58](https://github.com/can1357/oh-my-pi/blob/82055ba68d58c511788bb49ecccdc8e6400aa870/packages\coding-agent\CHANGELOG.md).
+Older entries are archived in [packages\coding-agent\CHANGELOG.md@66783f3c68ba](https://github.com/can1357/oh-my-pi/blob/66783f3c68ba682828e684c33070fa2c905a55a4/packages\coding-agent\CHANGELOG.md).

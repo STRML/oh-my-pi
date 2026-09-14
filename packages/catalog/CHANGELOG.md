@@ -2,9 +2,27 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenCode Zen GPT-6 Astra requests now use the Responses endpoint instead of failing through chat completions with HTTP 500 ([#12030](https://github.com/can1357/oh-my-pi/issues/12030)).
+
+## [18.1.20] - 2026-09-13
+
+### Fixed
+
+- Fixed DeepSeek V4.1 Flash dropping image attachments on hosts without their own carve-out, so the natively multimodal model is no longer treated as text-only ([#11992](https://github.com/can1357/oh-my-pi/pull/11992) by [@infernix](https://github.com/infernix)).
+- LiteLLM model groups keep the image input their deployment declares, instead of having attachments replaced with the "model does not support vision" placeholder ([#11982](https://github.com/can1357/oh-my-pi/issues/11982), [#11985](https://github.com/can1357/oh-my-pi/pull/11985) by [@lz37](https://github.com/lz37)).
+- Fixed OpenCode Zen/Go Muse Spark models failing every tool-call turn with a 400 "reasoning encrypted_content was not issued to this caller" error: the gateways proxy the Responses lane to Meta but can't round-trip encrypted reasoning, so those SKUs no longer request or replay it ([#11928](https://github.com/can1357/oh-my-pi/issues/11928)).
+
+## [18.1.19] - 2026-09-12
+
 ### Added
 
 - Added Charm Hyper as a built-in provider with API-key login, live model discovery, and per-model pricing, effort ladders, and limits read straight from its catalog ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- `anthropic/claude-fable-5-1` cache reads now cost Anthropic's published $0.25/MTok instead of $1.00, so session cost and usage reports no longer overstate cache-read spend by 4x ([#11862](https://github.com/can1357/oh-my-pi/pull/11862) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.18] - 2026-09-11
 

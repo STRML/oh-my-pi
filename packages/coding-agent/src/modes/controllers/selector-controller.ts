@@ -63,7 +63,7 @@ import {
 } from "../../thinking";
 import type { ToolSession } from "../../tools";
 import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask";
-import { shortenPath } from "../../tools/render-utils";
+import { sanitizeDisplayWarnings, shortenPath } from "../../tools/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
@@ -307,6 +307,9 @@ export class SelectorController {
 			}
 			const dirs = { projectDir, agentDir };
 			const initialDoc = await loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(initialScope, dirs));
+			if (initialDoc.warnings?.length) {
+				this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(initialDoc.warnings).join("; ")}`);
+			}
 			// Fullscreen editor on the alternate screen (the /settings idiom): the
 			// overlay holds the alt buffer + mouse tracking; the transcript stays put.
 			const done = () => {
@@ -343,6 +346,9 @@ export class SelectorController {
 						discovered.sharedMaxNotesPerUpdate,
 					);
 					this.ctx.statusLine.invalidate();
+					if (discovered.warnings.length > 0) {
+						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(discovered.warnings).join("; ")}`);
+					}
 					this.ctx.showStatus(
 						count > 0
 							? `Saved ${scope} WATCHDOG.yml — ${count} advisor${count === 1 ? "" : "s"} active.`
@@ -353,6 +359,9 @@ export class SelectorController {
 				close: done,
 				requestRender: () => this.ctx.ui.requestRender(),
 				notify: message => this.ctx.showStatus(message),
+				// Scope switches happen inside the overlay; the initial file's warnings
+				// were already shown above, so only newly activated files arrive here.
+				warn: message => this.ctx.showWarning(message),
 				getAdvisorStats: () => this.ctx.session.getAdvisorStats().advisors,
 				getUsageReports: async () => this.ctx.session.fetchUsageReports?.() ?? null,
 				resolveActiveAccount: (provider, sessionId) =>
