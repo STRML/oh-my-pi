@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { chmod } from "node:fs/promises";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -277,6 +278,31 @@ describe("runSharpshooterConsolidation", () => {
 		// The omitted files keep their content instead of depending on not being written.
 		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
 		expect(await Bun.file(path.join(bankDir, "style.md")).text()).toBe("old style");
+	});
+
+	it("aborts rather than carrying an unreadable file through as empty", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-unreadable-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
+		await Bun.write(path.join(bankDir, "architecture.md"), "old architecture");
+		await Bun.write(path.join(bankDir, "product.md"), "old product");
+		// Unreadable for a reason other than absence. Treating it as empty and then
+		// carrying that through an omitted file would rename an empty file over content
+		// that is still on disk.
+		await chmod(path.join(bankDir, "product.md"), 0o000);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			completion([{ name: "architecture.md", content: "new architecture" }]),
+		);
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		expect(result.ran).toBe(false);
+		expect(result.reason).toBe("error");
+		expect(result.error).toContain("product.md");
+		await chmod(path.join(bankDir, "product.md"), 0o600);
+		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
+		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
 	});
 
 	it("refuses a partial reply that empties a file which still has content", async () => {

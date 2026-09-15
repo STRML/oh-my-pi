@@ -202,6 +202,14 @@ async function consolidateLocked(
 	}
 }
 
+/**
+ * Read the three memory files.
+ *
+ * A file that is not there reads as empty, which is the normal case on a new
+ * project. Any other failure throws: consolidation carries an omitted file
+ * through from what was read here, so treating an unreadable file as empty
+ * would rename an empty file over content that is still on disk.
+ */
 async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Record<SharpshooterMemoryFile, string>> {
 	const files: Record<SharpshooterMemoryFile, string> = {
 		"architecture.md": "",
@@ -210,9 +218,13 @@ async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Re
 	};
 	await Promise.all(
 		SHARPSHOOTER_MEMORY_FILES.map(async name => {
-			files[name] = await Bun.file(sharpshooterMemoryFilePath(agentDir, cwd, name))
+			const path = sharpshooterMemoryFilePath(agentDir, cwd, name);
+			files[name] = await Bun.file(path)
 				.text()
-				.catch(() => "");
+				.catch((error: NodeJS.ErrnoException) => {
+					if (error?.code === "ENOENT") return "";
+					throw new Error(`cannot read ${name}: ${error?.message ?? String(error)}`);
+				});
 		}),
 	);
 	return files;

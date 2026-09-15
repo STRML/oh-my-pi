@@ -51,7 +51,7 @@ function stubPrimary(calls: string[]): MemoryBackend {
 			items: [{ content: "primary hit" }],
 		}),
 		save: async () => ({ backend: "mnemopi" as const, stored: 1 }),
-		beforeAgentStartPrompt: async () => "PRIMARY TURN PROMPT",
+		beforeAgentStartPrompt: async () => ({ context: "PRIMARY TURN PROMPT", commit: () => true }),
 		preCompactionContext: async () => "PRIMARY COMPACTION",
 	};
 }
@@ -207,6 +207,30 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(result?.count).toBe(1);
 	});
 
+	it("still returns a sharpshooter hit when the primary fills the limit", async () => {
+		spyOn(sharpshooterBackend, "search").mockResolvedValue({
+			backend: "sharpshooter",
+			query: "deploy",
+			count: 1,
+			items: [{ content: "- Deploy through the script.", source: "architecture.md" }],
+		});
+		const full: MemoryBackend = {
+			...stubPrimary([]),
+			search: async (_context, query) => ({
+				backend: "mnemopi" as const,
+				query,
+				count: 10,
+				items: Array.from({ length: 10 }, (_, index) => ({ content: `primary ${index}` })),
+			}),
+		};
+		const paired = withSharpshooter(full);
+		// Concatenating and slicing would drop sharpshooter entirely here, which is
+		// exactly when a decision-file hit is worth seeing.
+		const result = await paired.search?.({ agentDir: "/agent", cwd: "/cwd" }, "deploy", { limit: 10 });
+		expect(result?.items).toHaveLength(10);
+		expect(result?.items.map(item => item.content)).toContain("- Deploy through the script.");
+	});
+
 	it("reports the context as searchable when only sharpshooter can search", async () => {
 		spyOn(sharpshooterBackend, "status").mockResolvedValue({
 			backend: "sharpshooter",
@@ -271,7 +295,11 @@ describe("sharpshooter paired with a store backend", () => {
 
 	it("keeps the primary's turn prompt, save and compaction hooks", async () => {
 		const paired = withSharpshooter(stubPrimary([]));
-		await expect(paired.beforeAgentStartPrompt?.({} as never, "prompt")).resolves.toBe("PRIMARY TURN PROMPT");
+		// The hook hands back a preparation the caller commits, so the wrapper must
+		// pass the object through untouched rather than just its text.
+		const prepared = await paired.beforeAgentStartPrompt?.({} as never, "prompt");
+		expect(prepared?.context).toBe("PRIMARY TURN PROMPT");
+		expect(prepared?.commit()).toBe(true);
 		await expect(paired.preCompactionContext?.([], {} as never)).resolves.toBe("PRIMARY COMPACTION");
 		await expect(paired.save?.({ agentDir: "/agent", cwd: "/cwd" }, { content: "note" })).resolves.toMatchObject({
 			stored: 1,

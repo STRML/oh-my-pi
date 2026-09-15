@@ -168,10 +168,20 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			);
 			const result = primaryResult ?? { backend: primary.id, query, count: 0, items: [] };
 			if (!extra || extra.items.length === 0) return result;
-			// Both backends apply the caller's limit to their own results, so the
-			// merged set has to be trimmed again or two halves become twice the limit.
-			const merged = [...result.items, ...extra.items];
-			const items = options?.limit !== undefined ? merged.slice(0, Math.max(0, options.limit)) : merged;
+			if (options?.limit === undefined) {
+				const items = [...result.items, ...extra.items];
+				return { ...result, items, count: items.length };
+			}
+			// Both backends already applied the caller's limit to their own results, so
+			// the merged set needs trimming again. Taking the primary's items first and
+			// slicing would drop sharpshooter entirely whenever the primary filled the
+			// limit on its own, which is exactly when a decision-file hit is worth
+			// seeing. Split the limit instead, and let either side use the room the
+			// other did not.
+			const limit = Math.max(0, options.limit);
+			const share = Math.min(extra.items.length, Math.ceil(limit / 2));
+			const fromPrimary = result.items.slice(0, Math.max(0, limit - share));
+			const items = [...fromPrimary, ...extra.items.slice(0, limit - fromPrimary.length)];
 			return { ...result, items, count: items.length };
 		},
 
