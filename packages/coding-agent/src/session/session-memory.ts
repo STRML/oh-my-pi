@@ -204,23 +204,34 @@ export class SessionMemory {
 	 * skipping leaves it consolidating the project the session just left and
 	 * ignoring the destination project's own `sharpshooter.enabled`.
 	 *
-	 * A no-op unless the pairing is what is actually running: sharpshooter
-	 * selected as the backend rebinds through the normal apply.
+	 * The destination project decides, both ways. It can turn pairing off, and
+	 * then the source project's subscription and scheduler have to go: left
+	 * installed they would keep extracting from this session's messages and keep
+	 * consolidating a project the session has left.
+	 *
+	 * Sharpshooter selected as the backend is left alone either way, because it
+	 * rebinds through the normal apply.
 	 */
 	rebindPairedMemoryForCwd(): void {
 		if (this.#host.isDisposed()) return;
 		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
 		const settings = this.#host.settings;
-		if (settings.get("memory.backend") === "sharpshooter" || !settings.get("sharpshooter.enabled")) return;
+		const backend = settings.get("memory.backend");
+		if (backend === "sharpshooter") return;
+		const session = this.#host.memoryBackendSession();
+		if (!settings.get("sharpshooter.enabled")) {
+			releaseSharpshooterSession(session);
+			return;
+		}
 		startSharpshooterLeg(
 			{
-				session: this.#host.memoryBackendSession(),
+				session,
 				settings,
 				modelRegistry: this.#host.modelRegistry,
 				agentDir: this.#memoryAgentDir,
 				taskDepth: this.#memoryTaskDepth,
 			},
-			settings.get("memory.backend") ?? "off",
+			backend ?? "off",
 		);
 	}
 

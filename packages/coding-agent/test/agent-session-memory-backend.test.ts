@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as sharpshooterModule from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -38,7 +39,6 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
-	let sharpshooterStartSpy: ReturnType<typeof spyOn> | undefined;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
@@ -53,8 +53,9 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	afterEach(async () => {
-		sharpshooterStartSpy?.mockRestore();
-		sharpshooterStartSpy = undefined;
+		// Restored here rather than at the end of each test, so a failing assertion
+		// cannot leave a mock installed and hand its call history to the next test.
+		mock.restore();
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
@@ -133,14 +134,10 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 	});
 
-	/**
-	 * Record the cwd Sharpshooter is started against. Restored in `afterEach` rather
-	 * than at the end of each test, so a failing assertion cannot leave the mock in
-	 * place and hand its call history to whatever runs next.
-	 */
+	/** Record the cwd Sharpshooter is started against; `afterEach` restores the mock. */
 	function trackSharpshooterStarts(): string[] {
 		const startedAt: string[] = [];
-		sharpshooterStartSpy = spyOn(sharpshooterBackend, "start").mockImplementation(options => {
+		spyOn(sharpshooterBackend, "start").mockImplementation(options => {
 			startedAt.push(options.settings.getCwd());
 		});
 		return startedAt;
@@ -169,6 +166,31 @@ describe("AgentSession memory backend lifecycle", () => {
 		await rebindMemoryBackendForCwd(current);
 
 		expect(startedAt).toEqual([source, destination]);
+	});
+
+	it("releases Sharpshooter when the destination project turns pairing off", async () => {
+		// The destination decides both ways. Left installed, the source project's
+		// subscription would keep extracting from this session's messages and its
+		// scheduler would keep consolidating a project the session has left.
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toHaveLength(1);
+		releaseSpy.mockClear();
+
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		settings.override("sharpshooter.enabled", false);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
+		expect(startedAt).toHaveLength(1);
 	});
 
 	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {
