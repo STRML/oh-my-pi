@@ -10,6 +10,7 @@
 
 ### Added
 
+- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so a session can have searchable recall and always-on project decisions at once; `/memory clear` and `/memory sync` still reach only the selected backend ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
 - User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under their own `## User Instructions` heading whenever generated blocks precede them, instead of trailing the `## MCP Server Instructions` section and reading as server-supplied, unverified content ([#11832](https://github.com/can1357/oh-my-pi/pull/11832) by [@iacore](https://github.com/iacore)).
@@ -77,6 +78,7 @@
 - Moved PTY log replay into the shared project launch broker, so normal CLI and Hub startup no longer load the xterm runtime while launch logs return validated rendered terminal rows.
 
 ### Fixed
+- Sharpshooter consolidation no longer drops decisions when the model returns only some of the memory files: the untouched files keep their current content, and a reply that empties a file which still has content is refused ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 - Late non-blocking advisor notes arriving while a terminal primary turn unwinds now stay visible as advisor cards instead of starting an extra primary request ([#12154](https://github.com/can1357/oh-my-pi/pull/12154) by [@korri123](https://github.com/korri123)).
 
 - Fixed Perplexity sign-in for SSO-only accounts in `/login` and the setup wizard with isolated browser sign-in and automatic session capture, supporting both secure-prefixed and unprefixed session cookies without manual cookie copying. ([#12064](https://github.com/can1357/oh-my-pi/pull/12064) by [@lance0](https://github.com/lance0))
