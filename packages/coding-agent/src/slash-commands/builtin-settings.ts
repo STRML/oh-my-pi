@@ -108,6 +108,13 @@ const RESTART_REQUIRED_KEYS: Partial<Record<SettingPath, true>> = {
 	"snapcompact.systemPrompt": true,
 	"snapcompact.toolResults": true,
 	"snapcompact.shape": true,
+	// reloadPlugins refreshes the discovery-driven surfaces live (skills,
+	// slash commands, task agents, MCP), but extension tools/hooks stay
+	// bound to the ExtensionRunner sdk.ts constructed at session start and
+	// no reload pipeline rebuilds them. The discovery changes still apply
+	// in the same pass; the restart note covers the runner-bound half.
+	extensions: true,
+	disabledExtensions: true,
 	// SDK-init-time closure constants (see session-tools.ts): the prompt
 	// rebuild reads the captured values, not the live settings, and the
 	// first two also snapshot into private Agent request fields, so prompt
