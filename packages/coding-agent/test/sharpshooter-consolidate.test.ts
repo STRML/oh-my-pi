@@ -291,22 +291,20 @@ describe("runSharpshooterConsolidation", () => {
 		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
 		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
 		await Bun.write(path.join(bankDir, "architecture.md"), "old architecture");
-		await Bun.write(path.join(bankDir, "product.md"), "old product");
-		// Unreadable for a reason other than absence. Treating it as empty and then
-		// carrying that through an omitted file would rename an empty file over content
-		// that is still on disk.
-		await fs.chmod(path.join(bankDir, "product.md"), 0o000);
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			completion([{ name: "architecture.md", content: "new architecture" }]),
-		);
+		// A directory fails the read with EISDIR for any user, where mode 000 is
+		// readable as root and on a runner holding CAP_DAC_OVERRIDE.
+		await fs.mkdir(path.join(bankDir, "product.md"), { recursive: true });
+		// A complete reply, so only the read error can end this run. An incomplete one
+		// would also mention product.md and the assertions would pass either way.
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(completion(completeFiles));
 
 		const result = await runSharpshooterConsolidation({ ...harness, force: true });
 
 		expect(result.ran).toBe(false);
 		expect(result.reason).toBe("error");
-		expect(result.error).toContain("product.md");
-		await fs.chmod(path.join(bankDir, "product.md"), 0o600);
-		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
+		expect(result.error).toContain("cannot read product.md");
+		// The read precedes the model call, so an abort here costs no tokens.
+		expect(completeSpy).not.toHaveBeenCalled();
 		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
 	});
 
