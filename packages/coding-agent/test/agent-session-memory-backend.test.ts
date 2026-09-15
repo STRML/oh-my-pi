@@ -134,10 +134,18 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 	});
 
-	/** Record the cwd Sharpshooter is started against; `afterEach` restores the mock. */
+	/**
+	 * Record the cwd Sharpshooter is installed against, through either entry point:
+	 * `start` on a real startup, `rebindSharpshooterSession` on a cwd move. Tracking
+	 * only one would make a regression in the other look like silence. `afterEach`
+	 * restores the mocks.
+	 */
 	function trackSharpshooterStarts(): string[] {
 		const startedAt: string[] = [];
 		spyOn(sharpshooterBackend, "start").mockImplementation(options => {
+			startedAt.push(options.settings.getCwd());
+		});
+		spyOn(sharpshooterModule, "rebindSharpshooterSession").mockImplementation(options => {
 			startedAt.push(options.settings.getCwd());
 		});
 		return startedAt;

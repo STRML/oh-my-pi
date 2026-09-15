@@ -232,6 +232,7 @@ export class SessionMemory {
 				taskDepth: this.#memoryTaskDepth,
 			},
 			backend ?? "off",
+			"rebind",
 		);
 	}
 

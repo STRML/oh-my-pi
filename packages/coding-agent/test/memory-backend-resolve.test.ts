@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	createMemoryRuntimeContext,
@@ -13,6 +13,10 @@ describe("resolveMemoryBackend", () => {
 	});
 
 	afterEach(() => {
+		// Restored here, not at the end of each test: a rejection or a failed
+		// assertion would otherwise leave `sharpshooterBackend.search` mocked for
+		// later tests and later files in the full suite (AGENTS.md:305).
+		mock.restore();
 		resetSettingsForTest();
 	});
 
@@ -43,7 +47,7 @@ describe("resolveMemoryBackend", () => {
 		let current = "/tmp/source-project";
 		const session = { settings, sessionManager: { getCwd: () => current } } as never;
 		const seen: string[] = [];
-		const searchSpy = spyOn(sharpshooterBackend, "search").mockImplementation(async ({ cwd }, query) => {
+		spyOn(sharpshooterBackend, "search").mockImplementation(async ({ cwd }, query) => {
 			seen.push(cwd);
 			return { backend: "sharpshooter" as const, query, count: 0, items: [] };
 		});
@@ -54,14 +58,13 @@ describe("resolveMemoryBackend", () => {
 		await memory.search("deploy");
 
 		expect(seen).toEqual(["/tmp/source-project", "/tmp/destination-project"]);
-		searchSpy.mockRestore();
 	});
 
 	it("falls back to the creation cwd when the session manager reports none", async () => {
 		const settings = Settings.isolated({ "memory.backend": "sharpshooter" });
 		const session = { settings, sessionManager: { getCwd: () => "" } } as never;
 		const seen: string[] = [];
-		const searchSpy = spyOn(sharpshooterBackend, "search").mockImplementation(async ({ cwd }, query) => {
+		spyOn(sharpshooterBackend, "search").mockImplementation(async ({ cwd }, query) => {
 			seen.push(cwd);
 			return { backend: "sharpshooter" as const, query, count: 0, items: [] };
 		});
@@ -69,7 +72,6 @@ describe("resolveMemoryBackend", () => {
 		await createSessionMemoryRuntimeContext(session, "/tmp/agent", "/tmp/fallback").search("deploy");
 
 		expect(seen).toEqual(["/tmp/fallback"]);
-		searchSpy.mockRestore();
 	});
 
 	it("reports local backend runtime status as writable (lessons) without structured search", async () => {

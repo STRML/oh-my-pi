@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { sharpshooterBackend } from "../sharpshooter/backend";
+import { rebindSharpshooterSession, sharpshooterBackend } from "../sharpshooter/backend";
 import type {
 	MemoryBackend,
 	MemoryBackendId,
@@ -19,16 +19,23 @@ import type {
  * release them, and the scheduler ticks immediately, so it could consolidate and
  * spend a model call after shutdown.
  *
- * `sharpshooterBackend.start` releases the session's previous resources before it
- * acquires new ones, so calling this again is also how a live session rebinds after
- * its cwd moves.
+ * Both entry points release the session's previous resources before acquiring new
+ * ones, so either is safe to call on a session that already has them. They differ
+ * in one thing: `"start"` catches up on a transcript that already ends in a user
+ * prompt, and `"rebind"` does not, because after `/move` that prompt belongs to the
+ * project the session left.
  */
-export function startSharpshooterLeg(options: MemoryBackendStartOptions, primaryId: MemoryBackendId): void {
+export function startSharpshooterLeg(
+	options: MemoryBackendStartOptions,
+	primaryId: MemoryBackendId,
+	reason: "start" | "rebind" = "start",
+): void {
 	if (options.session.isDisposed) return;
 	try {
-		sharpshooterBackend.start(options);
+		if (reason === "rebind") rebindSharpshooterSession(options);
+		else sharpshooterBackend.start(options);
 	} catch (error) {
-		logger.warn("Sharpshooter start failed while paired", { backend: primaryId, error: String(error) });
+		logger.warn(`Sharpshooter ${reason} failed while paired`, { backend: primaryId, error: String(error) });
 	}
 }
 
@@ -75,14 +82,22 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 	 *
 	 * Sharpshooter runs whether or not the primary threw, so one backend failing
 	 * cannot quietly skip the other; the primary's error still reaches the caller.
+	 *
+	 * Both are started before either is awaited. The two backends share nothing, and
+	 * awaiting the primary first would make every paired call cost the sum of the two
+	 * latencies instead of the larger one, which a slow Mnemopi search or a Hindsight
+	 * request over the network makes obvious. The primary's rejection is still raised
+	 * after the sharpshooter leg settles, so neither promise is left unhandled.
 	 */
 	const legs = async <T>(
 		label: string,
 		runPrimary: () => Promise<T>,
 		runPaired: () => Promise<T | undefined>,
 	): Promise<[T | undefined, T | undefined]> => {
-		const settled = await Promise.allSettled([runPrimary()]);
-		const extra = await paired(label, runPaired);
+		const primaryRun = Promise.allSettled([runPrimary()]);
+		const pairedRun = paired(label, runPaired);
+		const settled = await primaryRun;
+		const extra = await pairedRun;
 		const [result] = settled;
 		if (result?.status === "rejected") throw result.reason;
 		return [result?.value, extra];
