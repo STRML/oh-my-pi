@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -206,9 +206,9 @@ async function consolidateLocked(
  * Read the three memory files.
  *
  * A file that is not there reads as empty, which is the normal case on a new
- * project. Any other failure throws: consolidation carries an omitted file
- * through from what was read here, so treating an unreadable file as empty
- * would rename an empty file over content that is still on disk.
+ * project. Any other failure throws, because what is read here decides the
+ * all-empty guard: an unreadable file taken as empty would let a reply that
+ * wipes the set past a check whose whole job is to catch that.
  */
 async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Record<SharpshooterMemoryFile, string>> {
 	const files: Record<SharpshooterMemoryFile, string> = {
@@ -218,13 +218,12 @@ async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Re
 	};
 	await Promise.all(
 		SHARPSHOOTER_MEMORY_FILES.map(async name => {
-			const path = sharpshooterMemoryFilePath(agentDir, cwd, name);
-			files[name] = await Bun.file(path)
-				.text()
-				.catch((error: NodeJS.ErrnoException) => {
-					if (error?.code === "ENOENT") return "";
-					throw new Error(`cannot read ${name}: ${error?.message ?? String(error)}`);
-				});
+			try {
+				files[name] = await Bun.file(sharpshooterMemoryFilePath(agentDir, cwd, name)).text();
+			} catch (err) {
+				if (isEnoent(err)) return;
+				throw new Error(`cannot read ${name}: ${err instanceof Error ? err.message : String(err)}`);
+			}
 		}),
 	);
 	return files;
