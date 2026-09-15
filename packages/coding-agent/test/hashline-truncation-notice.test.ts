@@ -2,48 +2,34 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { isReadTruncationNotice } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 
-const RUST_TEST_FILE = path.join(import.meta.dir, "../../../crates/pi-edit/tests/hashline_parse.rs");
+const NOTICE_FIXTURE = path.join(
+	import.meta.dir,
+	"../../../crates/pi-edit/tests/fixtures/hashline/read-truncation-notices.txt",
+);
 
 /**
- * The notice corpus, read out of the Rust test that owns it.
+ * The notice shapes `read` emits, shared with the Rust test that owns the
+ * predicate.
  *
  * `isReadTruncationNotice` ports
  * `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`,
  * which the hashline parser still calls, so two implementations of one
- * predicate exist and can drift. Copying the corpus into TS would let them
- * drift silently; reading it means a shape added or changed on the Rust side
- * is immediately asserted against this port too.
+ * predicate exist and can drift. `read_truncation_notice_covers_emitted_shapes`
+ * in `crates/pi-edit/tests/hashline_parse.rs` asserts the same file against the
+ * Rust side, so a shape added for one is a shape the other must handle.
  *
  * This pins the corpus, not the predicate. Nothing short of code generation or
  * a native call proves the two functions agree on every input.
- *
- * Parsing fails loudly rather than falling back to a copy. A corpus that
- * silently empties itself is a test that passes while protecting nothing.
  */
-async function readRustNoticeCorpus(): Promise<string[]> {
-	const source = await Bun.file(RUST_TEST_FILE).text();
-	const fnStart = source.indexOf("fn read_truncation_notice_covers_emitted_shapes()");
-	if (fnStart === -1) {
-		throw new Error(`read_truncation_notice_covers_emitted_shapes is gone from ${RUST_TEST_FILE}; update this test`);
-	}
-	const arrayStart = source.indexOf("for notice in [", fnStart);
-	const arrayEnd = source.indexOf("] {", arrayStart);
-	if (arrayStart === -1 || arrayEnd === -1) {
-		throw new Error(`could not find the notice array in ${RUST_TEST_FILE}; update this test`);
-	}
-	const body = source.slice(arrayStart + "for notice in [".length, arrayEnd);
-	// Rust string literals, with `\` line continuations folded the way rustc folds
-	// them: the escape eats the newline and the leading whitespace after it.
-	const notices = [...body.matchAll(/"((?:[^"\\]|\\.)*)"/gs)].map(match =>
-		match[1]!.replace(/\\\s*\n\s*/g, "").replace(/\\"/g, '"'),
-	);
-	if (notices.length === 0) throw new Error(`parsed an empty corpus from ${RUST_TEST_FILE}; update this test`);
-	return notices;
-}
-
-const EMITTED_NOTICES = await readRustNoticeCorpus();
+const EMITTED_NOTICES = (await Bun.file(NOTICE_FIXTURE).text()).split("\n").filter(line => line.length > 0);
 
 describe("isReadTruncationNotice", () => {
+	it("has shapes to check", () => {
+		// `it.each([])` registers nothing and reports success, so an emptied or
+		// moved fixture would silently retire the corpus below.
+		expect(EMITTED_NOTICES.length).toBeGreaterThan(0);
+	});
+
 	it.each(EMITTED_NOTICES)("recognizes the notice %p that read emits", notice => {
 		expect(isReadTruncationNotice(notice)).toBe(true);
 	});
