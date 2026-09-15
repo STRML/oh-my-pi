@@ -2,9 +2,12 @@
  * Memory backend abstraction.
  *
  * One store is selected. `await resolveMemoryBackend(settings)` returns a single
- * `MemoryBackend` and every memory consumer routes through it. Implementations MUST
- * be self-contained: they own the per-session state they create in `start()` and
- * tear it down on `clear()`.
+ * `MemoryBackend`, and everything that goes through this abstraction goes through
+ * that one object. Not everything does: the built-in `recall`, `retain` and
+ * `reflect` tools gate on `memory.backend` directly and reach their own session
+ * state, which is why the wrapper below has to keep the store's `id`.
+ * Implementations MUST be self-contained: they own the per-session state they
+ * create in `start()` and tear it down on `clear()`.
  *
  * `sharpshooter.enabled` is the one case where that object composes two backends
  * rather than being a store itself. Sharpshooter distills project decisions instead
