@@ -39,6 +39,28 @@ export function stripHashlinePrefixes(lines: string[]): string[] {
 const USIZE_MAX = 18446744073709551615n;
 
 /**
+ * The 25 code points of the Unicode `White_Space` property, which is what
+ * Rust's `char::is_whitespace` tests.
+ */
+const RUST_WHITESPACE_CLASS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const RUST_TRIM_RE = new RegExp(`^[${RUST_WHITESPACE_CLASS}]+|[${RUST_WHITESPACE_CLASS}]+$`, "gu");
+
+/**
+ * `str::trim` as Rust does it, which is not what JS `String.trim` strips.
+ * Both sets hold 25 code points and they differ in both directions: JS trims
+ * U+FEFF, which Rust keeps, and Rust trims U+0085, which JS keeps.
+ *
+ * The U+FEFF half is the one that bites. This classifier runs over content a
+ * user is writing, so a real line that merely opens with a BOM, such as a
+ * literal `[Showing lines 1-20 of 60. Use :21 to continue]` behind one, would
+ * lose the BOM to `String.trim`, match as read metadata, and get the write
+ * rejected as an incomplete read projection.
+ */
+function rustTrim(value: string): string {
+	return value.replace(RUST_TRIM_RE, "");
+}
+
+/**
  * Whether `value` is what Rust's `usize::from_str` accepts: an optional `+`,
  * then one or more ASCII digits, with the value inside `usize` range.
  *
@@ -63,14 +85,14 @@ function parsesAsUsize(value: string): boolean {
  * cannot drift silently; change both together.
  *
  * It is a port rather than a native call because PR CI tests against the latest
- * published `@oh-my-pi/pi-natives` release rather than a source build (ci.yml:212-219 —
+ * published `@oh-my-pi/pi-natives` release rather than a source build (ci.yml:212-219:
  * native changes are validated post-merge on main and at release), so a napi
  * export used in the same PR that adds it resolves to `undefined` and breaks
  * every PR's tests until the next release is cut. The check is plain string
  * matching with no native-only capability, so it does not need the boundary.
  */
 export function isReadTruncationNotice(line: string): boolean {
-	const trimmed = line.trim();
+	const trimmed = rustTrim(line);
 	if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return false;
 	const body = trimmed.slice(1, -1);
 	const showingNotice =

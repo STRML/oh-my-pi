@@ -44,4 +44,34 @@ describe("isReadTruncationNotice", () => {
 		expect(isReadTruncationNotice("[some more lines in file. Use :21 to continue]")).toBe(false);
 		expect(isReadTruncationNotice("[ 40 more lines in file. Use :21 to continue]")).toBe(false);
 	});
+
+	// The row is trimmed the way Rust's `str::trim` trims, over the Unicode
+	// White_Space property. JS `String.trim` covers a different 25 code points:
+	// it takes U+FEFF, which Rust leaves, and leaves U+0085, which Rust takes.
+	describe("trims what Rust trims", () => {
+		const NOTICE = "[Showing lines 1-20 of 60. Use :21 to continue]";
+		const BOM = "\uFEFF";
+		const NEL = "\u0085";
+
+		// Whitespace both runtimes agree on, one per shape: ASCII, no-break
+		// space, en quad, ideographic space.
+		it.each([" ", "\t", "\n", "\r", "\u00A0", "\u2000", "\u3000"])(
+			"still strips %j, which both runtimes treat as whitespace",
+			ws => {
+				expect(isReadTruncationNotice(`${ws}${NOTICE}${ws}`)).toBe(true);
+			},
+		);
+
+		it("keeps a leading BOM, so BOM-prefixed content is not read metadata", () => {
+			// `String.trim` drops U+FEFF and would misread this as a notice,
+			// rejecting a legitimate write of a file that opens with a BOM.
+			expect(BOM.trim()).toBe("");
+			expect(isReadTruncationNotice(`${BOM}${NOTICE}`)).toBe(false);
+		});
+
+		it("strips U+0085, which Rust counts as whitespace and JS does not", () => {
+			expect(NEL.trim()).not.toBe("");
+			expect(isReadTruncationNotice(`${NEL}${NOTICE}${NEL}`)).toBe(true);
+		});
+	});
 });
