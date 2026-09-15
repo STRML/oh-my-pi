@@ -39,9 +39,12 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
+	/** Counts base-prompt rebuilds; the memory host routes them away from the session object. */
+	let promptRebuilds = 0;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
+		promptRebuilds = 0;
 		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settings = Settings.isolated({
@@ -93,9 +96,10 @@ describe("AgentSession memory backend lifecycle", () => {
 			createMemoryTools,
 			toolRegistry,
 			builtInToolNames: [read.name],
-			rebuildSystemPrompt: async toolNames => ({
-				systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`],
-			}),
+			rebuildSystemPrompt: async toolNames => {
+				promptRebuilds += 1;
+				return { systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`] };
+			},
 		});
 		return session;
 	}
@@ -193,12 +197,19 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(startedAt).toHaveLength(1);
 		releaseSpy.mockClear();
 
+		// Sharpshooter's decisions are injected as developer instructions, so the
+		// prompt has to be rebuilt or the session keeps being told the source
+		// project's rules after pairing was turned off. The Hindsight rebuild does
+		// not do it when its own bank scope is unchanged.
+		const rebuildsBefore = promptRebuilds;
+
 		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
 		settings.override("sharpshooter.enabled", false);
 		await rebindMemoryBackendForCwd(current);
 
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(startedAt).toHaveLength(1);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
 	});
 
 	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {

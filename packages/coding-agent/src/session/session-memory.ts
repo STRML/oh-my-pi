@@ -211,29 +211,38 @@ export class SessionMemory {
 	 *
 	 * Sharpshooter selected as the backend is left alone either way, because it
 	 * rebinds through the normal apply.
+	 *
+	 * Either branch ends with a prompt rebuild. Sharpshooter's decision files are
+	 * injected as developer instructions, and the Hindsight rebuild this runs
+	 * beside refreshes the base prompt only when its own bank scope changed, which
+	 * a `global` scope or an unchanged bank never does. Without this the session
+	 * would go on being told the source project's decisions, including after a
+	 * destination that turned pairing off.
 	 */
-	rebindPairedMemoryForCwd(): void {
+	async rebindPairedMemoryForCwd(): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
 		const settings = this.#host.settings;
 		const backend = settings.get("memory.backend");
 		if (backend === "sharpshooter") return;
 		const session = this.#host.memoryBackendSession();
-		if (!settings.get("sharpshooter.enabled")) {
+		if (settings.get("sharpshooter.enabled")) {
+			startSharpshooterLeg(
+				{
+					session,
+					settings,
+					modelRegistry: this.#host.modelRegistry,
+					agentDir: this.#memoryAgentDir,
+					taskDepth: this.#memoryTaskDepth,
+				},
+				backend ?? "off",
+				"rebind",
+			);
+		} else {
 			releaseSharpshooterSession(session);
-			return;
 		}
-		startSharpshooterLeg(
-			{
-				session,
-				settings,
-				modelRegistry: this.#host.modelRegistry,
-				agentDir: this.#memoryAgentDir,
-				taskDepth: this.#memoryTaskDepth,
-			},
-			backend ?? "off",
-			"rebind",
-		);
+		if (this.#host.isDisposed()) return;
+		await this.#host.refreshBaseSystemPrompt();
 	}
 
 	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {

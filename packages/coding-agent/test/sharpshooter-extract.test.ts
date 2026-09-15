@@ -14,6 +14,7 @@ import {
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function message(role: "user" | "assistant", content: unknown): AgentMessage {
 	return { role, content, timestamp: Date.now() } as unknown as AgentMessage;
@@ -215,8 +216,9 @@ describe("maybeStartSharpshooterExtraction", () => {
 	});
 
 	it("queues a delta to the project whose prompt produced it, even if /move lands mid-extraction", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "sharpshooter-extract-move-"));
-		try {
+		using temp = TempDir.createSync("@sharpshooter-extract-move-");
+		{
+			const root = temp.path();
 			const source = path.join(root, "source");
 			const destination = path.join(root, "destination");
 			const agentDir = path.join(root, "agent");
@@ -264,8 +266,6 @@ describe("maybeStartSharpshooterExtraction", () => {
 			// The decision was earned in the source project and is not a decision
 			// about the destination.
 			expect(await listSharpshooterDeltas(agentDir, destination)).toHaveLength(0);
-		} finally {
-			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 

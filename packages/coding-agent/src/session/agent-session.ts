@@ -5581,9 +5581,9 @@ export class AgentSession {
 	 * Rebind the paired decision backend alone, for a cwd move that could not run a
 	 * full apply. Callers that can reach `applyMemoryBackend` should use that.
 	 */
-	rebindPairedMemoryForCwd(): void {
-		if (!this.memoryEnabled) return;
-		this.#memory.rebindPairedMemoryForCwd();
+	rebindPairedMemoryForCwd(): Promise<void> {
+		if (!this.memoryEnabled) return Promise.resolve();
+		return this.#memory.rebindPairedMemoryForCwd();
 	}
 
 	/** Rebuilds the stable base prompt, optionally discarding a stale asynchronous rebuild. */

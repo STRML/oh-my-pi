@@ -222,7 +222,7 @@ export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<
 		// paired alongside the store still has to follow the move though, and the
 		// rebuild below reinstalls Hindsight's state alone. Rebinding that leg on its
 		// own leaves the in-flight transition untouched.
-		session.rebindPairedMemoryForCwd();
+		await session.rebindPairedMemoryForCwd();
 	} else {
 		// Other backends have no Hindsight scope subscription, so reapply them on an
 		// explicit cwd move. The manager already has the new cwd, and this may also be
