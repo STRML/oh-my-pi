@@ -93,10 +93,18 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 		 * scheduler refcount for the life of the process.
 		 */
 		start(options: MemoryBackendStartOptions): Promise<void> {
-			try {
-				sharpshooterBackend.start(options);
-			} catch (error) {
-				logger.warn("Sharpshooter start failed while paired", { backend: primary.id, error: String(error) });
+			// Registering first is only safe while the session is alive. `resolve` awaits
+			// a cold backend import, and the SDK discards this promise, so disposal can
+			// run its unconditional release before start is ever called. Registering
+			// then would attach a subscription and a scheduler to a dead session with
+			// nothing left to release them, and the scheduler ticks immediately, so it
+			// could consolidate and spend a model call after shutdown.
+			if (!options.session.isDisposed) {
+				try {
+					sharpshooterBackend.start(options);
+				} catch (error) {
+					logger.warn("Sharpshooter start failed while paired", { backend: primary.id, error: String(error) });
+				}
 			}
 			return Promise.resolve(primary.start(options));
 		},

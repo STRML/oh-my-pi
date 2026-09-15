@@ -14,6 +14,11 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+/** Start options carrying a session, which the wrapper checks before registering. */
+function startOptions(isDisposed = false): MemoryBackendStartOptions {
+	return { session: { isDisposed } } as unknown as MemoryBackendStartOptions;
+}
+
 /** A store backend that records what the wrapper asked of it. */
 function stubPrimary(calls: string[]): MemoryBackend {
 	return {
@@ -99,7 +104,7 @@ describe("sharpshooter paired with a store backend", () => {
 			calls.push("sharpshooter start");
 		});
 		const paired = withSharpshooter(stubPrimary(calls));
-		await paired.start({} as MemoryBackendStartOptions);
+		await paired.start(startOptions());
 		// Sharpshooter registers first, before any await, so a caller that drops the
 		// returned promise cannot dispose ahead of its registration.
 		expect(calls).toEqual(["sharpshooter start", "start"]);
@@ -152,8 +157,24 @@ describe("sharpshooter paired with a store backend", () => {
 		const paired = withSharpshooter(slowPrimary);
 		// The SDK drops this promise on the floor. Sharpshooter must already be
 		// registered by the time it does, or disposal can outrun its registration.
-		void paired.start({} as MemoryBackendStartOptions);
+		void paired.start(startOptions());
 		expect(calls).toEqual(["sharpshooter start"]);
+	});
+
+	it("does not register sharpshooter onto a session that is already disposed", async () => {
+		const calls: string[] = [];
+		const start = spyOn(sharpshooterBackend, "start").mockImplementation(() => {
+			calls.push("sharpshooter start");
+		});
+		const paired = withSharpshooter(stubPrimary(calls));
+		// resolveMemoryBackend awaits a cold backend import and the SDK discards this
+		// promise, so disposal can run its unconditional release before start is
+		// reached. Registering then leaves a subscription and a scheduler on a dead
+		// session, and the scheduler ticks immediately.
+		await paired.start(startOptions(true));
+
+		expect(start).not.toHaveBeenCalled();
+		expect(calls).toEqual(["start"]);
 	});
 
 	it("runs the sharpshooter leg for status and search when the primary throws", async () => {
@@ -352,7 +373,7 @@ describe("sharpshooter paired with a store backend", () => {
 		const calls: string[] = [];
 		const paired = withSharpshooter(stubPrimary(calls));
 		await expect(paired.buildDeveloperInstructions("/agent", {} as never)).resolves.toBe("PRIMARY INSTRUCTIONS");
-		await paired.start({} as MemoryBackendStartOptions);
+		await paired.start(startOptions());
 		expect(calls).toContain("start");
 	});
 });
