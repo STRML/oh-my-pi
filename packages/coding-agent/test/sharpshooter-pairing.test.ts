@@ -220,6 +220,39 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(result?.count).toBe(1);
 	});
 
+	it("answers a zero limit the same way whether or not sharpshooter matched", async () => {
+		// A backend reads a non-positive limit its own way (mnemopi clamps it to one
+		// item), and the pair must not turn that into two different answers depending
+		// on whether the decision files happened to contain the needle.
+		const oneItem = {
+			backend: "mnemopi" as const,
+			query: "deploy",
+			count: 1,
+			items: [{ content: "clamped to one" }],
+		};
+		const clamping: MemoryBackend = { ...stubPrimary([]), search: async () => oneItem };
+
+		const searchSpy = spyOn(sharpshooterBackend, "search");
+		searchSpy.mockResolvedValue({ backend: "sharpshooter", query: "deploy", count: 0, items: [] });
+		const withoutHit = await withSharpshooter(clamping).search?.({ agentDir: "/agent", cwd: "/cwd" }, "deploy", {
+			limit: 0,
+		});
+
+		searchSpy.mockResolvedValue({
+			backend: "sharpshooter",
+			query: "deploy",
+			count: 1,
+			items: [{ content: "- Deploy through the script.", source: "architecture.md" }],
+		});
+		const withHit = await withSharpshooter(clamping).search?.({ agentDir: "/agent", cwd: "/cwd" }, "deploy", {
+			limit: 0,
+		});
+
+		expect(withoutHit?.items).toEqual(oneItem.items);
+		expect(withHit?.items).toEqual(withoutHit?.items);
+		expect(withHit?.count).toBe(withoutHit?.count ?? -1);
+	});
+
 	it("still returns a sharpshooter hit when the primary fills the limit", async () => {
 		spyOn(sharpshooterBackend, "search").mockResolvedValue({
 			backend: "sharpshooter",

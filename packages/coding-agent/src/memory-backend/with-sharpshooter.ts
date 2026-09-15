@@ -2,10 +2,35 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { sharpshooterBackend } from "../sharpshooter/backend";
 import type {
 	MemoryBackend,
+	MemoryBackendId,
 	MemoryBackendOperationContext,
 	MemoryBackendSearchOptions,
 	MemoryBackendStartOptions,
 } from "./types";
+
+/**
+ * Start sharpshooter's own session resources, and never let that failure take the
+ * store down with it.
+ *
+ * Registering is only safe while the session is alive. `resolve` awaits a cold
+ * backend import and the SDK discards the promise `start` returns, so disposal can
+ * run its unconditional release before start is ever called. Registering then would
+ * attach a subscription and a scheduler to a dead session with nothing left to
+ * release them, and the scheduler ticks immediately, so it could consolidate and
+ * spend a model call after shutdown.
+ *
+ * `sharpshooterBackend.start` releases the session's previous resources before it
+ * acquires new ones, so calling this again is also how a live session rebinds after
+ * its cwd moves.
+ */
+export function startSharpshooterLeg(options: MemoryBackendStartOptions, primaryId: MemoryBackendId): void {
+	if (options.session.isDisposed) return;
+	try {
+		sharpshooterBackend.start(options);
+	} catch (error) {
+		logger.warn("Sharpshooter start failed while paired", { backend: primaryId, error: String(error) });
+	}
+}
 
 /**
  * Run sharpshooter alongside a store backend.
@@ -99,13 +124,7 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			// then would attach a subscription and a scheduler to a dead session with
 			// nothing left to release them, and the scheduler ticks immediately, so it
 			// could consolidate and spend a model call after shutdown.
-			if (!options.session.isDisposed) {
-				try {
-					sharpshooterBackend.start(options);
-				} catch (error) {
-					logger.warn("Sharpshooter start failed while paired", { backend: primary.id, error: String(error) });
-				}
-			}
+			startSharpshooterLeg(options, primary.id);
 			return Promise.resolve(primary.start(options));
 		},
 
@@ -187,6 +206,12 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 			// seeing. Split the limit instead, and let either side use the room the
 			// other did not.
 			const limit = Math.max(0, options.limit);
+			// A backend reads a non-positive limit its own way, and that reading is the
+			// caller's to see: mnemopi clamps it to one item. Splitting a zero limit
+			// would return nothing whenever sharpshooter happened to match, so the pair
+			// would answer one query two ways depending on the decision files. Pass the
+			// primary through untouched, which is what an unwrapped backend returns.
+			if (limit === 0) return result;
 			const share = Math.min(extra.items.length, Math.ceil(limit / 2));
 			const fromPrimary = result.items.slice(0, Math.max(0, limit - share));
 			const items = [...fromPrimary, ...extra.items.slice(0, limit - fromPrimary.length)];

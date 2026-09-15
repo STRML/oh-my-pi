@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -37,6 +38,7 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
+	let sharpshooterStartSpy: ReturnType<typeof spyOn> | undefined;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
@@ -51,6 +53,8 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	afterEach(async () => {
+		sharpshooterStartSpy?.mockRestore();
+		sharpshooterStartSpy = undefined;
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
@@ -127,6 +131,60 @@ describe("AgentSession memory backend lifecycle", () => {
 		await rebindMemoryBackendForCwd(current);
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
+	});
+
+	/**
+	 * Record the cwd Sharpshooter is started against. Restored in `afterEach` rather
+	 * than at the end of each test, so a failing assertion cannot leave the mock in
+	 * place and hand its call history to whatever runs next.
+	 */
+	function trackSharpshooterStarts(): string[] {
+		const startedAt: string[] = [];
+		sharpshooterStartSpy = spyOn(sharpshooterBackend, "start").mockImplementation(options => {
+			startedAt.push(options.settings.getCwd());
+		});
+		return startedAt;
+	}
+
+	it("rebinds a paired Sharpshooter to the destination project when Hindsight owns the backend", async () => {
+		// The rebind path skips the full apply while Hindsight state exists, so that
+		// it does not retry a partially torn-down store. Sharpshooter keys its bank
+		// and its per-bank scheduler on cwd, so without a rebind of its own it keeps
+		// consolidating the project the session just left.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+		expect(startedAt).toEqual([source]);
+
+		await settings.reloadForCwd(destination);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([source, destination]);
+	});
+
+	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", false);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([]);
 	});
 
 	it("switches runtime state, memory tools, and prompt in one apply", async () => {

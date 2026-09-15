@@ -36,7 +36,9 @@ A Sharpshooter failure never stops the selected backend, and the selected backen
 
 Sharpshooter writes on its own schedule and calls a model to do it, using `sharpshooter.model` and consolidating every `sharpshooter.intervalMinutes`. Whether the session ends up with a second model-driven writer depends on the backend: `local` and `hindsight` write through a model, `mnemopi` does so only when `mnemopi.llmMode` is not `none`, and `off` adds nothing.
 
-Enabling the flag starts Sharpshooter for a project that was not running it before, so consolidation now has to hold up on its own. The prompt asks for the complete content of all three files, and a reply returning fewer is refused. Only returned files are written, so the rest would keep their old content while every queued delta was consumed, and any decision meant for them would be gone. Deltas survive a refusal, so the next cycle tries again. Emptying a file is still a decision the admission law allows, from a reply that covered all three.
+Enabling the flag starts Sharpshooter for a project that was not running it before, so consolidation now has to hold up on its own. The prompt asks for the complete content of all three files, and a reply returning fewer is refused before anything is written and before any delta is consumed.
+
+That refusal is there because accepting a partial reply loses work with nothing to show for it. Only returned files are written, so an omitted file would keep its old content while the consolidation went on to mark every queued delta consumed, and any decision bound for that file would be gone without a record. Refusing leaves the deltas in place for the next cycle, which is the only outcome that loses nothing. Emptying a file remains a decision the admission law allows, from a reply that covered all three.
 
 ## Usage
 

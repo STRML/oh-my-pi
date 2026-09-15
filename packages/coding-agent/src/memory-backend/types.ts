@@ -1,9 +1,19 @@
 /**
  * Memory backend abstraction.
  *
- * Backends are mutually exclusive — `await resolveMemoryBackend(settings)` returns
- * exactly one. Implementations MUST be self-contained: they own the per-session
- * state they create in `start()` and tear it down on `clear()`.
+ * One store is selected. `await resolveMemoryBackend(settings)` returns a single
+ * `MemoryBackend` and every memory consumer routes through it. Implementations MUST
+ * be self-contained: they own the per-session state they create in `start()` and
+ * tear it down on `clear()`.
+ *
+ * `sharpshooter.enabled` is the one case where that object composes two backends
+ * rather than being a store itself. Sharpshooter distills project decisions instead
+ * of storing memories, so it runs beside the selected store and the selection is
+ * wrapped to drive both. The wrapper keeps the store's `id`, leaving tool gating
+ * that reads `memory.backend` unaffected, and it deliberately does not fan every
+ * method out: `clear` and `enqueue` reach the store alone, since both can destroy or
+ * erode decision files that keep no history to restore from. See
+ * `with-sharpshooter.ts`.
  */
 
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
