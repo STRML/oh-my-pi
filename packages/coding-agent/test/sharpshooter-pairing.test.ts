@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
@@ -9,19 +8,11 @@ import { withSharpshooter } from "@oh-my-pi/pi-coding-agent/memory-backend/with-
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import { sharpshooterBankDir } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
-const tempDirs: string[] = [];
-
-afterEach(async () => {
+afterEach(() => {
 	vi.restoreAllMocks();
-	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
-
-async function makeTempDir(name: string): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), `${name}-`));
-	tempDirs.push(dir);
-	return dir;
-}
 
 /** A store backend that records what the wrapper asked of it. */
 function stubPrimary(calls: string[]): MemoryBackend {
@@ -85,7 +76,8 @@ describe("sharpshooter paired with a store backend", () => {
 	});
 
 	it("injects both backends' instructions", async () => {
-		const root = await makeTempDir("sharpshooter-pairing");
+		using temp = TempDir.createSync("@pi-sharpshooter-pairing-");
+		const root = temp.path();
 		const agentDir = path.join(root, "agent");
 		const cwd = path.join(root, "project");
 		await fs.mkdir(cwd, { recursive: true });
@@ -273,7 +265,8 @@ describe("sharpshooter paired with a store backend", () => {
 	});
 
 	it("clears the selected backend without touching the decision files", async () => {
-		const root = await makeTempDir("sharpshooter-pairing-clear");
+		using temp = TempDir.createSync("@pi-sharpshooter-pairing-clear-");
+		const root = temp.path();
 		const agentDir = path.join(root, "agent");
 		const cwd = path.join(root, "project");
 		await fs.mkdir(cwd, { recursive: true });

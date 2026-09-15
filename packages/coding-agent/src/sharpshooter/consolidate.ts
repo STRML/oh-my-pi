@@ -285,23 +285,18 @@ function parseReplacementFiles(
 	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
 		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
 	}
-	// The tool schema accepts any-length array, and only returned files are written,
-	// so a short reply used to leave the rest untouched while their queued deltas
-	// were consumed and the run recorded success. Emptying a file is a decision the
-	// admission law allows, but only from a reply that considered all three; from a
-	// partial one it is the reply being malformed, not a judgement about that file.
+	// The prompt asks for the complete content of all three files, and the tool
+	// schema accepts a shorter array. A short reply is malformed, not a judgement
+	// about the files it left out: only the returned files are written, so the rest
+	// keep their old bytes while every queued delta is consumed and the run records
+	// success. A decision meant for an omitted file is then gone with nothing
+	// recording that it existed. Rejecting the reply keeps the deltas for the next
+	// pass, which is the only outcome that does not lose one.
 	if (seen.size < SHARPSHOOTER_MEMORY_FILES.length) {
-		const emptied = files.find(file => file.content.trim().length === 0 && currentFiles[file.name].trim().length > 0);
-		if (emptied) {
-			throw new Error(
-				`replace_memory_files emptied ${emptied.name} without covering all ${SHARPSHOOTER_MEMORY_FILES.length} files; refusing a partial wipe`,
-			);
-		}
-		// Carry the untouched files through so the write covers the whole set, which
-		// is what the consolidation prompt asks for and what the docs describe.
-		for (const name of SHARPSHOOTER_MEMORY_FILES) {
-			if (!seen.has(name)) files.push({ name, content: currentFiles[name] });
-		}
+		const missing = SHARPSHOOTER_MEMORY_FILES.filter(name => !seen.has(name));
+		throw new Error(
+			`replace_memory_files omitted ${missing.join(", ")}; refusing an incomplete reply because its queued deltas would be consumed unapplied`,
+		);
 	}
 	return files;
 }
