@@ -35,17 +35,39 @@ export function stripHashlinePrefixes(lines: string[]): string[] {
 	return hashlineStripPrefixes(lines);
 }
 
+/** Largest value `usize::from_str` accepts on every 64-bit target this addon builds for. */
+const USIZE_MAX = 18446744073709551615n;
+
+/**
+ * Whether `value` is what Rust's `usize::from_str` accepts: an optional `+`,
+ * then one or more ASCII digits, with the value inside `usize` range.
+ *
+ * A bare `/^\d+$/` is not the same predicate and diverges in both directions:
+ * it rejects `+5`, which Rust parses as 5, and accepts `18446744073709551616`,
+ * which Rust rejects as overflow.
+ */
+function parsesAsUsize(value: string): boolean {
+	const digits = value.startsWith("+") ? value.slice(1) : value;
+	if (digits.length === 0 || !/^\d+$/.test(digits)) return false;
+	return BigInt(digits) <= USIZE_MAX;
+}
+
 /**
  * Whether a row is a truncation notice emitted by `read`.
  *
- * Pure TS port of `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`.
- * Kept in TS rather than round-tripping through a native export: PR CI tests
- * against the latest published `@oh-my-pi/pi-natives` release rather than a
- * source build (native changes are validated post-merge on main and at
- * release), so a brand-new napi export used the same PR it lands in breaks
- * every PR's tests until the next release is cut. This check is cheap,
- * allocation-free string matching with no native-only capability, so it
- * doesn't need the native boundary at all.
+ * Behavioural port of `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`,
+ * which stays the source of truth: the Rust copy is load-bearing inside the
+ * hashline parser through `is_read_metadata_line`, so it cannot be deleted the
+ * way `description_compact` was in 95337cf22b3f. `test/hashline-truncation-notice.test.ts`
+ * mirrors the corpus in `crates/pi-edit/tests/hashline_parse.rs` so the two
+ * cannot drift silently; change both together.
+ *
+ * It is a port rather than a native call because PR CI tests against the latest
+ * published `@oh-my-pi/pi-natives` release rather than a source build (ci.yml:212-219 —
+ * native changes are validated post-merge on main and at release), so a napi
+ * export used in the same PR that adds it resolves to `undefined` and breaks
+ * every PR's tests until the next release is cut. The check is plain string
+ * matching with no native-only capability, so it does not need the boundary.
  */
 export function isReadTruncationNotice(line: string): boolean {
 	const trimmed = line.trim();
@@ -58,7 +80,7 @@ export function isReadTruncationNotice(line: string): boolean {
 	const moreLineSplitIndex = body.indexOf(" more line");
 	const moreLineCount = moreLineSplitIndex === -1 ? null : body.slice(0, moreLineSplitIndex);
 	const moreNotice =
-		(body.startsWith("More lines in ") || (moreLineCount !== null && /^\d+$/.test(moreLineCount))) &&
+		(body.startsWith("More lines in ") || (moreLineCount !== null && parsesAsUsize(moreLineCount))) &&
 		body.includes(" in ") &&
 		body.includes(". Use ") &&
 		body.endsWith(" to continue");
