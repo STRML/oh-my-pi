@@ -2,6 +2,7 @@ import type { Settings } from "../config/settings";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
+import { withSharpshooter } from "./with-sharpshooter";
 
 /**
  * Pick the active memory backend for a Settings instance.
@@ -27,7 +28,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	const id = settings.get("memory.backend");
 	const selected = await selectMemoryBackend(id);
 	if (id === "sharpshooter" || !settings.get("sharpshooter.enabled")) return selected;
-	return (await import("./with-sharpshooter")).withSharpshooter(selected);
+	return withSharpshooter(selected);
 }
 
 async function selectMemoryBackend(id: string | undefined): Promise<MemoryBackend> {

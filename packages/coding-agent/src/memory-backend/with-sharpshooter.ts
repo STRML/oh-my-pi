@@ -148,8 +148,10 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 				.join("; ");
 			return {
 				...status,
-				// This wrapper answers search from sharpshooter even when the selected
-				// backend cannot, so a caller must not be told search is unavailable.
+				// With `off` selected, sharpshooter's scheduler, prompt injection and
+				// search are all running. Reporting the pair as inactive or unsearchable
+				// would describe a session that is not the one running.
+				active: status.active || Boolean(extra?.active),
 				searchable: status.searchable || Boolean(extra?.searchable),
 				...(message ? { message } : {}),
 			};

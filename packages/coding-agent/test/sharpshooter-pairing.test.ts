@@ -230,6 +230,24 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(status?.searchable).toBe(true);
 	});
 
+	it("reports memory as active when only sharpshooter is running", async () => {
+		spyOn(sharpshooterBackend, "status").mockResolvedValue({
+			backend: "sharpshooter",
+			active: true,
+			writable: false,
+			searchable: true,
+			message: "architecture.md: 3 lines",
+		});
+		// `off` paired with sharpshooter still runs a scheduler, prompt injection and
+		// search, so status must not call that session inactive.
+		const settings = Settings.isolated({ "memory.backend": "off", "sharpshooter.enabled": true });
+		const resolved = await resolveMemoryBackend(settings);
+		const status = await resolved.status?.({ agentDir: "/agent", cwd: "/cwd" });
+		expect(status?.backend).toBe("off");
+		expect(status?.active).toBe(true);
+		expect(status?.searchable).toBe(true);
+	});
+
 	it("clears the selected backend without touching the decision files", async () => {
 		const root = await makeTempDir("sharpshooter-pairing-clear");
 		const agentDir = path.join(root, "agent");
