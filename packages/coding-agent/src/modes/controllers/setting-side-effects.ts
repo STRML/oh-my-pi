@@ -237,7 +237,7 @@ export function applySettingSideEffects(
 	switch (id) {
 		// Session-managed settings (not in SettingsManager)
 		case "autoCompact":
-			ctx.session.setAutoCompactionEnabled(value as boolean);
+			ctx.session.setAutoCompactionEnabled(value as boolean, persist);
 			ctx.statusLine.setAutoCompactEnabled(value as boolean);
 			break;
 		case "compaction.enabled":
