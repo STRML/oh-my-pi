@@ -209,6 +209,12 @@ export function withSharpshooter(primary: MemoryBackend): MemoryBackend {
 				async () => sharpshooterBackend.search?.(context, query, options),
 			);
 			const result = primaryResult ?? { backend: primary.id, query, count: 0, items: [] };
+			// Both legs are in flight at once, so an abort can land between them: the
+			// sharpshooter leg reads three local files and can be done before mnemopi
+			// notices the signal and returns its empty "Search aborted." result.
+			// Merging then answers a cancelled search with memories in it. The
+			// primary's outcome is the honest one to return.
+			if (options?.signal?.aborted) return result;
 			if (!extra || extra.items.length === 0) return result;
 			if (options?.limit === undefined) {
 				const items = [...result.items, ...extra.items];

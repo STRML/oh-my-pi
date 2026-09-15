@@ -205,6 +205,35 @@ describe("sharpshooter paired with a store backend", () => {
 		expect(seen).toEqual(["sharpshooter search"]);
 	});
 
+	it("does not answer an aborted search with sharpshooter hits", async () => {
+		// Sharpshooter reads three local files and can finish before a slower
+		// primary notices the signal, so the abort lands between the two legs. A
+		// result that says "Search aborted." and carries memories anyway is worse
+		// than either honest answer.
+		spyOn(sharpshooterBackend, "search").mockResolvedValue({
+			backend: "sharpshooter",
+			query: "deploy",
+			count: 1,
+			items: [{ content: "- Deploy through the script.", source: "architecture.md" }],
+		});
+		const controller = new AbortController();
+		const aborting: MemoryBackend = {
+			...stubPrimary([]),
+			search: async (_context, query) => {
+				controller.abort();
+				return { backend: "mnemopi" as const, query, count: 0, items: [], message: "Search aborted." };
+			},
+		};
+
+		const result = await withSharpshooter(aborting).search?.({ agentDir: "/agent", cwd: "/cwd" }, "deploy", {
+			signal: controller.signal,
+		});
+
+		expect(result?.items).toEqual([]);
+		expect(result?.count).toBe(0);
+		expect(result?.message).toBe("Search aborted.");
+	});
+
 	it("keeps the caller's search limit across both backends", async () => {
 		spyOn(sharpshooterBackend, "search").mockResolvedValue({
 			backend: "sharpshooter",
