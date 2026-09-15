@@ -36,7 +36,7 @@ export function stripHashlinePrefixes(lines: string[]): string[] {
 }
 
 /** Largest value `usize::from_str` accepts on every 64-bit target this addon builds for. */
-const USIZE_MAX = 18446744073709551615n;
+const USIZE_MAX_DIGITS = "18446744073709551615";
 
 /**
  * The 25 code points of the Unicode `White_Space` property, which is what
@@ -67,11 +67,22 @@ function rustTrim(value: string): string {
  * A bare `/^\d+$/` is not the same predicate and diverges in both directions:
  * it rejects `+5`, which Rust parses as 5, and accepts `18446744073709551616`,
  * which Rust rejects as overflow.
+ *
+ * The range check is a string comparison rather than a `BigInt` conversion.
+ * `parse::<usize>()` is checked and allocates nothing, so it answers a count of
+ * half a million digits as cheaply as a count of two. Converting first gives
+ * that input a way to throw `RangeError: Out of memory` out of a classifier
+ * whose only job is to return a boolean, and the write it was inspecting fails
+ * with it. Leading zeros are stripped first because Rust accepts them.
  */
 function parsesAsUsize(value: string): boolean {
-	const digits = value.startsWith("+") ? value.slice(1) : value;
-	if (digits.length === 0 || !/^\d+$/.test(digits)) return false;
-	return BigInt(digits) <= USIZE_MAX;
+	const body = value.startsWith("+") ? value.slice(1) : value;
+	if (body.length === 0 || !/^\d+$/.test(body)) return false;
+	const digits = body.replace(/^0+(?=\d)/, "");
+	// Equal-length digit strings compare lexicographically the way they compare
+	// numerically, so the only other question is which is longer.
+	if (digits.length !== USIZE_MAX_DIGITS.length) return digits.length < USIZE_MAX_DIGITS.length;
+	return digits <= USIZE_MAX_DIGITS;
 }
 
 /**

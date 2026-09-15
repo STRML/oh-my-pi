@@ -40,6 +40,24 @@ describe("isReadTruncationNotice", () => {
 		expect(isReadTruncationNotice("[+40 more lines in file. Use :21 to continue]")).toBe(true);
 	});
 
+	it("accepts leading zeros on the count, as parse::<usize>() does", () => {
+		expect(isReadTruncationNotice("[0000000040 more lines in file. Use :21 to continue]")).toBe(true);
+		expect(isReadTruncationNotice("[+018446744073709551615 more lines in file. Use :21 to continue]")).toBe(true);
+	});
+
+	it("answers an absurdly long count without doing arbitrary-precision work", () => {
+		// `parse::<usize>()` is checked and allocates nothing, so it rejects a
+		// half-million-digit count as cheaply as a two-digit one. Converting to a
+		// BigInt first would make a classifier that returns a boolean do work
+		// proportional to whatever the user happened to write.
+		const huge = "9".repeat(500_000);
+		const started = performance.now();
+		expect(isReadTruncationNotice(`[${huge} more lines in file. Use :21 to continue]`)).toBe(false);
+		expect(performance.now() - started).toBeLessThan(250);
+		// Half a million zeros is still zero, and Rust parses it.
+		expect(isReadTruncationNotice(`[${"0".repeat(500_000)} more lines in file. Use :21 to continue]`)).toBe(true);
+	});
+
 	it("rejects a non-numeric count", () => {
 		expect(isReadTruncationNotice("[some more lines in file. Use :21 to continue]")).toBe(false);
 		expect(isReadTruncationNotice("[ 40 more lines in file. Use :21 to continue]")).toBe(false);
