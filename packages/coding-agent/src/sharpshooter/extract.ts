@@ -47,7 +47,7 @@ const recordDeltasTool = {
 };
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
-const kExtractionPendingPrompt = Symbol("sharpshooter.extractionPendingPrompt");
+const kExtractionPendingQueue = Symbol("sharpshooter.extractionPendingQueue");
 
 export interface SharpshooterExtractionOptions {
 	session: AgentSession;
@@ -58,10 +58,42 @@ export interface SharpshooterExtractionOptions {
 	message?: AgentMessage;
 }
 
+/** A dropped prompt plus the project it belonged to when it was dropped. */
+interface PendingExtraction {
+	options: SharpshooterExtractionOptions;
+	/**
+	 * Captured at drop time. A `/move` can land between the drop and the
+	 * retry; binding the bank then would file the prompt's decisions in the
+	 * project it was never written in.
+	 */
+	cwd: string;
+}
+
+// Bound the model spend a burst of dropped prompts can trigger after the
+// slot clears; beyond this the newest prompts are still transcript history
+// for whichever prompt extracts next.
+const MAX_PENDING_EXTRACTIONS = 4;
+
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
-	/** A prompt dropped while the slot was busy; retried when it clears. */
-	[kExtractionPendingPrompt]?: SharpshooterExtractionOptions;
+	/** Prompts dropped while the slot was busy, retried in order when it clears. */
+	[kExtractionPendingQueue]?: PendingExtraction[];
+}
+
+/**
+ * Retry dropped prompts in drop order, serially. Called from the in-flight
+ * extraction's `finally`; each retried prompt re-enters the normal guard, so
+ * a prompt dropped during a retry queues behind it and this loop yields.
+ */
+async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<void> {
+	const host = session as ExtractionHost;
+	for (;;) {
+		if (session.isDisposed || host[kExtractionInFlight]) return;
+		const pending = host[kExtractionPendingQueue]?.shift();
+		if (!pending) return;
+		maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+		if (host[kExtractionInFlight]) await host[kExtractionInFlight];
+	}
 }
 
 /**
@@ -181,17 +213,24 @@ export async function resolveSharpshooterModel(
 }
 
 /** Start best-effort extraction for one committed user prompt without blocking the caller. */
-export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions): void {
+export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions, forcedCwd?: string): void {
 	try {
 		const { session } = options;
 		if (session.isDisposed) return;
 		if ((session as ExtractionHost)[kExtractionInFlight]) {
 			// One model call at a time. A prompt dropped here is otherwise lost
 			// outright: notably the first prompt after a `/move`, whose slot is
-			// held across the rebind by the source prompt's extraction. Keep it
-			// and retry when the slot clears; the cwd re-captured then matches
-			// the project the dropped prompt belongs to.
-			(session as ExtractionHost)[kExtractionPendingPrompt] = options;
+			// held across the rebind by the source prompt's extraction. Queue it
+			// with the project it belonged to at drop time.
+			const host = session as ExtractionHost;
+			const queue = (host[kExtractionPendingQueue] ??= []);
+			if (queue.length >= MAX_PENDING_EXTRACTIONS) {
+				logger.debug("Sharpshooter extraction backlog full; dropping prompt", {
+					sessionId: session.sessionId,
+				});
+				return;
+			}
+			queue.push({ cwd: forcedCwd ?? session.sessionManager.getCwd(), options });
 			return;
 		}
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
@@ -201,18 +240,14 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 
 		// Bind the bank now. The model call below can outlive a `/move`, and the
 		// deltas belong to the project whose prompt produced them.
-		const cwd = session.sessionManager.getCwd();
+		const cwd = forcedCwd ?? session.sessionManager.getCwd();
 		const run = runSharpshooterExtraction(options, envelope, cwd)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;
-				const pending = (session as ExtractionHost)[kExtractionPendingPrompt];
-				if (pending && !session.isDisposed) {
-					(session as ExtractionHost)[kExtractionPendingPrompt] = undefined;
-					maybeStartSharpshooterExtraction(pending);
-				}
+				void drainSharpshooterExtractionQueue(session);
 			});
 		(session as ExtractionHost)[kExtractionInFlight] = run;
 	} catch (error) {

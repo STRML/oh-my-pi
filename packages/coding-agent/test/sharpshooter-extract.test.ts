@@ -193,16 +193,36 @@ describe("maybeStartSharpshooterExtraction", () => {
 			});
 			expect(completion).toHaveBeenCalledTimes(1);
 
-			// The source extraction clears the slot; the stashed prompt must
-			// extract against the destination cwd captured at retry time.
+			// A second prompt drops after the move; the queue must retry both,
+			// in drop order, instead of the newest overwriting the oldest.
+			const thirdPrompt = "Note that the destination project flags flaky checkout tests.";
+			const thirdMessage = message("user", [{ type: "text", text: thirdPrompt }]);
+			messages.push(thirdMessage);
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				message: thirdMessage,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			expect(completion).toHaveBeenCalledTimes(1);
+
+			// The source extraction clears the slot; stashed prompts must
+			// extract in order.
 			const pendingSecond = Promise.withResolvers<AssistantMessage>();
-			completion.mockImplementation(call => (call === 0 ? pendingFirst.promise : pendingSecond.promise));
+			const pendingThird = Promise.withResolvers<AssistantMessage>();
+			const responses = [pendingFirst.promise, pendingSecond.promise, pendingThird.promise];
+			let served = 0;
+			completion.mockImplementation(() => responses[Math.min(served++, responses.length - 1)]);
 			pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
-			await waitFor(() => completion.mock.calls.length === 2, "stashed prompt was not extracted");
+			await waitFor(() => completion.mock.calls.length === 3, "stashed prompts were not extracted");
 			expect(JSON.stringify(completion.mock.calls[1])).toContain(movedPrompt);
+			expect(JSON.stringify(completion.mock.calls[2])).toContain(thirdPrompt);
 
 			pendingSecond.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
 			await pendingSecond.promise;
+			pendingThird.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+			await pendingThird.promise;
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
