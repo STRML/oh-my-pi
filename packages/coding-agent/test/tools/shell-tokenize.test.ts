@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget, readShellWord } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import {
+	extractLeadingCdTarget,
+	readShellWord,
+	tokenizeShellSegments,
+} from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
@@ -103,5 +107,37 @@ describe("readShellWord", () => {
 	it("returns undefined for empty or all-whitespace input", () => {
 		expect(readShellWord("")).toBeUndefined();
 		expect(readShellWord("   ")).toBeUndefined();
+	});
+});
+
+describe("tokenizeShellSegments", () => {
+	it("keeps a multiline ANSI-C string open as one word, then splits", () => {
+		// `$'...\'` stays open across newlines: the escaped quote does not
+		// close it. `echo AFTER` is string CONTENT, like bash prints it; the
+		// contract's fix is that it is no longer read as the closing quote,
+		// so the segment after the string is `echo REACHED`, not the payload.
+		// Probed against bash: one printf, then `echo REACHED`.
+		const command = "printf $'prefix \\'\necho AFTER\n' ; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["printf", "$prefix \\'\necho AFTER\n"],
+			["echo", "REACHED"],
+		]);
+	});
+
+	it("closes a plain quoted string on the first apostrophe", () => {
+		// A backslash is literal inside plain quotes: nothing is escaped.
+		const command = "echo 'a\\b'; echo NEXT";
+		expect(tokenizeShellSegments(command)).toEqual([["echo", "a\\b"], ["echo", "NEXT"]]);
+	});
+
+	it("closes an ANSI-C string at its own closing quote, one line later", () => {
+		const command = "printf $'a\\'b\n' ; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([["printf", "$a\\'b\n"], ["echo", "REACHED"]]);
+	});
+
+	it("treats a quoted apostrophe after a bare word as plain quoting", () => {
+		// The sensory trap: `x '...'` is a plain string; only `$'...'` escapes.
+		const command = "echo x'not ansi'; echo REACHED";
+		expect(tokenizeShellSegments(command)).toEqual([["echo", "xnot ansi"], ["echo", "REACHED"]]);
 	});
 });
