@@ -40,7 +40,12 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
-function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
+function extractionDependencies(
+	cwd: string,
+	messages: AgentMessage[],
+	sessionId = "session-extract",
+	getCwd: () => string = () => cwd,
+) {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
 	const settings = {
@@ -64,7 +69,7 @@ function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId
 		isDisposed: false,
 		messages,
 		sessionId,
-		sessionManager: { getCwd: () => cwd },
+		sessionManager: { getCwd },
 	} as unknown as AgentSession;
 	return { modelRegistry, session, settings };
 }
@@ -148,6 +153,59 @@ describe("maybeStartSharpshooterExtraction", () => {
 		await pending.promise;
 		await Promise.resolve();
 		await Promise.resolve();
+	});
+
+	it("extracts a prompt dropped while the slot was busy once the slot clears", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "sharpshooter-stash-"));
+		try {
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			const messages = [
+				message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
+			];
+			let currentCwd = cwd;
+			const deps = extractionDependencies(cwd, messages, "session-extract", () => currentCwd);
+
+			const pendingFirst = Promise.withResolvers<AssistantMessage>();
+			const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pendingFirst.promise);
+
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+
+			// The destination prompt arrives while the source extraction still
+			// holds the slot (the /move mid-flight case). Pre-fix it was dropped
+			// outright and never extracted.
+			const movedPrompt = "Record that the destination project ships on Tuesdays only.";
+			const movedMessage = message("user", [{ type: "text", text: movedPrompt }]);
+			messages.push(movedMessage);
+			currentCwd = path.join(root, "destination");
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				message: movedMessage,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			expect(completion).toHaveBeenCalledTimes(1);
+
+			// The source extraction clears the slot; the stashed prompt must
+			// extract against the destination cwd captured at retry time.
+			const pendingSecond = Promise.withResolvers<AssistantMessage>();
+			completion.mockImplementation(call => (call === 0 ? pendingFirst.promise : pendingSecond.promise));
+			pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+			await waitFor(() => completion.mock.calls.length === 2, "stashed prompt was not extracted");
+			expect(JSON.stringify(completion.mock.calls[1])).toContain(movedPrompt);
+
+			pendingSecond.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+			await pendingSecond.promise;
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {
