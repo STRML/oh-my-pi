@@ -9,8 +9,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { releaseSharpshooterSession } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import {
 	buildSharpshooterEnvelope,
+	flushSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
@@ -226,6 +228,153 @@ describe("maybeStartSharpshooterExtraction", () => {
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("files a stashed prompt's deltas to the project it was queued in, even if /move lands before the slot clears", async () => {
+		using temp = TempDir.createSync("@sharpshooter-stash-move-");
+		const source = path.join(temp.path(), "source");
+		const destination = path.join(temp.path(), "destination");
+		const agentDir = path.join(temp.path(), "agent");
+		const stashedPrompt = "Keep the cyan status indicator on the source dashboard.";
+		const messages = [
+			message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
+		];
+		// The session's directory is live: a `/move` that lands after the drop but
+		// before the slot clears must not move the stashed prompt's bank with it.
+		let live = source;
+		const deps = extractionDependencies(source, messages, "session-extract", () => live);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const pendingStashed = Promise.withResolvers<AssistantMessage>();
+		const responses = [pendingFirst.promise, pendingStashed.promise];
+		let served = 0;
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => responses[Math.min(served++, 1)]);
+
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+
+		const stashedMessage = message("user", [{ type: "text", text: stashedPrompt }]);
+		messages.push(stashedMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: stashedMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		expect(completion).toHaveBeenCalledTimes(1);
+
+		// The move lands while the slot is still held, so the retry has to file the
+		// prompt in the project it was dropped in rather than the live one.
+		live = destination;
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(() => completion.mock.calls.length === 2, "stashed prompt was not extracted");
+		expect(JSON.stringify(completion.mock.calls[1])).toContain(stashedPrompt);
+
+		pendingStashed.resolve(
+			assistantResponse([
+				{
+					type: "toolCall",
+					id: "call-record",
+					name: "record_deltas",
+					arguments: {
+						deltas: [
+							{
+								kind: "style_decision",
+								statement: "Status indicator stays cyan on the source dashboard.",
+								source: "explicit_user",
+								evidence: "cyan status indicator",
+								friction: { corrective: false, regression: false, subtle: false },
+							},
+						],
+					},
+				},
+			]),
+		);
+		await waitFor(
+			async () => (await listSharpshooterDeltas(agentDir, source)).length === 1,
+			"stashed prompt's delta was not queued to the project it was dropped in",
+		);
+		// A decision the destination project never earned.
+		expect(await listSharpshooterDeltas(agentDir, destination)).toHaveLength(0);
+	});
+
+	it("drops a stashed prompt when the session's Sharpshooter resources are released before the slot clears", async () => {
+		using temp = TempDir.createSync("@sharpshooter-stash-release-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const messages = [
+			message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
+		];
+		const deps = extractionDependencies(cwd, messages);
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		// A retry consumes this second response and writes the delta, so the red
+		// half fails on both the call count and the bank it landed in.
+		const retryResponse = Promise.resolve(
+			assistantResponse([
+				{
+					type: "toolCall",
+					id: "call-record",
+					name: "record_deltas",
+					arguments: {
+						deltas: [
+							{
+								kind: "product_decision",
+								statement: "This project ships on Tuesdays only.",
+								source: "explicit_user",
+								evidence: "ships on Tuesdays",
+								friction: { corrective: false, regression: false, subtle: false },
+							},
+						],
+					},
+				},
+			]),
+		);
+		const responses = [pendingFirst.promise, retryResponse];
+		let served = 0;
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => responses[Math.min(served++, 1)]);
+
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+
+		const droppedPrompt = "Record that this project ships on Tuesdays only.";
+		const droppedMessage = message("user", [{ type: "text", text: droppedPrompt }]);
+		messages.push(droppedMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: droppedMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		expect(completion).toHaveBeenCalledTimes(1);
+
+		// Pairing is released while the source extraction still holds the slot,
+		// which is the state a `/move` into an unpaired project leaves behind.
+		releaseSharpshooterSession(deps.session);
+
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		// Await the real settle signals rather than a guessed delay. The first
+		// flush returns once the held slot's `finally` has run, which is where a
+		// retry starts (synchronously, and it rebinds the slot before returning);
+		// the second covers that retry's own extraction. The bounds only keep a
+		// breakage from hanging the suite.
+		await flushSharpshooterExtraction(deps.session, 500);
+		await flushSharpshooterExtraction(deps.session, 500);
+
+		expect(completion).toHaveBeenCalledTimes(1);
+		expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {

@@ -9,7 +9,11 @@ import type {
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
 import { runSharpshooterConsolidation } from "./consolidate";
-import { maybeStartSharpshooterExtraction, resolveSharpshooterModel } from "./extract";
+import {
+	clearPendingSharpshooterExtraction,
+	maybeStartSharpshooterExtraction,
+	resolveSharpshooterModel,
+} from "./extract";
 import {
 	readSharpshooterState,
 	sharpshooterBankDir,
@@ -42,6 +46,11 @@ interface SharpshooterAgentSession extends AgentSession {
 /** Release session-owned extraction and scheduler subscriptions. */
 export function releaseSharpshooterSession(session: AgentSession): void {
 	const ownedSession = session as SharpshooterAgentSession;
+	// Before the no-resources return: queued prompts belong to the pairing being
+	// released, so a release that has nothing left to unsubscribe still has to
+	// drop them. Otherwise the in-flight extraction's `finally` retries a prompt
+	// for a session whose pairing is gone (e.g. `sharpshooter.enabled` off here).
+	clearPendingSharpshooterExtraction(session);
 	const resources = ownedSession[kSharpshooterSessionResources];
 	if (!resources) return;
 	delete ownedSession[kSharpshooterSessionResources];

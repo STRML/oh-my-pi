@@ -97,6 +97,15 @@ async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<
 }
 
 /**
+ * Drop prompts queued for a retry. The queue belongs to the pairing that is
+ * being released: with no subscription of its own, a retry would extract a
+ * prompt for a project the session no longer pairs with.
+ */
+export function clearPendingSharpshooterExtraction(session: AgentSession): void {
+	delete (session as ExtractionHost)[kExtractionPendingQueue];
+}
+
+/**
  * Await the session's in-flight extraction, bounded by `timeoutMs`. Called from
  * session disposal so short-lived processes (print mode) do not exit before a
  * just-fired extraction persists its deltas.
