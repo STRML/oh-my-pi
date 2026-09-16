@@ -8,6 +8,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { startSharpshooterLeg } from "@oh-my-pi/pi-coding-agent/memory-backend/with-sharpshooter";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { releaseSharpshooterSession } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import {
@@ -15,6 +16,7 @@ import {
 	flushSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
+import { writeSharpshooterState } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -42,12 +44,19 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
+/** The session, settings and model registry a Sharpshooter extraction runs against. */
+interface ExtractionDeps {
+	session: AgentSession;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+}
+
 function extractionDependencies(
 	cwd: string,
 	messages: AgentMessage[],
 	sessionId = "session-extract",
 	getCwd: () => string = () => cwd,
-) {
+): ExtractionDeps {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
 	const settings = {
@@ -57,6 +66,9 @@ function extractionDependencies(
 		},
 		getModelRole() {
 			return undefined;
+		},
+		getCwd() {
+			return cwd;
 		},
 		getStorage() {
 			return undefined;
@@ -72,6 +84,7 @@ function extractionDependencies(
 		messages,
 		sessionId,
 		sessionManager: { getCwd },
+		subscribe: () => () => {},
 	} as unknown as AgentSession;
 	return { modelRegistry, session, settings };
 }
@@ -81,6 +94,25 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, message: str
 		if (await predicate()) return;
 	}
 	if (!(await predicate())) throw new Error(message);
+}
+
+/**
+ * Install a session's paired Sharpshooter leg the way a live toggle does. The
+ * install is what fires the catch-up, so the tests that exercise it have to go
+ * through the paired entry point rather than calling the extractor directly.
+ */
+function installPairedSharpshooter(deps: ExtractionDeps, agentDir: string): void {
+	startSharpshooterLeg(
+		{
+			session: deps.session,
+			settings: deps.settings,
+			modelRegistry: deps.modelRegistry,
+			agentDir,
+			taskDepth: 0,
+			reason: "start",
+		},
+		"mnemopi",
+	);
 }
 
 afterEach(() => {
@@ -524,5 +556,117 @@ describe("maybeStartSharpshooterExtraction", () => {
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("pins the catch-up snapshot so a newer steering prompt cannot be extracted in its place", async () => {
+		using temp = TempDir.createSync("@sharpshooter-catchup-pin-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const catchUpPrompt = "Keep the cyan status indicator exactly as designed on the source dashboard.";
+		const steeringPrompt = "Never replace the cyan status indicator with magenta on the source dashboard.";
+		const messages = [message("user", [{ type: "text", text: catchUpPrompt }])];
+		const deps = extractionDependencies(cwd, messages);
+		// The install starts a scheduler whose immediate tick would otherwise
+		// consolidate the queue this test asserts on.
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const pendingCatchUp = Promise.withResolvers<AssistantMessage>();
+		const responses = [pendingFirst.promise, pendingCatchUp.promise];
+		let served = 0;
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => responses[Math.min(served++, 1)]);
+
+		// The transcript's prompt is already extracting when the install runs, so
+		// the catch-up it fires lands in the queue instead of the model.
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		installPairedSharpshooter(deps, agentDir);
+
+		// A steering prompt lands while the catch-up waits for the slot. The drain
+		// has to extract the prompt the install named, not whatever the transcript
+		// ends with by then.
+		messages.push(message("user", [{ type: "text", text: steeringPrompt }]));
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(() => completion.mock.calls.length === 2, "the queued catch-up was not extracted");
+		const catchUpCall = JSON.stringify(completion.mock.calls[1]);
+		expect(catchUpCall).toContain(catchUpPrompt);
+		expect(catchUpCall).not.toContain(steeringPrompt);
+
+		pendingCatchUp.resolve(
+			assistantResponse([
+				{
+					type: "toolCall",
+					id: "call-record",
+					name: "record_deltas",
+					arguments: {
+						deltas: [
+							{
+								kind: "style_decision",
+								statement: "Status indicator stays cyan on the source dashboard.",
+								source: "explicit_user",
+								evidence: "cyan status indicator",
+								friction: { corrective: false, regression: false, subtle: false },
+							},
+						],
+					},
+				},
+			]),
+		);
+		await waitFor(
+			async () => (await listSharpshooterDeltas(agentDir, cwd)).length === 1,
+			"the catch-up's delta was not queued",
+		);
+
+		// One call for the prompt in flight and one for its pinned catch-up. The
+		// steering prompt was never sent to the model, so it queued no deltas.
+		expect(completion).toHaveBeenCalledTimes(2);
+		const groups = await listSharpshooterDeltas(agentDir, cwd);
+		expect(groups.flatMap(group => group.deltas.map(item => item.delta.statement))).toEqual([
+			"Status indicator stays cyan on the source dashboard.",
+		]);
+	});
+
+	it("skips a catch-up whose snapshot is already the in-flight target", async () => {
+		using temp = TempDir.createSync("@sharpshooter-catchup-dedupe-");
+		const cwd = path.join(temp.path(), "project");
+		const agentDir = path.join(temp.path(), "agent");
+		const promptMessage = message("user", [
+			{ type: "text", text: "Keep the cyan status indicator exactly as designed on the source dashboard." },
+		]);
+		const deps = extractionDependencies(cwd, [promptMessage]);
+		// The install starts a scheduler whose immediate tick would otherwise
+		// consolidate the queue this test asserts on.
+		await writeSharpshooterState(agentDir, cwd, { v: 1, lastConsolidatedAt: Date.now() });
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pendingFirst.promise);
+
+		// message_start fired for this prompt, so the in-flight run owns it.
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: promptMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+
+		// The install's catch-up names the same prompt the slot is extracting, so
+		// it is the same extraction and must not be queued for a second run.
+		installPairedSharpshooter(deps, agentDir);
+
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		// Settle the held slot, then any retry it starts, rather than guessing a
+		// delay: the first flush returns once the `finally` that drains has run.
+		await flushSharpshooterExtraction(deps.session, 500);
+		await flushSharpshooterExtraction(deps.session, 500);
+
+		expect(completion).toHaveBeenCalledTimes(1);
+		expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
 	});
 });

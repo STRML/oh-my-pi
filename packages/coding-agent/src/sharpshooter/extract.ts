@@ -47,6 +47,7 @@ const recordDeltasTool = {
 };
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
+const kExtractionInFlightMessage = Symbol("sharpshooter.extractionInFlightMessage");
 const kExtractionPendingQueue = Symbol("sharpshooter.extractionPendingQueue");
 
 export interface SharpshooterExtractionOptions {
@@ -76,6 +77,12 @@ const MAX_PENDING_EXTRACTIONS = 4;
 
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
+	/**
+	 * The message the in-flight run was started on. A catch-up that names this
+	 * same message is already being extracted; `undefined` when the run was
+	 * started without a snapshot.
+	 */
+	[kExtractionInFlightMessage]?: AgentMessage | undefined;
 	/** Prompts dropped while the slot was busy, retried in order when it clears. */
 	[kExtractionPendingQueue]?: PendingExtraction[];
 }
@@ -232,6 +239,14 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 			// held across the rebind by the source prompt's extraction. Queue it
 			// with the project it belonged to at drop time.
 			const host = session as ExtractionHost;
+			// A snapshot that is already being extracted, or already queued for a
+			// retry, is one extraction: a catch-up can name the very prompt that
+			// holds the slot (a live toggle mid-turn), and queueing it a second
+			// time would extract that prompt twice.
+			if (options.message) {
+				if (host[kExtractionInFlightMessage] === options.message) return;
+				if (host[kExtractionPendingQueue]?.some(pending => pending.options.message === options.message)) return;
+			}
 			const queue = (host[kExtractionPendingQueue] ??= []);
 			if (queue.length >= MAX_PENDING_EXTRACTIONS) {
 				logger.debug("Sharpshooter extraction backlog full; dropping prompt", {
@@ -256,9 +271,11 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;
+				(session as ExtractionHost)[kExtractionInFlightMessage] = undefined;
 				void drainSharpshooterExtractionQueue(session);
 			});
 		(session as ExtractionHost)[kExtractionInFlight] = run;
+		(session as ExtractionHost)[kExtractionInFlightMessage] = options.message;
 	} catch (error) {
 		logger.debug("Sharpshooter extraction could not start", { error: String(error) });
 	}

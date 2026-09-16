@@ -123,8 +123,12 @@ function installSharpshooterSession(options: MemoryBackendStartOptions): void {
 				if (event.type !== "message_start" || event.message.role !== "user") return;
 				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
 			});
-			if (catchUpOnLatestPrompt && session.messages.at(-1)?.role === "user") {
-				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir });
+			const latest = session.messages.at(-1);
+			if (catchUpOnLatestPrompt && latest?.role === "user") {
+				// Pin the message the guard just accepted. The catch-up can be
+				// queued behind an in-flight extraction, and a drain that re-read
+				// the transcript then would extract whichever prompt landed since.
+				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: latest });
 			}
 			(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
 				unsubscribe,
