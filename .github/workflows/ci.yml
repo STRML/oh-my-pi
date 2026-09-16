@@ -265,10 +265,14 @@ jobs:
          # sentinels are excluded: they move every release and loadNative()
          # resolves the addon's own sentinel.
          #
-         # Only PRs that touch the native surface: the diff is main's state,
-         # not this PR's, so during a main-ahead-of-release window an
+         # Only PRs that change the export surface itself: the diff is main's
+         # state, not this PR's, so during a main-ahead-of-release window an
          # unconditional gate would red every unrelated PR, including the
-         # release-prep PRs that could close the window.
+         # release-prep PRs that could close the window. index.js is the
+         # surface the checker parses; d.ts is its committed counterpart.
+         # Files captured via command substitution, not a `grep -q` pipe:
+         # under pipefail a SIGPIPE'd diff would look like "no natives
+         # changed" and skip the gate.
          - name: Fail fast on exports missing from the release addon
            if: github.event_name == 'pull_request'
            shell: bash
@@ -276,8 +280,9 @@ jobs:
               set -euo pipefail
               base="${{ github.event.pull_request.base.sha }}"
               git fetch -q --depth=1 origin "$base"
-              if ! git diff --name-only FETCH_HEAD HEAD | grep -q '^packages/natives/'; then
-                 echo "native surface untouched by this PR; export check only gates native-touching PRs"
+              changed="$(git diff --name-only FETCH_HEAD HEAD -- packages/natives/native/index.js packages/natives/native/index.d.ts)"
+              if [ -z "$changed" ]; then
+                 echo "native export surface untouched by this PR; export check only gates surface changes"
                  exit 0
               fi
               node scripts/check-native-exports.mjs \
