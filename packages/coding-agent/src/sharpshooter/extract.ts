@@ -47,9 +47,21 @@ const recordDeltasTool = {
 };
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
+const kExtractionPendingPrompt = Symbol("sharpshooter.extractionPendingPrompt");
+
+export interface SharpshooterExtractionOptions {
+	session: AgentSession;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	agentDir: string;
+	/** The just-committed user message; falls back to the transcript's latest user message. */
+	message?: AgentMessage;
+}
 
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
+	/** A prompt dropped while the slot was busy; retried when it clears. */
+	[kExtractionPendingPrompt]?: SharpshooterExtractionOptions;
 }
 
 /**
@@ -169,17 +181,19 @@ export async function resolveSharpshooterModel(
 }
 
 /** Start best-effort extraction for one committed user prompt without blocking the caller. */
-export function maybeStartSharpshooterExtraction(options: {
-	session: AgentSession;
-	settings: Settings;
-	modelRegistry: ModelRegistry;
-	agentDir: string;
-	/** The just-committed user message; falls back to the transcript's latest user message. */
-	message?: AgentMessage;
-}): void {
+export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions): void {
 	try {
 		const { session } = options;
-		if (session.isDisposed || (session as ExtractionHost)[kExtractionInFlight]) return;
+		if (session.isDisposed) return;
+		if ((session as ExtractionHost)[kExtractionInFlight]) {
+			// One model call at a time. A prompt dropped here is otherwise lost
+			// outright: notably the first prompt after a `/move`, whose slot is
+			// held across the rebind by the source prompt's extraction. Keep it
+			// and retry when the slot clears; the cwd re-captured then matches
+			// the project the dropped prompt belongs to.
+			(session as ExtractionHost)[kExtractionPendingPrompt] = options;
+			return;
+		}
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
@@ -194,6 +208,11 @@ export function maybeStartSharpshooterExtraction(options: {
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;
+				const pending = (session as ExtractionHost)[kExtractionPendingPrompt];
+				if (pending && !session.isDisposed) {
+					(session as ExtractionHost)[kExtractionPendingPrompt] = undefined;
+					maybeStartSharpshooterExtraction(pending);
+				}
 			});
 		(session as ExtractionHost)[kExtractionInFlight] = run;
 	} catch (error) {
