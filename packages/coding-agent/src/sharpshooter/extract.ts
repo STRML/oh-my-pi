@@ -61,7 +61,7 @@ export interface SharpshooterExtractionOptions {
 }
 
 /** A dropped prompt plus the project it belonged to when it was dropped. */
-interface PendingExtraction {
+export interface PendingExtraction {
 	options: SharpshooterExtractionOptions;
 	/**
 	 * Captured at drop time. A `/move` can land between the drop and the
@@ -121,6 +121,21 @@ async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<
  */
 export function clearPendingSharpshooterExtraction(session: AgentSession): void {
 	delete (session as ExtractionHost)[kExtractionPendingQueue];
+}
+
+/**
+ * Take the prompts queued for a retry, leaving the session with no queue. A leg
+ * restart that keeps pairing replaces the subscription that owned the queue, so
+ * the prompts have to travel with it rather than be dropped: the new leg
+ * suppresses its catch-up for a rebind, and nothing else re-enrolls a prompt
+ * that only ever reached the queue. The caller hands the taken prompts to the
+ * leg it installs in place of the one it released.
+ */
+export function takePendingSharpshooterQueue(session: AgentSession): PendingExtraction[] {
+	const host = session as ExtractionHost;
+	const queue = host[kExtractionPendingQueue] ?? [];
+	delete host[kExtractionPendingQueue];
+	return queue;
 }
 
 /**
