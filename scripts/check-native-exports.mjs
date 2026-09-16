@@ -13,12 +13,15 @@ import * as path from "node:path";
 
 const INDEX = "packages/natives/native/index.js";
 
-// The generated block re-exports every native symbol verbatim:
-// `export const X = nativeBindings.X;`. Those are exactly the names a stale
-// addon turns into `X is not a function`.
+// Every `nativeBindings.<key>` reference in index.js is a symbol the surface
+// requires: plain re-exports (`export const X = nativeBindings.X;`) and
+// adapted ones alike (`export const DesktopSession = adaptDesktopSession(
+// nativeBindings.DesktopSession)`). A regex pinned to the plain re-export
+// shape silently skips adapted bindings, and an addon missing that class
+// would pass while constructing the export crashes. Match all references.
 const source = fs.readFileSync(INDEX, "utf8");
 const expected = new Set();
-for (const match of source.matchAll(/export const ([A-Za-z_$][\w$]*) = nativeBindings\./g)) {
+for (const match of source.matchAll(/nativeBindings\??\.([A-Za-z_$][\w$]*)/g)) {
 	// `__piNativesV*` is the loader's version sentinel. It moves every
 	// release and the committed index.js lags it by design; loadNative()
 	// resolves the addon's own sentinel, so a sentinel mismatch is not a
