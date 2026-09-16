@@ -13,6 +13,15 @@ import * as path from "node:path";
 
 const INDEX = "packages/natives/native/index.js";
 
+// A gate that passes vacuously is worse than no gate: zero addon arguments
+// would otherwise loop zero times, find zero missing exports, and exit 0
+// while checking nothing.
+const addons = process.argv.slice(2);
+if (addons.length === 0) {
+	console.error(`usage: node scripts/check-native-exports.mjs <addon.node> [<addon.node> ...]`);
+	process.exit(1);
+}
+
 // Every `nativeBindings.<key>` reference in index.js is a symbol the surface
 // requires: plain re-exports (`export const X = nativeBindings.X;`) and
 // adapted ones alike (`export const DesktopSession = adaptDesktopSession(
@@ -36,7 +45,7 @@ if (expected.size === 0) {
 const require = createRequire(import.meta.url);
 const missing = [];
 const extras = [];
-for (const addonArg of process.argv.slice(2)) {
+for (const addonArg of addons) {
 	const addonPath = path.resolve(addonArg);
 	const addon = require(addonPath);
 	const actual = new Set(Object.keys(addon));
