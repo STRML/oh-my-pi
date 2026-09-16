@@ -207,6 +207,45 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(startedAt.length).toBeGreaterThan(1);
 	});
 
+	it("does not catch up when the scope hook schedules the rebuild before the move asks for it", async () => {
+		// `reloadForCwd` fires the Hindsight scope hook while the move is still
+		// inside it, so the rebuild task is queued as a microtask before the move
+		// reaches `rebindMemoryBackendForCwd`, and it runs on that function's first
+		// await. Anything the move tells the scheduler afterwards arrives too late
+		// to change the apply that already ran, which is why the rebuild asks for
+		// "rebind" itself rather than taking a reason from its caller. The
+		// overrides below stand in for the destination project's own config: what
+		// matters is that the hook fires before the rebind call, exactly as a
+		// reload does.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		// `set`, not `override`: only `set` and the reload paths run SETTING_HOOKS,
+		// and `hindsight.bankId` is one of the three paths whose hook fires the
+		// scope signal.
+		settings.set("hindsight.bankId", "source-bank");
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+
+		await settings.reloadForCwd(destination);
+		settings.override("memory.backend", "local");
+		// Fires `onHindsightScopeChanged`, which schedules the rebuild. Nothing
+		// awaits between here and the rebind call, so the queued task is still
+		// unrun when the move starts.
+		settings.set("hindsight.bankId", "destination-bank");
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt.slice(1)).not.toContain(`start ${destination}`);
+		expect(startedAt.slice(1).every(entry => entry === `rebind ${destination}`)).toBe(true);
+	});
+
 	it("does not catch up on the source prompt when a store backend moves", async () => {
 		// Nothing about the catch-up is Hindsight's. A session on `local`, `mnemopi`
 		// or `off` takes the full-apply branch of the same move and reaches the same

@@ -10,12 +10,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
-import type {
-	MemoryBackend,
-	MemoryBackendStartOptions,
-	MemoryBackendStartReason,
-	MemoryPromptPreparation,
-} from "../memory-backend/types";
+import type { MemoryBackend, MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
@@ -162,14 +157,6 @@ export const hindsightBackend: MemoryBackend = {
 interface PrimaryRebuildTask {
 	/** A rebuild was requested and the loop has not consumed it yet. */
 	pending: boolean;
-	/**
-	 * `"rebind"` once any requester this task serves was a cwd move, and it stays
-	 * that way until the task retires. The rebuild can re-apply the whole backend,
-	 * and an apply that catches up on the transcript would file the source
-	 * project's last prompt against the destination. A hook that fires while a move
-	 * is still awaiting this task is part of that move, so sticky is the safe read.
-	 */
-	reason: MemoryBackendStartReason;
 	/** Last failed transition; only a completed transition, never a no-op, clears it. */
 	error?: unknown;
 	/** Settles once the loop has drained every request queued so far. */
@@ -187,25 +174,21 @@ const primaryRebuildTasks = new WeakMap<AgentSession, PrimaryRebuildTask>();
  * Returns the task that owns the request so a caller that must not continue
  * until the rebuild landed can await it (see `rebindMemoryBackendForCwd`).
  */
-function schedulePrimaryStateRebuild(
-	session: AgentSession,
-	reason: MemoryBackendStartReason = "start",
-): PrimaryRebuildTask {
+function schedulePrimaryStateRebuild(session: AgentSession): PrimaryRebuildTask {
 	const task = primaryRebuildTasks.get(session);
 	if (task) {
 		task.pending = true;
-		if (reason === "rebind") task.reason = "rebind";
 		return task;
 	}
 
-	const nextTask: PrimaryRebuildTask = { pending: true, reason, completion: Promise.resolve() };
+	const nextTask: PrimaryRebuildTask = { pending: true, completion: Promise.resolve() };
 	primaryRebuildTasks.set(session, nextTask);
 	nextTask.completion = Promise.resolve().then(async () => {
 		try {
 			while (nextTask.pending) {
 				nextTask.pending = false;
 				try {
-					if (await rebuildPrimaryStateOnScopeChange(session, nextTask.reason)) nextTask.error = undefined;
+					if (await rebuildPrimaryStateOnScopeChange(session)) nextTask.error = undefined;
 				} catch (err) {
 					nextTask.error = err;
 					logger.warn("Hindsight: scope rebuild failed", { error: String(err) });
@@ -248,7 +231,7 @@ export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<
 		await session.applyMemoryBackend({ retainMnemopi: false, reason: "rebind" });
 	}
 
-	let task: PrimaryRebuildTask | undefined = schedulePrimaryStateRebuild(session, "rebind");
+	let task: PrimaryRebuildTask | undefined = schedulePrimaryStateRebuild(session);
 	while (task) {
 		await task.completion;
 		if (task.error !== undefined) throw task.error;
@@ -355,16 +338,21 @@ async function installPrimaryState(
  * re-applied the selection, or a fresh primary state was installed — so the
  * scheduler can tell a completed transition from a no-op.
  *
- * `reason` is the scheduler's, and it matters because the re-apply below is a
- * full `applyMemoryBackend`. Under a cwd move that apply must not catch up on the
- * transcript: a destination project that switches `memory.backend` away from
- * Hindsight reaches it, and the newest transcript entry is still the prompt the
- * session typed in the project it left.
+ * The re-apply below is a full `applyMemoryBackend`, and it always asks for
+ * `"rebind"`. Catch-up exists for one thing, the startup race where the first
+ * turn is submitted while `resolveMemoryBackend` is still importing the backend,
+ * and a rebuild is never that: by the time one runs, the outgoing backend's
+ * subscription has already seen any live prompt. What a rebuild can be is the
+ * tail of a `/move`, where the trailing transcript entry is the prompt the
+ * session typed in the project it left, and catching up files it as a decision
+ * about the destination.
+ *
+ * Asking unconditionally is also what makes that safe. A reload fires the scope
+ * hook while the move is still in `reloadForCwd`, so the task is queued before
+ * the move calls `rebindMemoryBackendForCwd`, and a reason handed down from the
+ * caller would arrive after this had already run with the wrong one.
  */
-async function rebuildPrimaryStateOnScopeChange(
-	session: AgentSession,
-	reason: MemoryBackendStartReason = "start",
-): Promise<boolean> {
+async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<boolean> {
 	const current = session.getHindsightSessionState();
 	if (current?.aliasOf) return false;
 
@@ -377,7 +365,7 @@ async function rebuildPrimaryStateOnScopeChange(
 	// install or retire a backend's runtime state, memory tools, and prompt,
 	// and it flushes the outgoing state's queued retains on the way out.
 	if (selected !== (current !== undefined)) {
-		await session.applyMemoryBackend({ reason });
+		await session.applyMemoryBackend({ reason: "rebind" });
 		return true;
 	}
 	if (!current) return false;
