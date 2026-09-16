@@ -23,13 +23,14 @@ const NOTICE_FIXTURE = path.join(
  */
 const EMITTED_NOTICES = (await Bun.file(NOTICE_FIXTURE).text()).split("\n").filter(line => line.length > 0);
 
-describe("isReadTruncationNotice", () => {
-	it("has shapes to check", () => {
-		// `it.each([])` registers nothing and reports success, so an emptied or
-		// moved fixture would silently retire the corpus below.
-		expect(EMITTED_NOTICES.length).toBeGreaterThan(0);
-	});
+if (EMITTED_NOTICES.length === 0) {
+	// `it.each([])` registers nothing and reports success, so an emptied or
+	// moved fixture would silently retire the corpus below. A load-time throw
+	// fails the whole file instead of dressing the guard up as a test.
+	throw new Error(`empty notice fixture: ${NOTICE_FIXTURE}`);
+}
 
+describe("isReadTruncationNotice", () => {
 	it.each(EMITTED_NOTICES)("recognizes the notice %p that read emits", notice => {
 		expect(isReadTruncationNotice(notice)).toBe(true);
 	});
