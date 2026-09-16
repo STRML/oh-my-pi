@@ -13,6 +13,7 @@ import {
 	clearPendingSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 	resolveSharpshooterModel,
+	takePendingSharpshooterQueue,
 } from "./extract";
 import {
 	readSharpshooterState,
@@ -107,6 +108,15 @@ function installSharpshooterSession(options: MemoryBackendStartOptions): void {
 	const catchUpOnLatestPrompt = options.reason !== "rebind";
 	const { session, settings, modelRegistry, agentDir } = options;
 	try {
+		// Pairing-disabled release keeps the destructive clear: with no pairing
+		// left, a retry would extract a prompt for a project this session no
+		// longer pairs with. A leg restart that keeps pairing (a `/move` into a
+		// paired project, or a backend switch) is the other case, and there the
+		// clear loses prompts outright: the new leg cancels the catch-up for a
+		// rebind, so nothing re-enrolls a prompt that only ever reached the
+		// queue. Take that queue across the release and hand it to the new leg
+		// below.
+		const carried = takePendingSharpshooterQueue(session);
 		releaseSharpshooterSession(session);
 		const disposeScheduler = startSharpshooterScheduler({
 			agentDir,
@@ -134,6 +144,14 @@ function installSharpshooterSession(options: MemoryBackendStartOptions): void {
 				unsubscribe,
 				disposeScheduler,
 			};
+			// After the resources: a carried prompt that re-queues (the slot its
+			// predecessor held is still busy) must land on a leg that can drain
+			// it. Each item re-enters the normal guard with the project it was
+			// dropped in, so enrollment at slot acquisition leaves nothing to
+			// double-extract.
+			for (const pending of carried) {
+				maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+			}
 		} catch (error) {
 			disposeScheduler();
 			throw error;
