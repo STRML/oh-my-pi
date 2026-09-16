@@ -48,6 +48,7 @@ const recordDeltasTool = {
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
 const kExtractionInFlightMessage = Symbol("sharpshooter.extractionInFlightMessage");
+const kExtractionHandledMessages = Symbol("sharpshooter.extractionHandledMessages");
 const kExtractionPendingQueue = Symbol("sharpshooter.extractionPendingQueue");
 
 export interface SharpshooterExtractionOptions {
@@ -83,6 +84,16 @@ interface ExtractionHost extends AgentSession {
 	 * started without a snapshot.
 	 */
 	[kExtractionInFlightMessage]?: AgentMessage | undefined;
+	/**
+	 * Every user prompt this session has already enrolled for extraction, keyed
+	 * by message identity. Enrollment is idempotent for the whole session rather
+	 * than only for the concurrently-in-flight window: a live restart (a primary
+	 * backend switch, or `sharpshooter.enabled` off→on) re-fires the catch-up for
+	 * a transcript whose newest prompt may already have settled. The set holds at
+	 * most one entry per user prompt of the session, and prompts are never
+	 * dropped from their transcript, so it stays bounded by the session.
+	 */
+	[kExtractionHandledMessages]?: Set<AgentMessage>;
 	/** Prompts dropped while the slot was busy, retried in order when it clears. */
 	[kExtractionPendingQueue]?: PendingExtraction[];
 }
@@ -233,12 +244,19 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 	try {
 		const { session } = options;
 		if (session.isDisposed) return;
-		if ((session as ExtractionHost)[kExtractionInFlight]) {
+		const host = session as ExtractionHost;
+		// Keyed by message identity, which both firesites can supply: `message_start`
+		// pins the committed message, and the install's catch-up pins
+		// `session.messages.at(-1)` out of that same transcript array. Checked ahead
+		// of the in-flight branch so a settled prompt is skipped even though the slot
+		// it once held is free again.
+		const handled = (host[kExtractionHandledMessages] ??= new Set());
+		if (options.message && handled.has(options.message)) return;
+		if (host[kExtractionInFlight]) {
 			// One model call at a time. A prompt dropped here is otherwise lost
 			// outright: notably the first prompt after a `/move`, whose slot is
 			// held across the rebind by the source prompt's extraction. Queue it
 			// with the project it belonged to at drop time.
-			const host = session as ExtractionHost;
 			// A snapshot that is already being extracted, or already queued for a
 			// retry, is one extraction: a catch-up can name the very prompt that
 			// holds the slot (a live toggle mid-turn), and queueing it a second
@@ -270,12 +288,15 @@ export function maybeStartSharpshooterExtraction(options: SharpshooterExtraction
 				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
 			})
 			.finally(() => {
-				(session as ExtractionHost)[kExtractionInFlight] = undefined;
-				(session as ExtractionHost)[kExtractionInFlightMessage] = undefined;
+				host[kExtractionInFlight] = undefined;
+				host[kExtractionInFlightMessage] = undefined;
 				void drainSharpshooterExtractionQueue(session);
 			});
-		(session as ExtractionHost)[kExtractionInFlight] = run;
-		(session as ExtractionHost)[kExtractionInFlightMessage] = options.message;
+		host[kExtractionInFlight] = run;
+		host[kExtractionInFlightMessage] = options.message;
+		// Enrolled at the slot, not at the fire: a prompt that is only queued has
+		// not been extracted yet, and its retry re-enters this same guard.
+		if (options.message) handled.add(options.message);
 	} catch (error) {
 		logger.debug("Sharpshooter extraction could not start", { error: String(error) });
 	}
