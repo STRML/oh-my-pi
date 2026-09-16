@@ -3,7 +3,8 @@
  * matcher and the gh-cache invalidator.
  *
  * Splits a bash command into independent command segments, each a list of word
- * tokens. Handles single/double-quoted strings, backslash escapes, and the
+ * tokens. Handles single/double-quoted strings, ANSI-C `$'...'` strings, where
+ * an escaped quote does not close the string, backslash escapes, and the
  * standard operators (`;`, `&&`, `||`, `|`, `&`, `(`, `)`, newlines) as segment
  * boundaries so callers treat the pieces as independent command sequences.
  *
@@ -17,6 +18,7 @@ export function tokenizeShellSegments(command: string): string[][] {
 	let buffer = "";
 	let inSingle = false;
 	let inDouble = false;
+	let ansi = false;
 	const pushBuffer = () => {
 		if (buffer.length > 0) {
 			current.push(buffer);
@@ -31,8 +33,17 @@ export function tokenizeShellSegments(command: string): string[][] {
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (inSingle) {
+			// Inside an ANSI-C `$'...'` string a backslash escapes the next
+			// character, so `\'` keeps the string open; in a plain `'...'`
+			// string a backslash is literal text and nothing is escaped.
+			if (ansi && ch === "\\" && i + 1 < command.length) {
+				buffer += ch + command[i + 1];
+				i++;
+				continue;
+			}
 			if (ch === "'") {
 				inSingle = false;
+				ansi = false;
 				continue;
 			}
 			buffer += ch;
@@ -56,6 +67,8 @@ export function tokenizeShellSegments(command: string): string[][] {
 		}
 		if (ch === "'") {
 			inSingle = true;
+			// `$'...'` is an ANSI-C string: escapes are active inside it.
+			ansi = command[i - 1] === "$";
 			continue;
 		}
 		if (ch === '"') {
