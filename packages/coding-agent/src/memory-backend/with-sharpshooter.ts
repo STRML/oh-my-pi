@@ -1,5 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { rebindSharpshooterSession, sharpshooterBackend } from "../sharpshooter/backend";
+import { sharpshooterBackend } from "../sharpshooter/backend";
 import type {
 	MemoryBackend,
 	MemoryBackendId,
@@ -19,23 +19,21 @@ import type {
  * release them, and the scheduler ticks immediately, so it could consolidate and
  * spend a model call after shutdown.
  *
- * Both entry points release the session's previous resources before acquiring new
- * ones, so either is safe to call on a session that already has them. They differ
- * in one thing: `"start"` catches up on a transcript that already ends in a user
- * prompt, and `"rebind"` does not, because after `/move` that prompt belongs to the
- * project the session left.
+ * Starting releases the session's previous resources before acquiring new ones, so
+ * this is safe to call on a session that already has them. `options.reason` carries
+ * the one difference: `"start"` catches up on a transcript that already ends in a
+ * user prompt, and `"rebind"` does not, because after `/move` that prompt belongs to
+ * the project the session left.
  */
-export function startSharpshooterLeg(
-	options: MemoryBackendStartOptions,
-	primaryId: MemoryBackendId,
-	reason: "start" | "rebind" = "start",
-): void {
+export function startSharpshooterLeg(options: MemoryBackendStartOptions, primaryId: MemoryBackendId): void {
 	if (options.session.isDisposed) return;
 	try {
-		if (reason === "rebind") rebindSharpshooterSession(options);
-		else sharpshooterBackend.start(options);
+		sharpshooterBackend.start(options);
 	} catch (error) {
-		logger.warn(`Sharpshooter ${reason} failed while paired`, { backend: primaryId, error: String(error) });
+		logger.warn(`Sharpshooter ${options.reason ?? "start"} failed while paired`, {
+			backend: primaryId,
+			error: String(error),
+		});
 	}
 }
 

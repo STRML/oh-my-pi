@@ -139,18 +139,17 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	/**
-	 * Record the cwd Sharpshooter is installed against, through either entry point:
-	 * `start` on a real startup, `rebindSharpshooterSession` on a cwd move. Tracking
-	 * only one would make a regression in the other look like silence. `afterEach`
-	 * restores the mocks.
+	 * Record every Sharpshooter install as `<reason> <cwd>`.
+	 *
+	 * The reason is half the assertion, not decoration: a start against the right
+	 * project still files the source project's trailing prompt into the destination
+	 * bank when it catches up, and a cwd-keyed check alone reads that as success.
+	 * `afterEach` restores the mocks.
 	 */
 	function trackSharpshooterStarts(): string[] {
 		const startedAt: string[] = [];
 		spyOn(sharpshooterBackend, "start").mockImplementation(options => {
-			startedAt.push(options.settings.getCwd());
-		});
-		spyOn(sharpshooterModule, "rebindSharpshooterSession").mockImplementation(options => {
-			startedAt.push(options.settings.getCwd());
+			startedAt.push(`${options.reason ?? "start"} ${options.settings.getCwd()}`);
 		});
 		return startedAt;
 	}
@@ -172,12 +171,61 @@ describe("AgentSession memory backend lifecycle", () => {
 		const current = createSession(async () => []);
 		await current.applyMemoryBackend();
 		expect(current.getHindsightSessionState()).toBeDefined();
-		expect(startedAt).toEqual([source]);
+		expect(startedAt).toEqual([`start ${source}`]);
 
 		await settings.reloadForCwd(destination);
 		await rebindMemoryBackendForCwd(current);
 
-		expect(startedAt).toEqual([source, destination]);
+		expect(startedAt).toEqual([`start ${source}`, `rebind ${destination}`]);
+	});
+
+	it("does not catch up on the source prompt when the destination changes the backend", async () => {
+		// The paired rebind above is undone by what follows it: the selection moved,
+		// so the scope rebuild re-applies the whole backend, and a full apply catches
+		// up on a transcript that still ends in the source project's prompt. An
+		// interrupted or failed turn is enough to leave it in that shape, and the
+		// catch-up would file a decision the destination never earned.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+
+		await settings.reloadForCwd(destination);
+		settings.override("memory.backend", "local");
+		await rebindMemoryBackendForCwd(current);
+
+		expect(current.getHindsightSessionState()).toBeUndefined();
+		expect(startedAt.slice(1).every(entry => entry === `rebind ${destination}`)).toBe(true);
+		expect(startedAt.length).toBeGreaterThan(1);
+	});
+
+	it("does not catch up on the source prompt when a store backend moves", async () => {
+		// Nothing about the catch-up is Hindsight's. A session on `local`, `mnemopi`
+		// or `off` takes the full-apply branch of the same move and reaches the same
+		// start, so the reason has to travel with that apply too.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		settings.override("memory.backend", "local");
+		settings.override("sharpshooter.enabled", true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toEqual([`start ${source}`]);
+
+		await settings.reloadForCwd(destination);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([`start ${source}`, `rebind ${destination}`]);
 	});
 
 	it("releases Sharpshooter when the destination project turns pairing off", async () => {

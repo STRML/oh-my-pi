@@ -6,7 +6,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
-import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import type { MemoryBackendStartOptions, MemoryBackendStartReason } from "../memory-backend/types";
 import { startSharpshooterLeg } from "../memory-backend/with-sharpshooter";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
@@ -182,9 +182,13 @@ export class SessionMemory {
 	 * Concurrent settings changes run in order and settle before the next turn.
 	 * Cwd rebinding can disable Mnemopi auto-retention without skipping its drain.
 	 */
-	async applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
+	async applyMemoryBackend(
+		options: { retainMnemopi?: boolean; reason?: MemoryBackendStartReason } = {},
+	): Promise<void> {
 		if (this.#host.isDisposed()) return;
-		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend(options.retainMnemopi));
+		const transition = this.#memoryBackendTransition.then(() =>
+			this.#applyMemoryBackend(options.retainMnemopi, options.reason),
+		);
 		this.#memoryBackendTransition = transition.then(
 			() => undefined,
 			() => undefined,
@@ -234,9 +238,9 @@ export class SessionMemory {
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
+					reason: "rebind",
 				},
 				backend ?? "off",
-				"rebind",
 			);
 		} else {
 			releaseSharpshooterSession(session);
@@ -245,7 +249,7 @@ export class SessionMemory {
 		await this.#host.refreshBaseSystemPrompt();
 	}
 
-	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {
+	async #applyMemoryBackend(retainMnemopi = true, reason: MemoryBackendStartReason = "start"): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		try {
 			await this.#disposeMemoryBackendState(true, retainMnemopi);
@@ -257,6 +261,7 @@ export class SessionMemory {
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
+					reason,
 				});
 			}
 			if (this.#host.isDisposed()) return;

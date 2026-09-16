@@ -80,22 +80,22 @@ function formatTimestamp(timestamp: number | undefined): string {
 /**
  * Install this session's Sharpshooter resources, replacing any it already has.
  *
- * `catchUpOnLatestPrompt` separates the two reasons to call this. At startup the
- * backend can race the first turn's events (print mode submits while
- * `resolveMemoryBackend` is still importing us), so a transcript already ending
- * in a user prompt has to be caught up or that prompt is never extracted.
+ * `options.reason` decides the catch-up. At startup the backend can race the
+ * first turn's events (print mode submits while `resolveMemoryBackend` is still
+ * importing us), so a transcript already ending in a user prompt has to be
+ * caught up or that prompt is never extracted.
  *
  * A cwd rebind is the other reason, and there the catch-up is wrong: after
  * `/move` the newest transcript entry is still the source project's prompt, so
  * catching up would extract it against the destination and file a decision the
  * destination never earned. An interrupted or failed turn is enough to leave the
- * transcript in exactly that shape.
+ * transcript in exactly that shape. Every path a move can take to `start` -- the
+ * paired leg, a full re-apply, the nested apply a backend-changing move runs
+ * through `rebuildPrimaryStateOnScopeChange` -- therefore carries `"rebind"`.
  */
-function installSharpshooterSession(
-	options: MemoryBackendStartOptions,
-	{ catchUpOnLatestPrompt }: { catchUpOnLatestPrompt: boolean },
-): void {
+function installSharpshooterSession(options: MemoryBackendStartOptions): void {
 	if (options.taskDepth > 0) return;
+	const catchUpOnLatestPrompt = options.reason !== "rebind";
 	const { session, settings, modelRegistry, agentDir } = options;
 	try {
 		releaseSharpshooterSession(session);
@@ -130,19 +130,11 @@ function installSharpshooterSession(
 	}
 }
 
-/**
- * Re-point this session's Sharpshooter resources at the project it moved to,
- * without re-extracting the prompt it left behind. See `installSharpshooterSession`.
- */
-export function rebindSharpshooterSession(options: MemoryBackendStartOptions): void {
-	installSharpshooterSession(options, { catchUpOnLatestPrompt: false });
-}
-
 export const sharpshooterBackend: MemoryBackend = {
 	id: "sharpshooter",
 
 	start(options): void {
-		installSharpshooterSession(options, { catchUpOnLatestPrompt: true });
+		installSharpshooterSession(options);
 	},
 
 	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {

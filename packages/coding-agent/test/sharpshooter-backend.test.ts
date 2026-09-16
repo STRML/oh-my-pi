@@ -6,11 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	rebindSharpshooterSession,
-	releaseSharpshooterSession,
-	sharpshooterBackend,
-} from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
+import { releaseSharpshooterSession, sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import * as extractModule from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { sharpshooterBankDir } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -62,7 +58,7 @@ describe("sharpshooter memory backend", () => {
 		sharpshooterBackend.start(options);
 		expect(extraction).toHaveBeenCalledTimes(1);
 
-		rebindSharpshooterSession(options);
+		sharpshooterBackend.start({ ...options, reason: "rebind" });
 		expect(extraction).toHaveBeenCalledTimes(1);
 
 		releaseSharpshooterSession(session);

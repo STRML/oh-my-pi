@@ -10,7 +10,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
-import type { MemoryBackend, MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
+import type {
+	MemoryBackend,
+	MemoryBackendStartOptions,
+	MemoryBackendStartReason,
+	MemoryPromptPreparation,
+} from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
@@ -157,6 +162,14 @@ export const hindsightBackend: MemoryBackend = {
 interface PrimaryRebuildTask {
 	/** A rebuild was requested and the loop has not consumed it yet. */
 	pending: boolean;
+	/**
+	 * `"rebind"` once any requester this task serves was a cwd move, and it stays
+	 * that way until the task retires. The rebuild can re-apply the whole backend,
+	 * and an apply that catches up on the transcript would file the source
+	 * project's last prompt against the destination. A hook that fires while a move
+	 * is still awaiting this task is part of that move, so sticky is the safe read.
+	 */
+	reason: MemoryBackendStartReason;
 	/** Last failed transition; only a completed transition, never a no-op, clears it. */
 	error?: unknown;
 	/** Settles once the loop has drained every request queued so far. */
@@ -174,21 +187,25 @@ const primaryRebuildTasks = new WeakMap<AgentSession, PrimaryRebuildTask>();
  * Returns the task that owns the request so a caller that must not continue
  * until the rebuild landed can await it (see `rebindMemoryBackendForCwd`).
  */
-function schedulePrimaryStateRebuild(session: AgentSession): PrimaryRebuildTask {
+function schedulePrimaryStateRebuild(
+	session: AgentSession,
+	reason: MemoryBackendStartReason = "start",
+): PrimaryRebuildTask {
 	const task = primaryRebuildTasks.get(session);
 	if (task) {
 		task.pending = true;
+		if (reason === "rebind") task.reason = "rebind";
 		return task;
 	}
 
-	const nextTask: PrimaryRebuildTask = { pending: true, completion: Promise.resolve() };
+	const nextTask: PrimaryRebuildTask = { pending: true, reason, completion: Promise.resolve() };
 	primaryRebuildTasks.set(session, nextTask);
 	nextTask.completion = Promise.resolve().then(async () => {
 		try {
 			while (nextTask.pending) {
 				nextTask.pending = false;
 				try {
-					if (await rebuildPrimaryStateOnScopeChange(session)) nextTask.error = undefined;
+					if (await rebuildPrimaryStateOnScopeChange(session, nextTask.reason)) nextTask.error = undefined;
 				} catch (err) {
 					nextTask.error = err;
 					logger.warn("Hindsight: scope rebuild failed", { error: String(err) });
@@ -228,10 +245,10 @@ export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<
 		// explicit cwd move. The manager already has the new cwd, and this may also be
 		// rollback from a destination that never committed. Drain existing writes
 		// without capturing the transcript under either transient scope.
-		await session.applyMemoryBackend({ retainMnemopi: false });
+		await session.applyMemoryBackend({ retainMnemopi: false, reason: "rebind" });
 	}
 
-	let task: PrimaryRebuildTask | undefined = schedulePrimaryStateRebuild(session);
+	let task: PrimaryRebuildTask | undefined = schedulePrimaryStateRebuild(session, "rebind");
 	while (task) {
 		await task.completion;
 		if (task.error !== undefined) throw task.error;
@@ -337,8 +354,17 @@ async function installPrimaryState(
  * Resolves true only when the runtime actually moved — the backend owner
  * re-applied the selection, or a fresh primary state was installed — so the
  * scheduler can tell a completed transition from a no-op.
+ *
+ * `reason` is the scheduler's, and it matters because the re-apply below is a
+ * full `applyMemoryBackend`. Under a cwd move that apply must not catch up on the
+ * transcript: a destination project that switches `memory.backend` away from
+ * Hindsight reaches it, and the newest transcript entry is still the prompt the
+ * session typed in the project it left.
  */
-async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<boolean> {
+async function rebuildPrimaryStateOnScopeChange(
+	session: AgentSession,
+	reason: MemoryBackendStartReason = "start",
+): Promise<boolean> {
 	const current = session.getHindsightSessionState();
 	if (current?.aliasOf) return false;
 
@@ -351,7 +377,7 @@ async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<
 	// install or retire a backend's runtime state, memory tools, and prompt,
 	// and it flushes the outgoing state's queued retains on the way out.
 	if (selected !== (current !== undefined)) {
-		await session.applyMemoryBackend();
+		await session.applyMemoryBackend({ reason });
 		return true;
 	}
 	if (!current) return false;

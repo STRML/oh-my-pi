@@ -95,12 +95,24 @@ export interface MemoryRuntimeContext {
 	save(input: string | MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
 }
 
+/**
+ * Why a backend is being started.
+ *
+ * `"start"` is a fresh install for the project the session is already in, and a
+ * backend may catch up on transcript state it missed while it was being resolved.
+ * `"rebind"` says the session's cwd moved: the transcript it can see belongs to
+ * the project it just left, so nothing in it may be attributed to the destination.
+ */
+export type MemoryBackendStartReason = "start" | "rebind";
+
 export interface MemoryBackendStartOptions {
 	session: AgentSession;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	agentDir: string;
 	taskDepth: number;
+	/** Defaults to `"start"`; every cwd-move path must pass `"rebind"`. */
+	reason?: MemoryBackendStartReason;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
 }

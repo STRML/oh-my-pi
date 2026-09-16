@@ -158,6 +158,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { MemoryBackendStartReason } from "../memory-backend/types";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -5572,7 +5573,7 @@ export class AgentSession {
 	}
 
 	/** Apply the backend; cwd rebinding can skip Mnemopi auto-retention while still draining writes. */
-	applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
+	applyMemoryBackend(options: { retainMnemopi?: boolean; reason?: MemoryBackendStartReason } = {}): Promise<void> {
 		if (!this.memoryEnabled) return Promise.resolve();
 		return this.#memory.applyMemoryBackend(options);
 	}
