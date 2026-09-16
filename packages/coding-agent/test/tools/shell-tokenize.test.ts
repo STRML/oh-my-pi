@@ -127,17 +127,26 @@ describe("tokenizeShellSegments", () => {
 	it("closes a plain quoted string on the first apostrophe", () => {
 		// A backslash is literal inside plain quotes: nothing is escaped.
 		const command = "echo 'a\\b'; echo NEXT";
-		expect(tokenizeShellSegments(command)).toEqual([["echo", "a\\b"], ["echo", "NEXT"]]);
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "a\\b"],
+			["echo", "NEXT"],
+		]);
 	});
 
 	it("closes an ANSI-C string at its own closing quote, one line later", () => {
 		const command = "printf $'a\\'b\n' ; echo REACHED";
-		expect(tokenizeShellSegments(command)).toEqual([["printf", "$a\\'b\n"], ["echo", "REACHED"]]);
+		expect(tokenizeShellSegments(command)).toEqual([
+			["printf", "$a\\'b\n"],
+			["echo", "REACHED"],
+		]);
 	});
 
 	it("treats a quoted apostrophe after a bare word as plain quoting", () => {
 		// The sensory trap: `x '...'` is a plain string; only `$'...'` escapes.
 		const command = "echo x'not ansi'; echo REACHED";
-		expect(tokenizeShellSegments(command)).toEqual([["echo", "xnot ansi"], ["echo", "REACHED"]]);
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "xnot ansi"],
+			["echo", "REACHED"],
+		]);
 	});
 });
