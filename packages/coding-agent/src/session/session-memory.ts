@@ -197,33 +197,39 @@ export class SessionMemory {
 	}
 
 	/**
-	 * Rebind only the paired decision backend after the session's cwd moved.
+	 * Start, restart or release only the paired decision backend, leaving the
+	 * selected store's live state untouched.
 	 *
-	 * `applyMemoryBackend` already rebinds everything, and every caller that can
-	 * reach it should keep using it. This exists for the one path that cannot:
-	 * `rebindMemoryBackendForCwd` deliberately skips the full apply while a
-	 * Hindsight transition owns the backend, so that it does not retry a
-	 * partially torn-down store outside its own task. Sharpshooter is not that
-	 * store. It keys its decision bank and its per-bank scheduler on cwd, so
+	 * Two callers, and for both a full `applyMemoryBackend` would be wrong rather
+	 * than merely heavy, because it disposes the selected store and builds a new
+	 * one. A fresh `HindsightSessionState` starts at `lastRetainedTurn: 0` with an
+	 * empty transcript cache and `hasRecalledForFirstTurn: false`, so the next
+	 * `agent_end` re-retains the whole conversation under a new document and
+	 * first-turn recall fires a second time.
+	 *
+	 * A cwd move is one caller. `rebindMemoryBackendForCwd` skips the full apply
+	 * while a Hindsight transition owns the backend, so that it does not retry a
+	 * partially torn-down store outside its own task, and Sharpshooter still has
+	 * to follow: it keys its decision bank and its per-bank scheduler on cwd, so
 	 * skipping leaves it consolidating the project the session just left and
-	 * ignoring the destination project's own `sharpshooter.enabled`.
+	 * ignoring the destination project's own `sharpshooter.enabled`. The
+	 * destination decides both ways, and a destination that turns pairing off has
+	 * to take the source's subscription and scheduler with it.
 	 *
-	 * The destination project decides, both ways. It can turn pairing off, and
-	 * then the source project's subscription and scheduler have to go: left
-	 * installed they would keep extracting from this session's messages and keep
-	 * consolidating a project the session has left.
+	 * A live `sharpshooter.enabled` toggle is the other. Nothing caches what
+	 * `resolveMemoryBackend` returns, so search and status pick the flag up on
+	 * their own; what needs doing is exactly this, the session resources and the
+	 * prompt.
 	 *
-	 * Sharpshooter selected as the backend is left alone either way, because it
-	 * rebinds through the normal apply.
+	 * Sharpshooter selected as the backend is left alone either way. The flag is
+	 * documented as ignored there, and it rebinds through the normal apply.
 	 *
-	 * Either branch ends with a prompt rebuild. Sharpshooter's decision files are
-	 * injected as developer instructions, and the Hindsight rebuild this runs
-	 * beside refreshes the base prompt only when its own bank scope changed, which
-	 * a `global` scope or an unchanged bank never does. Without this the session
-	 * would go on being told the source project's decisions, including after a
-	 * destination that turned pairing off.
+	 * Every branch that changed anything ends with a prompt rebuild. Sharpshooter's
+	 * decision files are injected as developer instructions, and the Hindsight
+	 * rebuild a move runs beside this refreshes the base prompt only when its own
+	 * bank scope changed, which a `global` scope or an unchanged bank never does.
 	 */
-	async rebindPairedMemoryForCwd(): Promise<void> {
+	async applyPairedMemoryBackend(reason: MemoryBackendStartReason): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
 		const settings = this.#host.settings;
@@ -238,7 +244,7 @@ export class SessionMemory {
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
-					reason: "rebind",
+					reason,
 				},
 				backend ?? "off",
 			);

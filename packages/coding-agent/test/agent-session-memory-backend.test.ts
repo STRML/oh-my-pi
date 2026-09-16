@@ -267,6 +267,35 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(startedAt).toEqual([`start ${source}`, `rebind ${destination}`]);
 	});
 
+	it("keeps the live Hindsight store across a pairing toggle", async () => {
+		// A full apply would dispose the store and build a new one, and a fresh
+		// `HindsightSessionState` starts at `lastRetainedTurn: 0` with an empty
+		// transcript cache, so the next `agent_end` re-retains the whole
+		// conversation under a new document. Toggling a flag that the store does
+		// not read must not cost that.
+		const cwd = path.join(tempDir.path(), "project");
+		settings.override("memory.backend", "hindsight");
+		settings.override("hindsight.apiUrl", "http://127.0.0.1:1");
+		settings.override("hindsight.mentalModelsEnabled", false);
+		settings.override("sharpshooter.enabled", false);
+		await settings.reloadForCwd(cwd);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		const store = current.getHindsightSessionState();
+		expect(store).toBeDefined();
+		expect(startedAt).toEqual([]);
+		const rebuildsBefore = promptRebuilds;
+
+		settings.override("sharpshooter.enabled", true);
+		await current.applyPairedMemoryBackend("start");
+
+		expect(current.getHindsightSessionState()).toBe(store);
+		expect(startedAt).toEqual([`start ${cwd}`]);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
 	it("releases Sharpshooter when the destination project turns pairing off", async () => {
 		// The destination decides both ways. Left installed, the source project's
 		// subscription would keep extracting from this session's messages and its

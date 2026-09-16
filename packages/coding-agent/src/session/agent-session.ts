@@ -5579,12 +5579,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Rebind the paired decision backend alone, for a cwd move that could not run a
-	 * full apply. Callers that can reach `applyMemoryBackend` should use that.
+	 * Apply the paired decision backend alone, leaving the selected store running.
+	 * For a cwd move that cannot run a full apply, and for a live pairing toggle,
+	 * which must not restart the store and reset its retain and recall state.
 	 */
-	rebindPairedMemoryForCwd(): Promise<void> {
+	applyPairedMemoryBackend(reason: MemoryBackendStartReason): Promise<void> {
 		if (!this.memoryEnabled) return Promise.resolve();
-		return this.#memory.rebindPairedMemoryForCwd();
+		return this.#memory.applyPairedMemoryBackend(reason);
 	}
 
 	/** Rebuilds the stable base prompt, optionally discarding a stale asynchronous rebuild. */
