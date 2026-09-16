@@ -68,6 +68,16 @@
 - Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
 - Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
 - Fixed localized edits rewriting unrelated bytes in files with invalid UTF-8; these edits now fail without modifying the file. ([#12277](https://github.com/can1357/oh-my-pi/pull/12277) by [@iliaal](https://github.com/iliaal))
+### Added
+
+- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so a session can have searchable recall and always-on project decisions at once; `/memory clear` and `/memory sync` still reach only the selected backend ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+
+### Fixed
+
+- Sharpshooter consolidation no longer drops decisions when the model returns only some of the memory files: an incomplete reply is refused and its queued deltas are kept for the next cycle, instead of being consumed while the files they were meant for went unchanged ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- Memory search after `/move` now answers for the project the session moved to. The runtime context captured its cwd at session creation, so Sharpshooter, which keys its decision bank on cwd, could surface the source project's decisions and keep consolidating it ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- A `/move` landing while a source-prompt extraction is in flight no longer drops the first destination prompt: the dropped prompt is stashed and extracted once the in-flight source extraction clears ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- `/move` no longer re-extracts the prompt the session typed in the project it left. Sharpshooter catches up on a transcript that already ends in a user prompt, which is right at startup and wrong on a cwd move: an interrupted or failed turn left that prompt trailing, and the catch-up filed it as a decision about the destination ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
 - Fixed retry timing reliability in agent sessions by ensuring sleep durations are monotonic
 - Fixed data stability issues when processing streamed lines
@@ -87,6 +97,10 @@
 ## [18.2.2] - 2026-09-16
 
 ### Added
+
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+
+### Fixed
 
 - Expanded built-in secret obfuscation to detect credentials in connection URLs regardless of environment-variable name, including PostgreSQL, MongoDB, MySQL, Redis, AMQP, and other supported schemes.
 - Expanded built-in secret obfuscation to cover AWS access keys, Google API keys, Slack, npm, Stripe secret/restricted keys and webhook secrets, Hugging Face and SendGrid tokens, JWTs, Bearer tokens, and PEM private keys.
