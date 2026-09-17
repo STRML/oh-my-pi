@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.2.4] - 2026-09-17
+
+### Fixed
+
+- Fixed inline images disappearing or temporarily blanking when resizing the terminal in kitty and Ghostty.
+
 ## [18.2.3] - 2026-09-17
 
 ### Added

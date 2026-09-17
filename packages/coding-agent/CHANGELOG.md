@@ -12,6 +12,21 @@
 - Memory search after `/move` now answers for the project the session moved to. The runtime context captured its cwd at session creation, so Sharpshooter, which keys its decision bank on cwd, could surface the source project's decisions and keep consolidating it ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 - A `/move` landing while a source-prompt extraction is in flight no longer drops the first destination prompt: the dropped prompt is stashed and extracted once the in-flight source extraction clears ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 - `/move` no longer re-extracts the prompt the session typed in the project it left. Sharpshooter catches up on a transcript that already ends in a user prompt, which is right at startup and wrong on a cwd move: an interrupted or failed turn left that prompt trailing, and the catch-up filed it as a decision about the destination ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+### Fixed
+
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+## [18.2.4] - 2026-09-17
+
+### Added
+
+- Added an optional live generation speed readout via `composer.tokenRate`, showing smoothed tokens-per-second output in the working row and keeping the rate visible between turns.
+- Added TypeSafe provider support through `/login typesafe` or `TYPESAFE_API_KEY`. TypeSafe can power thinking-level detection, unexpected-stop detection, and AI-assisted git staging with calibrated judgment probabilities; configure `providers.judgmentProvider` as `auto`, `typesafe`, or `llm` to select the judgment backend.
+- Added the `judge(state, questions)` evaluation helper for Python and JavaScript cell code, supporting typed choice, boolean, and score judgments. It returns a handle whose `.wait()` method provides answers and probabilities, using TypeSafe when configured and available or a fallback chat model otherwise.
+
+### Changed
+
+- Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
