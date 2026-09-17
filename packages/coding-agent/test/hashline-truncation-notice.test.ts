@@ -11,15 +11,15 @@ const NOTICE_FIXTURE = path.join(
  * The notice shapes `read` emits, shared with the Rust test that owns the
  * predicate.
  *
- * `isReadTruncationNotice` ports
- * `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`,
- * which the hashline parser still calls, so two implementations of one
- * predicate exist and can drift. `read_truncation_notice_covers_emitted_shapes`
- * in `crates/pi-edit/tests/hashline_parse.rs` asserts the same file against the
- * Rust side, so a shape added for one is a shape the other must handle.
+ * `isReadTruncationNotice` calls
+ * `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`
+ * through the `hashlineIsReadTruncationNotice` napi wrapper, so the predicate
+ * itself is single-sourced; `read_truncation_notice_covers_emitted_shapes`
+ * in `crates/pi-edit/tests/hashline_parse.rs` asserts this same file against
+ * the Rust side, so a shape added for one is a shape the other must handle.
  *
- * This pins the corpus, not the predicate. Nothing short of code generation or
- * a native call proves the two functions agree on every input.
+ * This pins the corpus. The predicate agreement comes from the callee being
+ * the native function rather than a second implementation.
  */
 const EMITTED_NOTICES = (await Bun.file(NOTICE_FIXTURE).text()).split("\n").filter(line => line.length > 0);
 
