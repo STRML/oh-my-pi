@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { isReadTruncationNotice } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
+import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 const NOTICE_FIXTURE = path.join(
 	import.meta.dir,
