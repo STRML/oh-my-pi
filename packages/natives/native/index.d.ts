@@ -648,7 +648,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_2_1(): void
+export declare function __piNativesV18_2_4(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1752,6 +1752,9 @@ export declare function hashlineFormatHeader(path: string, tag: string): string
 
 /** `N:line` numbered display rows starting at `startLine` (default 1). */
 export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
+
+/** Whether a row is a truncation notice emitted by `read`. */
+export declare function hashlineIsReadTruncationNotice(line: string): boolean
 
 /** Count of one canonical hashline op header shape in a payload. */
 export interface HashlineOpCount {

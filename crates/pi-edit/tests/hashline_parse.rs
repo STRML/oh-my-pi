@@ -668,14 +668,12 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 	assert!(is_read_metadata_line("..."));
 }
 
-/// The notice shapes `read` emits, shared with the TypeScript port.
+/// The notice shapes `read` emits, shared with the TypeScript consumer.
 ///
-/// `is_read_truncation_notice` is ported to TS for the write tool, because PR
-/// CI tests against the published addon and a new napi export is not available
-/// there. Two implementations of one predicate can drift, so both read this
-/// file: `packages/coding-agent/test/hashline-truncation-notice.test.ts`
-/// asserts the same shapes against the port. Add a shape here and the port must
-/// handle it or its suite fails.
+/// `packages/coding-agent/test/hashline-truncation-notice.test.ts` asserts the
+/// same file against `isReadTruncationNotice`, which calls this predicate
+/// through the `hashlineIsReadTruncationNotice` napi wrapper. Add a shape here
+/// and both sides must handle it or a suite fails.
 const READ_TRUNCATION_NOTICES: &str = include_str!("fixtures/hashline/read-truncation-notices.txt");
 
 #[test]
