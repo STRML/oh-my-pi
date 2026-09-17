@@ -149,4 +149,27 @@ describe("tokenizeShellSegments", () => {
 			["echo", "REACHED"],
 		]);
 	});
+
+	it("keeps a command after an escaped dollar that only looks ANSI-C", () => {
+		// Codex review: `\$'` is NOT an ANSI-C opener; the dollar is escaped,
+		// so the string is plain and closes at the FIRST apostrophe. The
+		// `; sudo whoami` after it must split into its own segment. Probed
+		// against bash: `$a\` printed, then sudo runs.
+		const command = "echo \\$'a\\'; sudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "$a\\"],
+			["sudo", "whoami"],
+		]);
+	});
+
+	it("does not open a quote inside a comment", () => {
+		// Codex review: a `#` comment runs to end of line and the `$'\'`
+		// inside it opens nothing, so `sudo whoami` on the next line stays a
+		// command of its own. Probed against bash: `ok`, then sudo runs.
+		const command = "echo ok # $'\\'\nsudo whoami";
+		expect(tokenizeShellSegments(command)).toEqual([
+			["echo", "ok", "$'\\'"],
+			["sudo", "whoami"],
+		]);
+	});
 });
