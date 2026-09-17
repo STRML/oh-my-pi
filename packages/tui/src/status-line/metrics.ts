@@ -125,8 +125,7 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	// provider-reported usage windows. When the advisor's provider reports them,
 	// they replace the dollar amount entirely (so non-quota advisors keep their
 	// only cost signal).
-	const advisorWindows =
-		advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay) ? advisorUsage : undefined;
+	const advisorWindows = advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay) ? advisorUsage : undefined;
 	if (
 		!options.cost &&
 		!advisorCost &&
