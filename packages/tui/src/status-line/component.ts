@@ -1711,11 +1711,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			modelId: activeModelId,
 			identity: activeIdentity,
 		});
-		const advisorUsage = this.#normalizeAdvisorUsage(
-			reports,
-			this.host.getAdvisorUsageAccounts(session),
-			session,
-		);
+		const advisorUsage = this.#normalizeAdvisorUsage(reports, this.host.getAdvisorUsageAccounts(session), session);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
 		const usageChanged = this.#cachedUsage !== normalized || this.#cachedAdvisorUsage !== advisorUsage;

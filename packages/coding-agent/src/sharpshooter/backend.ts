@@ -1,6 +1,11 @@
 import { rm } from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
+import type {
+	MemoryBackend,
+	MemoryBackendSearchItem,
+	MemoryBackendStartOptions,
+	MemoryBackendStatus,
+} from "../memory-backend/types";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
 import { runSharpshooterConsolidation } from "./consolidate";
@@ -42,6 +47,11 @@ interface SharpshooterAgentSession extends AgentSession {
 /** Release session-owned extraction and scheduler subscriptions. */
 export function releaseSharpshooterSession(session: AgentSession): void {
 	const ownedSession = session as SharpshooterAgentSession;
+	// Before the no-resources return: queued prompts belong to the pairing being
+	// released, so a release that has nothing left to unsubscribe still has to
+	// drop them. Otherwise the in-flight extraction's `finally` retries a prompt
+	// for a session whose pairing is gone (e.g. `sharpshooter.enabled` off here).
+	clearPendingSharpshooterExtraction(session);
 	const resources = ownedSession[kSharpshooterSessionResources];
 	if (!resources) return;
 	delete ownedSession[kSharpshooterSessionResources];
@@ -155,42 +165,7 @@ export const sharpshooterBackend: MemoryBackend = {
 	id: "sharpshooter",
 
 	start(options): void {
-		if (options.taskDepth > 0) return;
-		const { session, settings, modelRegistry, agentDir } = options;
-		try {
-			releaseSharpshooterSession(session);
-			const disposeScheduler = startSharpshooterScheduler({
-				agentDir,
-				cwd: settings.getCwd(),
-				settings,
-				modelRegistry,
-				sessionId: session.sessionId,
-			});
-			try {
-				const unsubscribe = session.subscribe(event => {
-					// message_start is the only event that carries the committed user
-					// prompt itself (agent_start fires before the transcript appends),
-					// and it also covers mid-turn steering prompts.
-					if (event.type !== "message_start" || event.message.role !== "user") return;
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
-				});
-				// Backend startup can race the first turn's events (print mode
-				// submits while resolveMemoryBackend is still importing us).
-				// Catch up when the newest transcript message is already a user prompt.
-				if (session.messages.at(-1)?.role === "user") {
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir });
-				}
-				(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
-					unsubscribe,
-					disposeScheduler,
-				};
-			} catch (error) {
-				disposeScheduler();
-				throw error;
-			}
-		} catch (error) {
-			logger.warn("Sharpshooter: backend startup failed; memory backend inert.", { error: String(error) });
-		}
+		installSharpshooterSession(options);
 	},
 
 	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {

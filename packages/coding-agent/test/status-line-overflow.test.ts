@@ -544,7 +544,9 @@ describe("status line two-line overflow", () => {
 		setProjectDir(cwd);
 
 		const modelName = `MODEL_KEPT_ON_LINE2_${"x".repeat(20)}`;
-		const component = new StatusLineComponent(createStatusLineSession("two line overflow", modelName));
+		const component = statusLines.track(
+			new StatusLineComponent(createStatusLineSession("two line overflow", modelName), statusLineHost),
+		);
 		const pathOptions = { abbreviate: false, maxLength: 32, stripWorkPrefix: false };
 		component.updateSettings({
 			preset: "custom",
@@ -617,7 +619,7 @@ describe("status line two-line overflow", () => {
 
 	it("moves popped right segments to a second line, clamped to the requested width", () => {
 		const session = createStatusLineSession("Right session", `MODEL_RIGHT_${"z".repeat(24)}`);
-		const component = new StatusLineComponent(session);
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],

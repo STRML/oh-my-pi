@@ -2416,6 +2416,11 @@ export class EventController {
 		this.#idleCompactionTimer.unref?.();
 	}
 
+	/** Public hook for the side-effect applier: a live `recap.idleSeconds` edit re-arms the timer. */
+	refreshIdleRecapTimer(): void {
+		this.#scheduleIdleRecap();
+	}
+
 	#scheduleIdleRecap(): void {
 		this.#cancelIdleRecap();
 		if (this.ctx.viewSession.isCompacting) return;

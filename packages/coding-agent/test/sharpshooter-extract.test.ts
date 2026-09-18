@@ -10,11 +10,15 @@ import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MemoryBackendStartReason } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { startSharpshooterLeg } from "@oh-my-pi/pi-coding-agent/memory-backend/with-sharpshooter";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { releaseSharpshooterSession } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
 import {
 	buildSharpshooterEnvelope,
+	flushSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
+import { writeSharpshooterState } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function message(role: "user" | "assistant", content: unknown): AgentMessage {
 	return { role, content, timestamp: Date.now() } as unknown as AgentMessage;
@@ -40,7 +44,19 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
-function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
+/** The session, settings and model registry a Sharpshooter extraction runs against. */
+interface ExtractionDeps {
+	session: AgentSession;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+}
+
+function extractionDependencies(
+	cwd: string,
+	messages: AgentMessage[],
+	sessionId = "session-extract",
+	getCwd: () => string = () => cwd,
+): ExtractionDeps {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
 	const settings = {
@@ -50,6 +66,9 @@ function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId
 		},
 		getModelRole() {
 			return undefined;
+		},
+		getCwd() {
+			return cwd;
 		},
 		getStorage() {
 			return undefined;
@@ -64,7 +83,8 @@ function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId
 		isDisposed: false,
 		messages,
 		sessionId,
-		sessionManager: { getCwd: () => cwd },
+		sessionManager: { getCwd },
+		subscribe: () => () => {},
 	} as unknown as AgentSession;
 	return { modelRegistry, session, settings };
 }
@@ -611,6 +631,60 @@ describe("maybeStartSharpshooterExtraction", () => {
 			sessionId: "session-extract",
 			ts: expect.any(Number),
 		});
+	});
+
+	it("queues a delta to the project whose prompt produced it, even if /move lands mid-extraction", async () => {
+		using temp = TempDir.createSync("@sharpshooter-extract-move-");
+		{
+			const root = temp.path();
+			const source = path.join(root, "source");
+			const destination = path.join(root, "destination");
+			const agentDir = path.join(root, "agent");
+			const currentPrompt = "Keep the cyan status indicator and never replace it with magenta.";
+			const deps = extractionDependencies(source, [message("user", [{ type: "text", text: currentPrompt }])]);
+			// The session's directory is live, so a `/move` while the model call is
+			// outstanding changes it under the extraction that is already running.
+			let live = source;
+			(deps.session as unknown as { sessionManager: { getCwd: () => string } }).sessionManager = {
+				getCwd: () => live,
+			};
+			vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+				live = destination;
+				return assistantResponse([
+					{
+						type: "toolCall",
+						id: "call-record",
+						name: "record_deltas",
+						arguments: {
+							deltas: [
+								{
+									kind: "style_decision",
+									statement: "Status indicator uses cyan rather than magenta.",
+									source: "explicit_user",
+									evidence: "cyan status indicator",
+									friction: { corrective: true, regression: false, subtle: true },
+								},
+							],
+						},
+					},
+				]);
+			});
+
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			await waitFor(
+				async () => (await listSharpshooterDeltas(agentDir, source)).length === 1,
+				"delta was not queued to the source project",
+			);
+
+			// The decision was earned in the source project and is not a decision
+			// about the destination.
+			expect(await listSharpshooterDeltas(agentDir, destination)).toHaveLength(0);
+		}
 	});
 
 	it("ignores a non-tool text response without writing queue files", async () => {

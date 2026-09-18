@@ -255,14 +255,7 @@ export async function resolveSharpshooterModel(
 }
 
 /** Start best-effort extraction for one committed user prompt without blocking the caller. */
-export function maybeStartSharpshooterExtraction(options: {
-	session: AgentSession;
-	settings: Settings;
-	modelRegistry: ModelRegistry;
-	agentDir: string;
-	/** The just-committed user message; falls back to the transcript's latest user message. */
-	message?: AgentMessage;
-}): void {
+export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions, forcedCwd?: string): void {
 	try {
 		const { session } = options;
 		if (session.isDisposed) return;
@@ -302,7 +295,10 @@ export function maybeStartSharpshooterExtraction(options: {
 		const trimmedPrompt = envelope.prompt.trim();
 		if (trimmedPrompt.startsWith("/") || trimmedPrompt.length < 16) return;
 
-		const run = runSharpshooterExtraction(options, envelope)
+		// Bind the bank now. The model call below can outlive a `/move`, and the
+		// deltas belong to the project whose prompt produced them.
+		const cwd = forcedCwd ?? session.sessionManager.getCwd();
+		const run = runSharpshooterExtraction(options, envelope, cwd)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
 			})
@@ -329,6 +325,12 @@ async function runSharpshooterExtraction(
 		agentDir: string;
 	},
 	envelope: SharpshooterEnvelope,
+	/**
+	 * The project the prompt was written in, captured before the model call.
+	 * `/move` can land while extraction is in flight, and a decision earned in the
+	 * source project is not a decision about the destination.
+	 */
+	cwd: string,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
 	const model = await resolveSharpshooterModel(settings, modelRegistry);
@@ -369,7 +371,7 @@ async function runSharpshooterExtraction(
 			const delta = admitDelta(candidate, envelope.prompt, session.sessionId);
 			if (!delta) continue;
 			if (session.isDisposed) return;
-			await appendSharpshooterDelta(agentDir, session.sessionManager.getCwd(), delta);
+			await appendSharpshooterDelta(agentDir, cwd, delta);
 		}
 	}
 }
