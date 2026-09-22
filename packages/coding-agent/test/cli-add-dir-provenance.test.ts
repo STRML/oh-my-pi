@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { resetCapabilityForTests } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
@@ -61,6 +62,10 @@ test("--add-dir roots survive a reload that withdraws the same paths from settin
 		}
 		expect(sessionManager.getAdditionalDirectories()).toEqual([path.resolve(cliDir)]);
 	} finally {
+		// createAgentSession bound this file's isolated snapshot as the process-wide
+		// capability settings; leaving it bound would make a later test file's
+		// provider-toggle reads follow a disposed instance.
+		resetCapabilityForTests();
 		await session?.dispose();
 		await authStorage.close();
 	}
