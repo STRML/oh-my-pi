@@ -11,7 +11,6 @@ import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
-import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {
@@ -34,7 +33,6 @@ export interface StreamGuardsHost {
 	agent: Agent;
 	settings: Settings;
 	sessionManager: SessionManager;
-	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	isDisposed(): boolean;
 	promptGeneration(): number;

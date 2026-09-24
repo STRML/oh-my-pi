@@ -567,36 +567,55 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			isWindows: process.platform === "win32",
 		});
 	}
-	readonly parameters: BashToolSchema;
-	// Non-pty calls run alongside each other (the executor isolates overlapping
-	// runs on the same shell session); pty takes over the terminal UI and must
-	// run alone.
-	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
-		args.pty === true ? "exclusive" : "shared";
-	readonly strict = true;
-	readonly #asyncEnabled: boolean;
-	readonly #launchEnabled: boolean;
-	readonly #autoBackgroundEnabled: boolean;
-	readonly #autoBackgroundThresholdMs: number;
-
-	constructor(private readonly session: ToolSession) {
-		this.#asyncEnabled = this.session.settings.get("async.enabled");
-		this.#launchEnabled =
-			this.session.settings.get("launch.enabled") === true && (this.session.isToolActive?.("bash") ?? true);
-		this.#autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
-		this.#autoBackgroundThresholdMs = Math.max(
-			0,
-			Math.floor(
-				this.session.settings.get("bash.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
-			),
-		);
-		this.parameters = this.#launchEnabled
+	get parameters(): BashToolSchema {
+		return this.#launchEnabled
 			? this.#asyncEnabled
 				? bashSchemaWithAsyncAndService
 				: bashSchemaWithService
 			: this.#asyncEnabled
 				? bashSchemaWithAsync
 				: bashSchemaBase;
+	}
+	// Non-pty calls run alongside each other (the executor isolates overlapping
+	// runs on the same shell session); pty takes over the terminal UI and must
+	// run alone.
+	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
+		args.pty === true ? "exclusive" : "shared";
+	readonly strict = true;
+	#asyncEnabled = false;
+	#launchEnabled = false;
+	#autoBackgroundEnabled = false;
+	#autoBackgroundThresholdMs = DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS;
+
+	constructor(private readonly session: ToolSession) {
+		this.reconfigure();
+	}
+
+	/** Re-reads async-execution and launch settings; returns true when the live schema or description changed. */
+	reconfigure(): boolean {
+		const asyncEnabled = this.session.settings.get("async.enabled");
+		const launchEnabled =
+			this.session.settings.get("launch.enabled") === true && (this.session.isToolActive?.("bash") ?? true);
+		const autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
+		const autoBackgroundThresholdMs = Math.max(
+			0,
+			Math.floor(
+				this.session.settings.get("bash.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
+			),
+		);
+		if (
+			asyncEnabled === this.#asyncEnabled &&
+			launchEnabled === this.#launchEnabled &&
+			autoBackgroundEnabled === this.#autoBackgroundEnabled &&
+			autoBackgroundThresholdMs === this.#autoBackgroundThresholdMs
+		) {
+			return false;
+		}
+		this.#asyncEnabled = asyncEnabled;
+		this.#launchEnabled = launchEnabled;
+		this.#autoBackgroundEnabled = autoBackgroundEnabled;
+		this.#autoBackgroundThresholdMs = autoBackgroundThresholdMs;
+		return true;
 	}
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {
