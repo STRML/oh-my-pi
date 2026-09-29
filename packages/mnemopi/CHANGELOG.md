@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mnemopi embed-serve`, an OpenAI-compatible embeddings server that lets several processes share one local model through `MNEMOPI_EMBEDDING_API_URL`.
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
