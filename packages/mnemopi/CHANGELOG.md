@@ -53,6 +53,9 @@
 - Fixed `MNEMOPI_ENHANCED_RECALL` / `enhancedRecall` having no effect: `recallEnhanced` now caches results, keyed on every recall option so a different limit, fact inclusion, channel, query time or bank never reuses another call's ranking, and any database write clears it ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
 - Fixed polyphonic recall's graph voice taking seconds on densely linked banks (`proactiveLinking`): it now walks from at most 16 seeds in one batched edge query per hop and reports at most 64 memories, and `recallEnhanced` no longer drops rows below `topK` to a token budget
 - Fixed a failed `consolidated_facts` backfill never being retried; backfill and fact consolidation failures are now logged
+### Added
+
+- Added `mnemopi embed-serve`, an OpenAI-compatible embeddings server that lets several processes share one local model through `MNEMOPI_EMBEDDING_API_URL`.
 
 ## [18.4.1] - 2026-09-28
 
