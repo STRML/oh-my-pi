@@ -1,4 +1,6 @@
-import { defaultLocalModelInitializer, currentEmbeddingModel, fastembedModelName } from "./core/embeddings";
+import * as fs from "node:fs/promises";
+import { isEnoent } from "@oh-my-pi/pi-utils";
+import { currentEmbeddingModel, defaultLocalModelInitializer, fastembedModelName } from "./core/embeddings";
 import type { LocalEmbeddingModel, LocalModelInitializer } from "./core/embeddings";
 
 /** Loopback default: the server has no auth, so it never listens beyond this host unless asked. */
@@ -17,6 +19,11 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 export interface EmbedServerOptions {
 	readonly host?: string;
 	readonly port?: number;
+	/**
+	 * Listen on a unix socket at this path instead of TCP. The socket is created 0600, so only the
+	 * owning user can connect, and clients address it as `unix:<path>`. Exclusive with host/port.
+	 */
+	readonly socket?: string;
 	/** Embedding model name as mnemopi stores it, e.g. `BAAI/bge-small-en-v1.5`. Requests naming another model get a 400. */
 	readonly model?: string;
 	/** Loads the fastembed model. Overridable so tests can serve deterministic vectors. */
@@ -50,6 +57,41 @@ function parseInputs(input: unknown): string[] | null {
 	return null;
 }
 
+/**
+ * Make `socket` bindable. A leftover file from a crashed server is removed; a socket that still
+ * answers `/health` belongs to a live server and is never clobbered.
+ */
+async function prepareSocketPath(socket: string): Promise<void> {
+	try {
+		await fs.lstat(socket);
+	} catch (error) {
+		if (isEnoent(error)) return;
+		throw error;
+	}
+	const alive = await fetch("http://localhost/health", {
+		unix: socket,
+		signal: AbortSignal.timeout(500),
+	} as RequestInit)
+		.then(() => true)
+		.catch(() => false);
+	if (alive) throw new Error(`embed-serve: already running on ${socket}`);
+	await fs.rm(socket, { force: true });
+}
+
+/**
+ * Bun creates a unix socket with the process umask. Narrow it for the bind so the file is never
+ * group- or world-accessible, not even briefly, and restore it even if the bind throws.
+ */
+function withNarrowUmask<T>(narrow: boolean, bind: () => T): T {
+	if (!narrow) return bind();
+	const previous = process.umask(0o177);
+	try {
+		return bind();
+	} finally {
+		process.umask(previous);
+	}
+}
+
 async function drain(model: LocalEmbeddingModel, texts: string[]): Promise<number[][]> {
 	const rows: number[][] = [];
 	for await (const batch of model.embed(texts)) {
@@ -70,6 +112,10 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 	const fastembedName = fastembedModelName(modelName);
 	if (fastembedName === null) throw new Error(`embed-serve: no local fastembed model for '${modelName}'`);
 	const initializer = options.initializer ?? defaultLocalModelInitializer;
+	const socket = options.socket;
+	if (socket !== undefined && (options.host !== undefined || options.port !== undefined)) {
+		throw new Error("embed-serve: socket cannot be combined with host or port");
+	}
 
 	let loading: Promise<LocalEmbeddingModel> | null = null;
 	const load = (): Promise<LocalEmbeddingModel> => {
@@ -141,18 +187,32 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 	// Load before listening: a failed preload then leaves no listener behind, and clients that
 	// probe /health only see a server that is ready to answer.
 	if (options.preload === true) await load();
-	const server = Bun.serve({
-		hostname: options.host ?? EMBED_SERVE_DEFAULT_HOST,
-		port: options.port ?? EMBED_SERVE_DEFAULT_PORT,
-		maxRequestBodySize: MAX_BODY_BYTES,
-		async fetch(request) {
-			const { pathname } = new URL(request.url);
-			if (request.method === "GET" && pathname === "/health") {
-				return json({ status: "ok", model: modelName, loaded: loading !== null });
-			}
-			if (request.method === "POST" && pathname === "/v1/embeddings") return handleEmbeddings(request);
-			return errorResponse(404, `no route for ${request.method} ${pathname}`);
-		},
-	});
+	if (socket !== undefined) await prepareSocketPath(socket);
+	const server = withNarrowUmask(socket !== undefined, () =>
+		Bun.serve({
+			...(socket === undefined
+				? { hostname: options.host ?? EMBED_SERVE_DEFAULT_HOST, port: options.port ?? EMBED_SERVE_DEFAULT_PORT }
+				: { unix: socket }),
+			maxRequestBodySize: MAX_BODY_BYTES,
+			async fetch(request) {
+				const { pathname } = new URL(request.url);
+				if (request.method === "GET" && pathname === "/health") {
+					return json({ status: "ok", model: modelName, loaded: loading !== null });
+				}
+				if (request.method === "POST" && pathname === "/v1/embeddings") return handleEmbeddings(request);
+				return errorResponse(404, `no route for ${request.method} ${pathname}`);
+			},
+		}),
+	);
+	if (socket !== undefined) {
+		return {
+			url: `unix:${socket}`,
+			model: modelName,
+			stop: async () => {
+				await server.stop(true);
+				await fs.rm(socket, { force: true });
+			},
+		};
+	}
 	return { url: `http://${server.hostname}:${server.port}/v1`, model: modelName, stop: () => server.stop(true) };
 }
