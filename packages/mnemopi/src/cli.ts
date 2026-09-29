@@ -179,16 +179,20 @@ export const cmdEmbedServe: CommandHandler = async args => {
 	for (let i = 0; i < args.length; i += 2) {
 		const flag = args[i] ?? "";
 		const value = args[i + 1];
-		if (!["--port", "--host", "--model"].includes(flag) || value === undefined) {
-			usage("Usage: mnemopi embed-serve [--port N] [--host H] [--model NAME]");
+		if (!["--port", "--host", "--socket", "--model"].includes(flag) || value === undefined) {
+			usage("Usage: mnemopi embed-serve [--port N] [--host H | --socket PATH] [--model NAME]");
 		}
 		flags.set(flag, value);
+	}
+	if (flags.has("--socket") && (flags.has("--port") || flags.has("--host"))) {
+		usage("--socket cannot be combined with --port or --host");
 	}
 	const portFlag = flags.get("--port");
 	const port = portFlag === undefined ? undefined : parseIntArg(portFlag, "--port");
 	const server = await startEmbedServer({
 		host: flags.get("--host"),
 		port,
+		socket: flags.get("--socket"),
 		model: flags.get("--model"),
 		preload: true,
 	});
@@ -402,7 +406,7 @@ export function printHelp(context?: CliContext): void {
 	out(context, "  diagnose                               Run diagnostics");
 	out(context, "  bank list|create|delete [name]         Manage memory banks");
 	out(context, "  mcp [args]                             Run MCP server");
-	out(context, "  embed-serve [--port N] [--host H]      Serve embeddings over HTTP (shared model)");
+	out(context, "  embed-serve [--port N | --socket PATH] Serve embeddings over HTTP or a unix socket");
 }
 
 export async function runCli(args: readonly string[] = Bun.argv.slice(2), context?: CliContext): Promise<number> {

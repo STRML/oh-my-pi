@@ -104,6 +104,15 @@ MNEMOPI_EMBEDDING_API_URL=http://127.0.0.1:11439/v1 mnemopi recall "production d
 
 Serve the same model the store already uses (`MNEMOPI_EMBEDDING_MODEL`, default `BAAI/bge-small-en-v1.5`). A request for another model gets a 400, and clients keep writing that model name, so existing embeddings stay valid. The server binds `127.0.0.1` and has no auth. If it is down, API-mode clients get no vectors and recall falls back to keyword-only.
 
+To keep other local users and processes off it, listen on a unix socket instead. The socket is created `0600`, and clients address it as `unix:<path>`:
+
+```sh
+mnemopi embed-serve --model BAAI/bge-base-en-v1.5 --socket ~/.mnemopi/embed.sock
+MNEMOPI_EMBEDDING_API_URL=unix:$HOME/.mnemopi/embed.sock mnemopi recall "production deploy target"
+```
+
+`--socket` cannot be combined with `--host` or `--port`. A leftover socket file from a crashed server is replaced on start; a socket that still answers is never overwritten.
+
 ## Commands
 
 ```sh

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `mnemopi embed-serve --socket PATH` and `unix:<path>` embedding API URLs, so the shared embeddings server can listen on an owner-only unix socket instead of a TCP port.
 - Added `mnemopi embed-serve`, an OpenAI-compatible embeddings server that lets several processes share one local model through `MNEMOPI_EMBEDDING_API_URL`. ([#13785](https://github.com/can1357/oh-my-pi/pull/13785) by [@STRML](https://github.com/STRML))
 
 ## [18.4.1] - 2026-09-28
