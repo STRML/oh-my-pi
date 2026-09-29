@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { dataDir as configuredDataDir, dbPath as configuredDbPath } from "./config";
@@ -205,7 +205,9 @@ export const cmdEmbedServe: CommandHandler = async args => {
 	// exit runs onnxruntime-node's NAPI finalizer and crashes Bun (issue #3031; the embed worker
 	// is SIGKILL-reaped for the same reason), and stopping the listener first empties the event
 	// loop so the process takes that exit before a later kill can run. Nothing is left to flush,
-	// and the kernel closes the listener.
+	// and the kernel closes the listener. A socket file is the one artifact it leaves behind.
+	const socketPath = flags.get("--socket");
+	if (socketPath !== undefined) rmSync(socketPath, { force: true });
 	process.kill(process.pid, "SIGKILL");
 	// The signal lands asynchronously; park so the caller's process.exit() cannot win the race.
 	return await new Promise<number>(() => {});
