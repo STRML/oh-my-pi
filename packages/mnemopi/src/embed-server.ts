@@ -5,6 +5,15 @@ import type { LocalEmbeddingModel, LocalModelInitializer } from "./core/embeddin
 export const EMBED_SERVE_DEFAULT_HOST = "127.0.0.1";
 export const EMBED_SERVE_DEFAULT_PORT = 11439;
 
+/**
+ * Per-request work bounds. Inference is serialized on one ONNX session, so an unbounded
+ * request would starve every other client. The character cap sits well above the 8192 that
+ * `embed()` applies client-side and the model's own 512-token window.
+ */
+export const EMBED_SERVE_MAX_INPUTS = 1024;
+export const EMBED_SERVE_MAX_INPUT_CHARS = 32_768;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
+
 export interface EmbedServerOptions {
 	readonly host?: string;
 	readonly port?: number;
@@ -85,9 +94,19 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 	};
 
 	const handleEmbeddings = async (request: Request): Promise<Response> => {
+		// A web page can POST to loopback without a preflight when the body is text/plain, and the
+		// server has no auth. Browsers always attach Origin to such requests and native clients
+		// never do, so refuse both a browser origin and any non-JSON content type.
+		if (request.headers.has("origin")) return errorResponse(403, "browser-origin requests are not accepted");
+		const contentType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+		if (contentType !== "application/json") return errorResponse(415, "content-type must be application/json");
 		let body: EmbeddingsRequest;
 		try {
-			body = (await request.json()) as EmbeddingsRequest;
+			const decoded: unknown = await request.json();
+			if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+				return errorResponse(400, "request body must be a JSON object");
+			}
+			body = decoded as EmbeddingsRequest;
 		} catch {
 			return errorResponse(400, "request body must be JSON");
 		}
@@ -96,6 +115,12 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 		}
 		const texts = parseInputs(body.input);
 		if (texts === null) return errorResponse(400, "'input' must be a string or an array of strings");
+		if (texts.length > EMBED_SERVE_MAX_INPUTS || texts.some(text => text.length > EMBED_SERVE_MAX_INPUT_CHARS)) {
+			return errorResponse(
+				413,
+				`at most ${EMBED_SERVE_MAX_INPUTS} inputs of ${EMBED_SERVE_MAX_INPUT_CHARS} characters per request`,
+			);
+		}
 		if (texts.length === 0) return json({ object: "list", data: [], model: modelName, usage: {} });
 		try {
 			const vectors = await embedSerially(texts);
@@ -113,9 +138,13 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 		}
 	};
 
+	// Load before listening: a failed preload then leaves no listener behind, and clients that
+	// probe /health only see a server that is ready to answer.
+	if (options.preload === true) await load();
 	const server = Bun.serve({
 		hostname: options.host ?? EMBED_SERVE_DEFAULT_HOST,
 		port: options.port ?? EMBED_SERVE_DEFAULT_PORT,
+		maxRequestBodySize: MAX_BODY_BYTES,
 		async fetch(request) {
 			const { pathname } = new URL(request.url);
 			if (request.method === "GET" && pathname === "/health") {
@@ -125,6 +154,5 @@ export async function startEmbedServer(options: EmbedServerOptions = {}): Promis
 			return errorResponse(404, `no route for ${request.method} ${pathname}`);
 		},
 	});
-	if (options.preload === true) await load();
 	return { url: `http://${server.hostname}:${server.port}/v1`, model: modelName, stop: () => server.stop(true) };
 }
