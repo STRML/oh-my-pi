@@ -197,8 +197,14 @@ export const cmdEmbedServe: CommandHandler = async args => {
 		process.once("SIGINT", resolve);
 		process.once("SIGTERM", resolve);
 	});
-	await server.stop();
-	return 0;
+	// Do not stop the server or exit normally. Once the loaded model is in the process, a normal
+	// exit runs onnxruntime-node's NAPI finalizer and crashes Bun (issue #3031; the embed worker
+	// is SIGKILL-reaped for the same reason), and stopping the listener first empties the event
+	// loop so the process takes that exit before a later kill can run. Nothing is left to flush,
+	// and the kernel closes the listener.
+	process.kill(process.pid, "SIGKILL");
+	// The signal lands asynchronously; park so the caller's process.exit() cannot win the race.
+	return await new Promise<number>(() => {});
 };
 
 export const cmdRemember: CommandHandler = (args, context) => {
