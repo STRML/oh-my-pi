@@ -7,6 +7,7 @@ import { BankManager, ValueError } from "./core/banks";
 import { BeamMemory } from "./core/beam";
 import type { ImportStats, RecallResult } from "./core/beam/types";
 import { runDiagnostics } from "./diagnose";
+import { startEmbedServer } from "./embed-server";
 import { main as runMcpMain } from "./mcp-server";
 
 export interface CliIo {
@@ -170,6 +171,33 @@ export const cmdImport: CommandHandler = (args, context) => {
 
 export const cmdMcp: CommandHandler = async args => {
 	await runMcpMain(args);
+	return 0;
+};
+
+export const cmdEmbedServe: CommandHandler = async args => {
+	const flags = new Map<string, string>();
+	for (let i = 0; i < args.length; i += 2) {
+		const flag = args[i] ?? "";
+		const value = args[i + 1];
+		if (!["--port", "--host", "--model"].includes(flag) || value === undefined) {
+			usage("Usage: mnemopi embed-serve [--port N] [--host H] [--model NAME]");
+		}
+		flags.set(flag, value);
+	}
+	const portFlag = flags.get("--port");
+	const port = portFlag === undefined ? undefined : parseIntArg(portFlag, "--port");
+	const server = await startEmbedServer({
+		host: flags.get("--host"),
+		port,
+		model: flags.get("--model"),
+		preload: true,
+	});
+	err(undefined, `mnemopi embed-serve: ${server.model} at ${server.url}`);
+	await new Promise<void>(resolve => {
+		process.once("SIGINT", resolve);
+		process.once("SIGTERM", resolve);
+	});
+	await server.stop();
 	return 0;
 };
 
@@ -349,6 +377,7 @@ export const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	diagnose: cmdDiagnose,
 	doctor: cmdDiagnose,
 	mcp: cmdMcp,
+	"embed-serve": cmdEmbedServe,
 };
 
 export function printHelp(context?: CliContext): void {
@@ -367,6 +396,7 @@ export function printHelp(context?: CliContext): void {
 	out(context, "  diagnose                               Run diagnostics");
 	out(context, "  bank list|create|delete [name]         Manage memory banks");
 	out(context, "  mcp [args]                             Run MCP server");
+	out(context, "  embed-serve [--port N] [--host H]      Serve embeddings over HTTP (shared model)");
 }
 
 export async function runCli(args: readonly string[] = Bun.argv.slice(2), context?: CliContext): Promise<number> {
