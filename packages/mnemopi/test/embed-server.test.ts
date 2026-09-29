@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { type EmbedServer, startEmbedServer } from "@oh-my-pi/pi-mnemopi/embed-server";
 import { embed, resetEmbeddingProviderForTests } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import type { LocalEmbeddingModel, LocalModelInitializer } from "@oh-my-pi/pi-mnemopi/core/embeddings";
+import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import {
+	EMBED_SERVE_MAX_INPUT_CHARS,
+	EMBED_SERVE_MAX_INPUTS,
+	type EmbedServer,
+	startEmbedServer,
+} from "@oh-my-pi/pi-mnemopi/embed-server";
 
 const MODEL = "BAAI/bge-small-en-v1.5";
 
@@ -76,20 +82,58 @@ describe("mnemopi embed-serve", () => {
 
 	it("serves mnemopi's own API embedding client so processes can share one model", async () => {
 		server = await startEmbedServer({ port: 0, model: MODEL, initializer: fakeInitializer({ loads: 0 }) });
-		const saved = { url: Bun.env.MNEMOPI_EMBEDDING_API_URL, model: Bun.env.MNEMOPI_EMBEDDING_MODEL };
-		Bun.env.MNEMOPI_EMBEDDING_API_URL = server.url;
-		Bun.env.MNEMOPI_EMBEDDING_MODEL = MODEL;
-		try {
-			const vectors = await embed(["hello"]);
-			expect(vectors?.map(v => Array.from(v))).toEqual([[5, 2, 1]]);
-		} finally {
-			for (const [key, value] of [
-				["MNEMOPI_EMBEDDING_API_URL", saved.url],
-				["MNEMOPI_EMBEDDING_MODEL", saved.model],
-			] as const) {
-				if (value === undefined) delete Bun.env[key];
-				else Bun.env[key] = value;
-			}
+		// Async-local scope, not process env: the suite runs with `bun test --parallel`.
+		const vectors = await withMnemopiRuntimeOptions({ embeddings: { apiUrl: server.url, model: MODEL } }, () =>
+			embed(["hello"]),
+		);
+		expect(vectors?.map(v => Array.from(v))).toEqual([[5, 2, 1]]);
+	});
+
+	it("does not leave a listener running when the preload fails, so the port can be reused", async () => {
+		const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+		const port = probe.port;
+		await probe.stop(true);
+		const failing: LocalModelInitializer = async () => {
+			throw new Error("onnx exploded");
+		};
+		await expect(startEmbedServer({ port, preload: true, initializer: failing })).rejects.toThrow("onnx exploded");
+		server = await startEmbedServer({ port, initializer: fakeInitializer({ loads: 0 }) });
+		expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
+	});
+
+	it("answers JSON bodies that are not objects with a JSON 400 instead of a 500", async () => {
+		server = await startEmbedServer({ port: 0, initializer: fakeInitializer({ loads: 0 }) });
+		for (const body of [null, 42, "text", [1]]) {
+			const response = await post(body);
+			expect(response.status).toBe(400);
+			expect(response.headers.get("content-type")).toContain("application/json");
 		}
+	});
+
+	it("refuses requests a web page could send without a preflight, before any inference runs", async () => {
+		const counter = { loads: 0 };
+		server = await startEmbedServer({ port: 0, initializer: fakeInitializer(counter) });
+		const simple = await fetch(`${server.url}/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "text/plain" },
+			body: JSON.stringify({ input: "hello" }),
+		});
+		expect(simple.status).toBe(415);
+		const browser = await fetch(`${server.url}/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Origin: "https://untrusted.example" },
+			body: JSON.stringify({ input: "hello" }),
+		});
+		expect(browser.status).toBe(403);
+		expect(counter.loads).toBe(0);
+	});
+
+	it("rejects oversized requests with 413 instead of queueing the work", async () => {
+		const counter = { loads: 0 };
+		server = await startEmbedServer({ port: 0, initializer: fakeInitializer(counter) });
+		expect((await post({ input: Array.from({ length: EMBED_SERVE_MAX_INPUTS + 1 }, () => "x") })).status).toBe(413);
+		expect((await post({ input: "x".repeat(EMBED_SERVE_MAX_INPUT_CHARS + 1) })).status).toBe(413);
+		expect(counter.loads).toBe(0);
+		expect((await post({ input: "x".repeat(EMBED_SERVE_MAX_INPUT_CHARS) })).status).toBe(200);
 	});
 });
