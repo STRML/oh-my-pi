@@ -225,6 +225,9 @@ export class LoopGuards {
 		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
+			// A disabled guard owns no episode, so the compaction rung must not
+			// inherit a live history from before it was turned off.
+			this.#compactedThisEpisode = false;
 			return undefined;
 		}
 		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
@@ -235,6 +238,9 @@ export class LoopGuards {
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
 			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
+			// A rebuilt detector starts a fresh count, so any episode it was
+			// tracking is gone with it.
+			this.#compactedThisEpisode = false;
 		}
 		return this.#toolCallLoopGuard;
 	}
