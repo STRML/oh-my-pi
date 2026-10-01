@@ -308,12 +308,23 @@ export class SelectorController {
 						return this.ctx.statusLine.getTopBorder(availableWidth).content.split("\n")[0];
 					},
 					describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
-					onPluginsChanged: async () => {
+					onPluginsChanged: async change => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
 						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 						await this.ctx.refreshSkillState();
 						await this.ctx.refreshSlashCommandState();
 						resetCapabilities();
+						if (change && !change.enabled) {
+							// The plugin's interceptors stay bound here until this session
+							// restarts, so a silent "disabled" reads as a plugin ignoring
+							// its own config (issue #9722). A shadowed entry was never the
+							// install that loads the plugin, so say that instead.
+							this.ctx.showStatus(
+								change.stillEnabledBy
+									? `Disabled ${change.pluginName}. A ${change.stillEnabledBy} install still enables it.`
+									: `Disabled ${change.pluginName}. Running sessions keep it bound until restart.`,
+							);
+						}
 						this.ctx.ui.requestRender();
 					},
 					onCancel: () => {
