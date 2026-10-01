@@ -1362,7 +1362,6 @@ export class AgentSession implements SettingsScope {
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
-		this.#advisors.preserveQueuedAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -9233,23 +9232,22 @@ export class AgentSession implements SettingsScope {
 				if (this.#toolChoiceQueue.hasInFlight) {
 					this.#toolChoiceQueue.reject("aborted");
 				}
-				if (userInterrupt) {
-					// Reclaim advisor cards from every queue in the finally-safe path.
-					// Keep #abortInProgress set while preserving: if cleanup rejected
-					// before the agent reached idle, #preserveAdvisorCard parks the card
-					// for the next prompt instead of injecting it into a live stream.
-					const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
-					if (parkedAdvisorCards.length > 0) {
-						this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
-					}
-					const queuedAdvisorCards = [
-						...strandedAdvisorCards,
-						...this.#extractQueuedAdvisorCards(),
-						...this.#advisors.drainQueuedAdvice(),
-						...parkedAdvisorCards,
-					];
-					for (const card of queuedAdvisorCards) this.#preserveAdvisorCard(card);
+				// Reclaim advisor cards from every queue in the finally-safe path.
+				// Cards parked hidden while the turn was tearing down are reclaimed on
+				// every abort: internal aborts (plan mode, vibe teardown, subagent
+				// stop) park them too. Queued steer/follow-up cards and asides are only
+				// stranded by a user interrupt; otherwise the loop still consumes them.
+				// Keep #abortInProgress set while preserving: if cleanup rejected
+				// before the agent reached idle, #preserveAdvisorCard parks the card
+				// for the next prompt instead of injecting it into a live stream.
+				const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
+				if (parkedAdvisorCards.length > 0) {
+					this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
 				}
+				const queuedAdvisorCards = userInterrupt
+					? [...strandedAdvisorCards, ...this.#extractQueuedAdvisorCards(), ...this.#advisors.drainQueuedAdvice()]
+					: [];
+				for (const card of [...queuedAdvisorCards, ...parkedAdvisorCards]) this.#preserveAdvisorCard(card);
 			} finally {
 				this.#abortInProgress = false;
 				this.#drainStrandedQueuedMessages();

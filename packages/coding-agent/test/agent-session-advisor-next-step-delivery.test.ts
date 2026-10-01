@@ -64,20 +64,23 @@ describe("AgentSession advisor next-step delivery", () => {
 	});
 
 	/**
-	 * Single primary turn that answers with text. The advisor is enabled (its
-	 * yield-queue kind registered) but scripted to emit nothing, so the only
-	 * advisor traffic in a test is what the test itself enqueues.
+	 * Builds an AgentSession with the advisor role enabled and a scripted advisor
+	 * model. Only the primary model, its tools and the message converter differ
+	 * between scenarios.
 	 */
-	async function createCompletedAdvisorSession(): Promise<CompletedAdvisorHarness> {
+	async function buildAdvisorSession(options: {
+		mock: MockModel;
+		advisorMock: MockModel;
+		tools?: AgentTool<any>[];
+		/** Production wires the session converter at the agent boundary (sdk.ts). */
+		convertToLlm?: typeof convertToLlm;
+	}): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({
-			responses: [{ content: ["EXACT VERDICT"], stopReason: "stop" }],
-		});
-		const advisorMock = createMockModel({ handler: () => ({ content: [], stopReason: "stop" }) });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			streamFn: mock.stream,
+			initialState: { model, systemPrompt: ["Test"], tools: options.tools ?? [] },
+			streamFn: options.mock.stream,
+			convertToLlm: options.convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
@@ -92,9 +95,23 @@ describe("AgentSession advisor next-step delivery", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [],
-			advisorStreamFn: advisorMock.stream,
+			advisorStreamFn: options.advisorMock.stream,
 		});
-		return { session, sessionManager, mock, advisorMock };
+		return { session, sessionManager };
+	}
+
+	/**
+	 * Single primary turn that answers with text. The advisor is enabled (its
+	 * yield-queue kind registered) but scripted to emit nothing, so the only
+	 * advisor traffic in a test is what the test itself enqueues.
+	 */
+	async function createCompletedAdvisorSession(): Promise<CompletedAdvisorHarness> {
+		const mock = createMockModel({
+			responses: [{ content: ["EXACT VERDICT"], stopReason: "stop" }],
+		});
+		const advisorMock = createMockModel({ handler: () => ({ content: [], stopReason: "stop" }) });
+		const built = await buildAdvisorSession({ mock, advisorMock });
+		return { ...built, mock, advisorMock };
 	}
 
 	/**
@@ -105,7 +122,6 @@ describe("AgentSession advisor next-step delivery", () => {
 	 */
 	async function createParkedAdvisorSession(tailResponses: MockResponse[] = []): Promise<ParkedAdvisorHarness> {
 		const started = Promise.withResolvers<void>();
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			responses: [
 				() => {
@@ -116,27 +132,8 @@ describe("AgentSession advisor next-step delivery", () => {
 			],
 		});
 		const advisorMock = createMockModel({ handler: () => ({ content: [], stopReason: "stop" }) });
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			streamFn: mock.stream,
-		});
-		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
-		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorages.push(authStorage);
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-			advisorTools: [],
-			advisorStreamFn: advisorMock.stream,
-		});
-		return { session, sessionManager, mock, advisorMock, streamStarted: started.promise };
+		const built = await buildAdvisorSession({ mock, advisorMock });
+		return { ...built, mock, advisorMock, streamStarted: started.promise };
 	}
 
 	/**
@@ -157,7 +154,6 @@ describe("AgentSession advisor next-step delivery", () => {
 	}
 
 	async function createMidTurnConcernSession(): Promise<MidTurnConcernHarness> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const stepCall = (input: string): MockResponse => ({
 			content: [{ type: "toolCall", name: "fixture_step", arguments: { input } }],
 		});
@@ -201,30 +197,10 @@ describe("AgentSession advisor next-step delivery", () => {
 			},
 		};
 
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [fixtureStep] },
-			streamFn: mock.stream,
-			// Production wires the session converter at the agent boundary
-			// (sdk.ts); without it a bare test agent drops the custom advisor
-			// card from the provider request instead of folding it in.
-			convertToLlm,
-		});
-		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
-		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorages.push(authStorage);
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-			advisorTools: [],
-			advisorStreamFn: advisorMock.stream,
-		});
+		// Production wires the session converter at the agent boundary (sdk.ts);
+		// without it a bare test agent drops the custom advisor card from the
+		// provider request instead of folding it in.
+		const { session } = await buildAdvisorSession({ mock, advisorMock, tools: [fixtureStep], convertToLlm });
 		return {
 			session,
 			mock,
@@ -320,6 +296,38 @@ describe("AgentSession advisor next-step delivery", () => {
 		expect(persisted).toHaveLength(1);
 		expect(persisted[0]).toContain("cleanup rejection fixture note");
 		expect(harness.yieldQueue.has("advisor")).toBe(false);
+	});
+
+	it("reclaims an advisor card parked for the next turn on an internal abort, not only a user interrupt", async () => {
+		const { session: harness, sessionManager, streamStarted } = await createParkedAdvisorSession();
+		const persisted = capturePersistedAdvisorCards(sessionManager);
+		expect(harness.setAdvisorEnabled(true)).toBe(true);
+		const running = harness.prompt("do the thing");
+		await streamStarted;
+
+		// A note routed while the turn tears down is parked hidden for the next
+		// prompt; queue the same shape here, then abort with no reason (plan mode,
+		// vibe teardown, subagent stop and compress all abort without one).
+		await harness.sendCustomMessage(
+			{
+				customType: ADVISOR_TYPE,
+				content: "internal abort fixture note",
+				display: true,
+				attribution: "agent",
+				details: { notes: [{ note: "internal abort fixture note", severity: "nit" }] },
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		expect(harness.agent.state.messages.filter(isAdvisorCard)).toHaveLength(0);
+
+		await harness.abort();
+		await harness.waitForIdle();
+		await running.catch(() => {});
+
+		// The card is visible and persisted, not left hidden until the next prompt.
+		expect(harness.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]).toContain("internal abort fixture note");
 	});
 
 	it("delivers a mid-turn advisor concern to the primary at its next model step without aborting the running tool", async () => {
