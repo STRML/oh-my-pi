@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `model.toolCallLoopGuard.compactAfter` (off by default): once the tool-call loop guard's redirect is ignored, the session compacts and then stops the turn if the model still repeats the same tool call ([#13955](https://github.com/can1357/oh-my-pi/pull/13955) by [@STRML](https://github.com/STRML))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

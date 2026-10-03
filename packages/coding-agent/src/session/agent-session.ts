@@ -1754,7 +1754,7 @@ export class AgentSession implements SettingsScope {
 				this.#pendingRewindReport = undefined;
 				await this.#applyRewind(rewindReport, messages, context);
 			}
-			this.#loopGuards.recordTurn(messages, context);
+			await this.#loopGuards.recordTurn(messages, context, signal);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
@@ -1933,6 +1933,8 @@ export class AgentSession implements SettingsScope {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
+			compactForToolLoop: (messages, signal, context) =>
+				this.#maintenance.compactForToolLoop(messages, signal, context),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
