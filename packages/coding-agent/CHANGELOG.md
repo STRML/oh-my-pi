@@ -41,6 +41,16 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+### Added
+
+- `sharpshooter.enabled` runs Sharpshooter next to the selected memory backend, so a session can have searchable recall and always-on project decisions at once; `/memory clear` and `/memory sync` still reach only the selected backend ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+
+### Fixed
+
+- Sharpshooter consolidation no longer drops decisions when the model returns only some of the memory files: an incomplete reply is refused and its queued deltas are kept for the next cycle, instead of being consumed while the files they were meant for went unchanged ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- Memory search after `/move` now answers for the project the session moved to. The runtime context captured its cwd at session creation, so Sharpshooter, which keys its decision bank on cwd, could surface the source project's decisions and keep consolidating it ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- A `/move` landing while a source-prompt extraction is in flight no longer drops the first destination prompt: the dropped prompt is stashed and extracted once the in-flight source extraction clears ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
+- `/move` no longer re-extracts the prompt the session typed in the project it left. Sharpshooter catches up on a transcript that already ends in a user prompt, which is right at startup and wrong on a cwd move: an interrupted or failed turn left that prompt trailing, and the catch-up filed it as a decision about the destination ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML)).
 
 ## [18.5.1] - 2026-10-03
 
