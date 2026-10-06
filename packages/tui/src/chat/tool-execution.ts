@@ -19,7 +19,6 @@ import {
 	type ToolRenderer,
 	toolRenderers,
 } from "../tools/index";
-import { BASH_DEFAULT_PREVIEW_LINES } from "../tools/bash";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
 import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
@@ -36,7 +35,6 @@ import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache } from "../native/blobs";
 import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
-import { EVAL_DEFAULT_PREVIEW_LINES } from "../tools/eval";
 import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
 import { isNativeRendering } from "../native/state";
@@ -97,6 +95,11 @@ function displaceableToolName(
 
 function isEditLikeToolName(toolName: string): boolean {
 	return toolName === "edit" || toolName === "apply_patch";
+}
+
+/** Tools whose arguments stream a growing file body or diff into the card (edit, apply_patch, write). */
+function streamsBody(toolName: string): boolean {
+	return isEditLikeToolName(toolName) || toolName === "write";
 }
 
 function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): EditMode | undefined {
@@ -654,7 +657,7 @@ export class ToolExecutionComponent extends Container {
 		// them. Todo snapshots and detached background tool progress are deliberate
 		// static exceptions because their rows can be superseded or committed to
 		// scrollback while later updates continue elsewhere.
-		const isStreamingArgs = !this.#argsComplete && (isEditLikeToolName(this.#toolName) || this.#toolName === "write");
+		const isStreamingArgs = !this.#argsComplete && streamsBody(this.#toolName);
 		const isBackgroundAsyncRunning =
 			(this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
 		const renderer = this.#renderer;
@@ -936,6 +939,17 @@ export class ToolExecutionComponent extends Container {
 		return Math.max(0, Math.round((ended ?? performance.now()) - started));
 	}
 
+	/**
+	 * The native `collapsed` prop: the transcript's expand state, except that a
+	 * call streaming its body (edit, write) stays open until it settles, then
+	 * folds like a finished thought. The user's own toggle still wins meanwhile:
+	 * the terminal keeps local collapse state until this prop changes.
+	 */
+	#nativeCollapsed(status: TspCardStatus): boolean {
+		const live = status === "pending" || status === "running";
+		return !this.#expanded && !(live && streamsBody(this.#toolName));
+	}
+
 	/** The late diagnostics section and head chip, when LSP reported after the result. */
 	#lateDiagnosticsParts(): { section?: NativeNode; chip?: { text: string; tone: TspTone } } {
 		const files = this.#lateDiagnostics;
@@ -994,7 +1008,7 @@ export class ToolExecutionComponent extends Container {
 				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
 				frame: inline ? "inline" : "card",
 				collapsible: hasBody,
-				collapsed: hasBody ? !this.#expanded : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
 				preview: hasBody ? (preview === "auto" ? { lines: DEFAULT_TERMINAL_PREVIEW_LINES } : preview) : undefined,
 				tools: view.tools,
 				tone: view.tone,
@@ -1062,7 +1076,7 @@ export class ToolExecutionComponent extends Container {
 				tone: view.tone ?? NATIVE_STATUS_TONE[status],
 				status,
 				collapsible: hasBody,
-				collapsed: hasBody ? !this.#expanded : undefined,
+				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
 				preview: hasBody ? cardPreview(view.preview) : undefined,
 			},
 			children,
@@ -1625,7 +1639,12 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `te${this.#instanceId}:${i}`,
+							requestRender: () => this.#ui.requestRender(),
+						},
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);
@@ -1672,13 +1691,13 @@ export class ToolExecutionComponent extends Container {
 				context.output = output;
 			}
 			context.expanded = this.#expanded;
-			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
 			context.expanded = this.#expanded;
-			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

@@ -4,6 +4,7 @@ import { buildPathTree, isUrlLikePath, type PathTreeInput, walkPathTree } from "
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, col, keyed, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
+import { formatHashlineHeader } from "./hashline-format";
 import { fileRow } from "./native-view";
 
 // =============================================================================
@@ -87,6 +88,51 @@ export function formatGroupedFiles(
 		display.push(header, ...(section.displayLines ?? section.modelLines));
 	}
 
+	return { model, display };
+}
+
+/** One file's rendered search matches, plus its hashline tag when editable. */
+export interface FileMatchSection {
+	model: string[];
+	display: string[];
+	tag?: string;
+}
+
+/**
+ * Render per-file search matches (grep / ast-grep). Grouped mode nests files
+ * via {@link formatGroupedFiles}, appending `#tag` to headers; flat mode
+ * blank-separates files and prefixes each with a hashline header when tagged.
+ * Files with no model lines are omitted.
+ */
+export function formatFileMatches(
+	files: string[],
+	grouped: boolean,
+	renderFile: (filePath: string) => FileMatchSection,
+): GroupedFilesOutput {
+	if (grouped) {
+		return formatGroupedFiles(files, filePath => {
+			const rendered = renderFile(filePath);
+			return {
+				modelLines: rendered.model,
+				displayLines: rendered.display,
+				headerSuffix: rendered.tag ? `#${rendered.tag}` : "",
+				skip: rendered.model.length === 0,
+			};
+		});
+	}
+	const model: string[] = [];
+	const display: string[] = [];
+	for (const filePath of files) {
+		const rendered = renderFile(filePath);
+		if (rendered.model.length === 0) continue;
+		if (model.length > 0) {
+			model.push("");
+			display.push("");
+		}
+		if (rendered.tag) model.push(formatHashlineHeader(filePath, rendered.tag));
+		model.push(...rendered.model);
+		display.push(...rendered.display);
+	}
 	return { model, display };
 }
 
@@ -254,6 +300,8 @@ export function* walkGroupedOutput(lines: readonly string[]): Generator<GroupedO
 
 /** `*12│text`, ` 12|text`, `*12:text`: optional match marker, line number, gutter, content. */
 const GROUPED_NUMBERED_LINE_RE = /^\s*(\*?)(\d+)(?:│|[:|])(.*)$/;
+/** `    │...`: grep's gap between non-adjacent context runs (drawn as {@link numberedCode}'s `…` row). */
+const GROUPED_GAP_LINE_RE = /^\s*│\.\.\.$/;
 
 /** One source line for {@link numberedCode}: its number (`null` for an elision marker), text and match mark. */
 export interface NumberedLine {
@@ -352,6 +400,10 @@ export function describeGroupedOutput(
 			flushFile();
 			if (options.maxFiles !== undefined && files.length >= options.maxFiles) break;
 			if (event.kind === "file") current = { path: event.path, suffix: event.suffix, children: [], marks: 0 };
+			continue;
+		}
+		if (GROUPED_GAP_LINE_RE.test(event.text)) {
+			numbered.push({ n: null, text: "" });
 			continue;
 		}
 		const match = GROUPED_NUMBERED_LINE_RE.exec(event.text);

@@ -456,6 +456,7 @@ export class AssistantMessageComponent extends Container {
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
+	#expandThinkingBlocks: boolean;
 
 	constructor(
 		message?: AssistantMessage,
@@ -465,6 +466,7 @@ export class AssistantMessageComponent extends Container {
 		imageBudget?: ImageBudget,
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
+		expandThinkingBlocks = false,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -472,6 +474,7 @@ export class AssistantMessageComponent extends Container {
 		this.#thinkingRenderers = thinkingRenderers;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
+		this.#expandThinkingBlocks = expandThinkingBlocks;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -558,6 +561,16 @@ export class AssistantMessageComponent extends Container {
 
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.#proseOnlyThinking = proseOnly;
+	}
+
+	/**
+	 * Keep finished thinking sections expanded instead of folding them to "Thought for 12s".
+	 * Sections the user folded or unfolded by hand keep that choice.
+	 */
+	setExpandThinkingBlocks(expand: boolean): void {
+		if (this.#expandThinkingBlocks === expand) return;
+		this.#expandThinkingBlocks = expand;
+		this.#nativeViewVersion++;
 	}
 
 	override dispose(): void {
@@ -710,9 +723,10 @@ export class AssistantMessageComponent extends Container {
 	 * A `col` (role `omp.assistant`) of `md` nodes keyed by content index, so
 	 * streamed deltas reach the terminal as `text append` on the same node;
 	 * the tail block carries `stream: true` until the message finalizes.
-	 * Thinking blocks are quiet collapsible `section`s (collapsed per
-	 * `hideThinkingBlock`): a muted "Thinking…" shimmer while live, then
-	 * "Thought for 12s"; tokens and rate ride in the head's `title`.
+	 * Thinking blocks are quiet collapsible `section`s: a muted "Thinking…"
+	 * shimmer while live, then "Thought for 12s"; tokens and rate ride in the
+	 * head's `title`. With `hideThinkingBlock` only the live head shows (collapsed)
+	 * and a finished thought emits nothing.
 	 */
 	override describe(): NativeNode {
 		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
@@ -804,6 +818,8 @@ export class AssistantMessageComponent extends Container {
 					} else if (clock && clock.end === undefined) {
 						clock.end = performance.now();
 					}
+					// Hidden (Ctrl+T): only the live "Thinking…" head shows; a finished thought leaves nothing.
+					if (this.#hideThinkingBlock && !thinkingLive) continue;
 					const tokens = thinkingLive ? this.#thinkingTokens : (clock?.tokens ?? 0);
 					const title = tokens > 0 ? `${formatNumber(tokens)} tokens` : undefined;
 					// Live: starburst · "Thinking…" · ticking timer · tok/s. Done: "Thought for 12s".
@@ -826,15 +842,12 @@ export class AssistantMessageComponent extends Container {
 							"section",
 							{
 								// `.live` while streaming: the body clamps to its tail under a fade.
-								// `.ghost` while thinking is hidden (Ctrl+T): only a faint "Thought for 12s" stays.
-								role: thinkingLive
-									? "omp.thinking.live"
-									: this.#hideThinkingBlock
-										? "omp.thinking.ghost"
-										: "omp.thinking",
+								role: thinkingLive ? "omp.thinking.live" : "omp.thinking",
 								collapsible: true,
-								// Open while it streams; a finished thought folds to its "Thought for 12s" line.
-								collapsed: this.#thinkingCollapsed.get(index) ?? (this.#hideThinkingBlock || !thinkingLive),
+								// Open while it streams; a finished thought folds to its "Thought for 12s" line unless the user keeps thinking expanded.
+								collapsed:
+									this.#thinkingCollapsed.get(index) ??
+									(this.#hideThinkingBlock || (!thinkingLive && !this.#expandThinkingBlocks)),
 								// Tern's fold head sums it into "Worked for 12s".
 								took: clock?.end === undefined ? undefined : Math.max(0, Math.round(clock.end - clock.start)),
 							},
@@ -890,8 +903,8 @@ export class AssistantMessageComponent extends Container {
 	 * Turn-ending error, recovered-retry note or abort label. A failed request
 	 * is one error frame (head: "Request failed" + the HTTP status chip; body:
 	 * the message once; then Retry / Copy error / Switch model), and stays in
-	 * the transcript: the pinned banner is ANSI-only. A recovered attempt is an
-	 * inline row that discloses the original error.
+	 * the transcript: unlike ANSI, the pinned banner does not hide it natively.
+	 * A recovered attempt is an inline row that discloses the original error.
 	 */
 	#describeError(message: AssistantMessage): NativeNode | undefined {
 		const presentation = resolveAssistantErrorPresentation(message);
@@ -1375,7 +1388,12 @@ export class AssistantMessageComponent extends Container {
 						displayImage.data,
 						displayImage.mimeType,
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-						{ ...resolveImageOptions(), budget: this.#imageBudget, imageKey: key },
+						{
+							...resolveImageOptions(),
+							budget: this.#imageBudget,
+							imageKey: key,
+							requestRender: this.#onImageUpdate,
+						},
 					),
 				);
 				continue;
@@ -1417,7 +1435,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}|etb:${this.#expandThinkingBlocks ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");

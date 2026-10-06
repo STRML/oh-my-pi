@@ -43,7 +43,7 @@ import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, probeLiteralPathExists } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
@@ -341,7 +341,8 @@ function emitWriteProgress(
  * Mirrors `chmod a+x` (adds user/group/other execute bits to existing mode).
  * Errors are swallowed: chmod failure (e.g. Windows ACL, read-only mount)
  * MUST NOT fail an otherwise successful write. Returns whether the mode
- * actually changed so the caller can surface a note.
+ * actually changed so the caller can surface a note — re-read after the chmod,
+ * since Windows (and some mounts) accept it while keeping no execute bits.
  */
 async function maybeMarkExecutableForShebang(absolutePath: string, content: string): Promise<boolean> {
 	if (!content.startsWith("#!")) return false;
@@ -351,7 +352,7 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 		const newMode = currentMode | 0o111;
 		if (newMode === currentMode) return false;
 		await fs.chmod(absolutePath, newMode);
-		return true;
+		return ((await fs.stat(absolutePath)).mode & 0o111) === 0o111;
 	} catch {
 		return false;
 	}
@@ -629,6 +630,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (stat.isDirectory()) {
 					continue;
 				}
+				const kind = specialFileKind(stat);
+				if (kind) {
+					throw new ToolError(
+						`Cannot write '${candidate.sqlitePath}': it is a ${kind}, not a regular file or directory.`,
+					);
+				}
 				if (!(await isSqliteFile(absolutePath))) {
 					sawExistingNonSqlite = true;
 					continue;
@@ -760,15 +767,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			throw new ToolError(`content is required for ${path}.`);
 		}
 		const content = rawContent ?? "";
+		// Coordination writes (peer messages, background-work cancellation) touch no
+		// files, so neither gate below applies to them.
+		const coordination =
+			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches and coordination messages proceed, every
+		// createTools): device dispatches and coordination writes proceed, every
 		// other target is rejected before any handler, guard, conflict resolver, or
 		// bridge sees it. Active plan mode additionally permits its sandbox, but does
 		// not relax the restriction for working-tree or other internal URLs.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
-			policy?.scope !== "coordination" &&
+			!coordination &&
 			!(
 				this.session.getPlanModeState?.()?.enabled === true &&
 				(await targetsLocalSandbox(this.session, path, signal))
@@ -795,11 +806,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
-					// Handler-owned writes mutate state outside the sandbox unless the
-					// scheme is coordination (peer messages) or a device (which keeps each
-					// dispatched tool's own tier and policy).
+					// Handler-owned writes mutate state outside the sandbox unless they
+					// coordinate (peer messages, background-work cancellation) or dispatch a
+					// device (which keeps each dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
-						if (policy?.scope !== "coordination") {
+						if (!coordination) {
 							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanContent, path);
@@ -890,6 +901,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const existing = await fs.stat(absolutePath).catch(() => undefined);
 			if (target && existing?.isDirectory()) {
 				throw new ToolError(`${target.url.protocol}// URL must resolve to a file: ${path}`);
+			}
+			const kind = existing && specialFileKind(existing);
+			if (kind) {
+				throw new ToolError(`Cannot write '${path}': it is a ${kind}, not a regular file or directory.`);
 			}
 			// Check if file exists and is auto-generated before overwriting.
 			if (existing) {

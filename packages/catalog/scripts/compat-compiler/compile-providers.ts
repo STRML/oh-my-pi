@@ -28,6 +28,7 @@ import {
 	type Api,
 	type KindApiKind,
 	type KnownApi,
+	runnerApiKind,
 	type TokenCost,
 } from "../../src/types";
 import { axisFor, collectAxis, type RuleAxes } from "./compile-axes";
@@ -59,12 +60,13 @@ const KNOWN_APIS = [
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
+	"factory-droid-agent",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;
 true satisfies _MissingKnownApis extends never ? true : ["KNOWN_APIS is missing KnownApi values", _MissingKnownApis];
 
-const BUNDLE_POLICIES = ["always", "fallback", "empty"] as const satisfies readonly SeedBundlePolicy[];
+const BUNDLE_POLICIES = ["always", "fallback", "empty", "never"] as const satisfies readonly SeedBundlePolicy[];
 const DEFAULT_BUNDLE: SeedBundlePolicy = "always";
 const SEED_PROPS = ["api", "base-url", "bundle", "precedence"] as const;
 const MODEL_PROPS = ["name", "api", "base-url"] as const;
@@ -302,7 +304,18 @@ function parseKindApis(node: KdlNodeView): Partial<Record<KindApiKind, Api>> {
 		if (kindApis[kind] !== undefined) malformed(child);
 		validateProps(child, []);
 		if (child.children) malformed(child);
-		kindApis[kind] = validateApi(child, requiredName(child));
+		const api = validateApi(child, requiredName(child));
+		// A runner API serves one kind; chat APIs (hosted image generation) and
+		// multi-kind `local-inference` may back any kind.
+		const apiKind = runnerApiKind(api);
+		if (apiKind !== undefined && apiKind !== kind) {
+			throw new CompatCompileError(
+				child.file,
+				child.line,
+				`kind-apis \`${kind}\` names api \`${api}\`, which serves kind \`${apiKind}\``,
+			);
+		}
+		kindApis[kind] = api;
 	}
 	return kindApis;
 }

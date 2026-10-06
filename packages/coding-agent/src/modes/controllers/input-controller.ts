@@ -72,6 +72,7 @@ import { resizeImage } from "../../utils/image-resize";
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
+	cfgBareSlashCommands,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -185,13 +186,15 @@ function looksLikePastedShellPrompt(code: string): boolean {
 	);
 }
 
+/**
+ * Length of the `$`/`$$` Python sigil, or 0 when the draft is not Python. The sigil
+ * counts only once whitespace follows it: a bare `$` may still become prose such as
+ * `$HOME` (#2944), so claiming Python mode before the next key would flip back.
+ */
 function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
-	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
-
 	const prefixLength = trimmedText.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
 	const next = trimmedText.charCodeAt(prefixLength);
-	if (Number.isNaN(next)) return prefixLength;
 	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
 }
 
@@ -293,6 +296,11 @@ export class InputController {
 	// Visible-chip signature from the last editor change; a difference escapes the
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
+	// Bare command word held for a confirming second Enter (`input.bareSlashCommands`
+	// outside an empty session), bound to the session it was armed in. Any other
+	// submission disarms it; a session switch invalidates it, so a word armed in
+	// one session can never run on a single Enter in another.
+	#armedBareCommand: { text: string; sessionId: string } | undefined;
 	/** Main-editor destination: images become pending attachments. */
 	readonly #editorImageSink: ImagePasteSink = {
 		attach: (image, unsupportedMessage, sourcePath) =>
@@ -481,6 +489,9 @@ export class InputController {
 				return;
 			}
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
+				return;
+			}
+			if (this.ctx.dismissCommandReport()) {
 				return;
 			}
 
@@ -676,8 +687,8 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
 		}
-		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and starts STT on hold start / stops it on release.
+		// Push-to-talk uses its own binding, separate from the STT toggle.
+		this.ctx.editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
 		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
@@ -707,6 +718,8 @@ export class InputController {
 				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
 			}
 		};
+		// The native composer's viewing header: an ancestor crumb, or back to main.
+		this.ctx.editor.onFocusAgent = id => this.#focusResolvedAgent(id);
 
 		this.#setupEnhancedPaste();
 
@@ -928,12 +941,16 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			const submittedText = text;
+			const armed = this.#armedBareCommand;
+			this.#armedBareCommand = undefined;
+			const armedBareCommand =
+				armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (continue shortcuts, slash/bash/python, loop,
+			// Everything below (slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
 				await this.#submitToFocusedSession(text, "steer");
@@ -958,7 +975,9 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
-			if (text === "." || text === "c") {
+			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
+			// so it is sent as a normal reply there.
+			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({
@@ -1021,25 +1040,16 @@ export class InputController {
 				return;
 			}
 
-			// Bare `exit`/`quit`/`q` on a session with no messages: nobody opens a
-			// fresh session to send that word to the model, so route it to the
-			// slash command (collab-guest gating applies there unchanged). The whole
-			// submitted input must be the word, case-insensitive — no surrounding
-			// whitespace, extra text, or extension rewrite. A first prompt still in
-			// flight (pending submission, preflight, or streaming) has not reached
-			// `messages` yet, so it must not count as an empty session.
-			const bareExitWord = text.toLowerCase();
-			if (
-				text === submittedText &&
-				Object.hasOwn(BARE_EXIT_WORDS, bareExitWord) &&
-				!hasInputImages &&
-				!this.ctx.session.isStreaming &&
-				this.ctx.locallySubmittedUserSignatures.size === 0 &&
-				this.ctx.session.messages.length === 0 &&
-				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
-			) {
-				text = `/${bareExitWord}`;
+			const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
+			if (bareSlashCommand?.confirm) {
+				this.#armedBareCommand = { text, sessionId: this.ctx.sessionManager.getSessionId() };
+				this.ctx.editor.setText(text);
+				this.ctx.showStatus(
+					`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,
+				);
+				return;
 			}
+			if (bareSlashCommand) text = bareSlashCommand.command;
 
 			// Handle built-in slash commands
 			if (text) {
@@ -1337,6 +1347,65 @@ export class InputController {
 	}
 
 	/**
+	 * Map a bare command word (no leading `/`) to its slash form, or return
+	 * `undefined` to leave the submission as a prompt. The whole submitted input
+	 * must be the word — no surrounding whitespace, arguments, attachments, or
+	 * extension rewrite — so ordinary prose never changes meaning.
+	 *
+	 * An "empty session" has no messages and nothing in flight: a first prompt
+	 * still pending, in preflight, or streaming has not reached `messages` yet.
+	 *
+	 * - `input.bareExitOnEmptySession` (default on): `exit`/`quit`/`q` in any
+	 *   case run immediately in an empty session. Nobody opens a fresh session
+	 *   to send that word to the model.
+	 * - `input.bareSlashCommands` (opt-in): any known command name or alias
+	 *   (exact spelling first, then case-folded), in any session state. Once a
+	 *   conversation exists the word may be a genuine reply, so the first Enter
+	 *   returns `confirm` and only a repeat of the same word (`armed`) runs it.
+	 *
+	 * Collab-guest gating applies unchanged in the slash dispatch that follows.
+	 */
+	#resolveBareSlashCommand(
+		text: string,
+		submittedText: string,
+		hasImages: boolean,
+		armed: string | undefined,
+	): { command: string; confirm: boolean } | undefined {
+		if (text !== submittedText || hasImages || !text || text.startsWith("/") || /\s/.test(text)) return undefined;
+		const emptySession =
+			!this.ctx.session.isStreaming &&
+			this.ctx.locallySubmittedUserSignatures.size === 0 &&
+			this.ctx.session.messages.length === 0;
+		const folded = text.toLowerCase();
+		if (
+			emptySession &&
+			Object.hasOwn(BARE_EXIT_WORDS, folded) &&
+			(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
+		) {
+			return { command: `/${folded}`, confirm: false };
+		}
+		if (!isSettingsInitialized() || !cfgBareSlashCommands.get(settings)) return undefined;
+		for (const token of folded === text ? [text] : [text, folded]) {
+			if (lookupBuiltinSlashCommand(token) || this.#isKnownNonBuiltinSlashCommandToken(token)) {
+				return { command: `/${token}`, confirm: !emptySession && armed !== text };
+			}
+		}
+		return undefined;
+	}
+
+	/** Whether `token` names a skill, file, extension, custom, or prompt-template command. */
+	#isKnownNonBuiltinSlashCommandToken(token: string): boolean {
+		const session = this.ctx.session;
+		return (
+			this.ctx.skillCommands.has(token) ||
+			this.ctx.fileSlashCommands.has(token) ||
+			session.extensionRunner?.getCommand(token) !== undefined ||
+			session.customCommands.some(loaded => loaded.command.name === token) ||
+			session.promptTemplates.some(template => template.name === token)
+		);
+	}
+
+	/**
 	 * Kick off session-title generation after the optimistic user row paints.
 	 * Local extension commands are consumed before reaching the shared session
 	 * title gate and must not name the conversation.
@@ -1358,7 +1427,7 @@ export class InputController {
 		this.ctx.session.maybeStartTitleGeneration(text);
 	}
 
-	/** Submit editor text to the focused subagent session (chat-only focus policy). */
+	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
@@ -1391,12 +1460,18 @@ export class InputController {
 			);
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
+		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
 		this.ctx.editor.clearDraft(text);
 		try {
-			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			// Synthetic directives must not use streamingBehavior: AgentSession would
+			// otherwise queue them as visible user messages while the target is busy.
+			if (isContinueShortcut) {
+				await target.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true });
+			} else {
+				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
+					imageCount: images?.length ?? 0,
+				});
+			}
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
@@ -1558,14 +1633,14 @@ export class InputController {
 	}
 
 	/**
-	 * Pop the single most-recently-queued restorable message for the Alt+Up
-	 * dequeue key. Prefers the agent queues (steering, then follow-up) via the
-	 * session API that steps over hidden companions; falls back to the compaction
-	 * queue for messages typed while compacting, which live outside those queues.
+	 * Pop the last restorable message from the viewed session's agent queues.
+	 * Only the main session owns the separate compaction queue; focused views
+	 * must not restore its messages into a subagent's composer.
 	 */
 	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
-		const fromQueue = this.ctx.session.popLastQueuedMessage();
+		const fromQueue = this.ctx.viewSession.popLastQueuedMessage();
 		if (fromQueue) return fromQueue;
+		if (this.ctx.focusedAgentId) return undefined;
 		const compaction = this.ctx.compactionQueuedMessages;
 		if (compaction.length === 0) return undefined;
 		const last = compaction[compaction.length - 1];
@@ -1672,6 +1747,14 @@ export class InputController {
 			detachedText?: string;
 		},
 	): Promise<void> {
+		// Queue shorthand reaches this helper before the normal guest input gate.
+		// Like /queue, it must not submit to the guest's local session.
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/queue is host-only during a collab session");
+			this.ctx.editor.setText(options.detachedText ?? options.historyText ?? text);
+			return;
+		}
+
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.ctx.editor.clearDraft();
@@ -2325,7 +2408,7 @@ export class InputController {
 			// No usable image-file URL (pure bitmap pasteboard: screenshots,
 			// browser copies, or a non-image Finder selection). Fall to the
 			// image representation. The text bridge starts alongside the image
-			// bridge: on Windows each is a cold powershell.exe spawn (~100ms+),
+			// bridge: either can shell out (WSL's powershell.exe, wl-paste, xclip),
 			// so serial awaits stall an empty clipboard by their sum before
 			// "Clipboard is empty" can surface. Image precedence is preserved —
 			// a resolved text payload is discarded unused when an image is present.
@@ -2516,14 +2599,7 @@ export class InputController {
 		if (!text.startsWith("/")) return;
 		const token = text.slice(1).split(/\s+/, 1)[0] ?? "";
 		if (!token) return;
-		const session = this.ctx.session;
-		const knownToken =
-			this.ctx.skillCommands.has(token) ||
-			this.ctx.fileSlashCommands.has(token) ||
-			session.extensionRunner?.getCommand(token) !== undefined ||
-			session.customCommands.some(loaded => loaded.command.name === token) ||
-			session.promptTemplates.some(template => template.name === token);
-		if (knownToken) {
+		if (this.#isKnownNonBuiltinSlashCommandToken(token)) {
 			commandUsage.record(token);
 			return;
 		}
@@ -2539,7 +2615,7 @@ export class InputController {
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings),
+				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
 			}),
