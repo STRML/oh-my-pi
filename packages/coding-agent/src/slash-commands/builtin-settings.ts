@@ -17,7 +17,14 @@ import {
 	cfgTtsrRepeatGap,
 	cfgTtsrRepeatMode,
 } from "../export/ttsr-settings";
-import { cfgDisabledExtensions, cfgExtensions } from "../extensibility/settings";
+import {
+	cfgCommandsEnableClaudeProject,
+	cfgCommandsEnableClaudeUser,
+	cfgCommandsEnableOpencodeProject,
+	cfgCommandsEnableOpencodeUser,
+	cfgDisabledExtensions,
+	cfgExtensions,
+} from "../extensibility/settings";
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnWrite,
@@ -54,6 +61,13 @@ function optionalNumber(raw: unknown): number | undefined {
 	const num = typeof raw === "number" ? raw : Number(raw);
 	return num >= 0 ? num : undefined;
 }
+
+const COMMAND_PROVIDER_TOGGLES = [
+	cfgCommandsEnableClaudeUser,
+	cfgCommandsEnableClaudeProject,
+	cfgCommandsEnableOpencodeUser,
+	cfgCommandsEnableOpencodeProject,
+];
 
 /**
  * Settings consumed only while the base system prompt is being rebuilt: their
@@ -205,6 +219,7 @@ export const BUILTIN_SETTINGS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = 
 			// reloadPlugins to a plugin-only pipeline that never touches MCP, so
 			// there the trigger is a no-op and the flag still needs a restart.
 			if (
+				COMMAND_PROVIDER_TOGGLES.some(setting => before.get(setting) !== setting.get(runtime.settings)) ||
 				!Bun.deepEquals(before.get(cfgExtensions), cfgExtensions.get(runtime.settings)) ||
 				!Bun.deepEquals(before.get(cfgDisabledExtensions), cfgDisabledExtensions.get(runtime.settings)) ||
 				!Bun.deepEquals(before.get(cfgMcpEnableProjectConfig), cfgMcpEnableProjectConfig.get(runtime.settings))
