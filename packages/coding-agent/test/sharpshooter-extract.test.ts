@@ -479,6 +479,54 @@ describe("maybeStartSharpshooterExtraction", () => {
 		expect(await listSharpshooterDeltas(agentDir, destination)).toHaveLength(0);
 	});
 
+	it("keeps queued prompts through an outer release that a restart follows", async () => {
+		// A full memory apply releases the session before it starts the new leg, so
+		// the restart cannot take a queue the release already cleared.
+		using temp = TempDir.createSync("@sharpshooter-keep-pending-");
+		const source = path.join(temp.path(), "source");
+		const agentDir = path.join(temp.path(), "agent");
+		const keptPrompt = "Keep the cyan status indicator on the source dashboard.";
+		const messages = [
+			message("user", [{ type: "text", text: "Keep this product behavior stable across every release." }]),
+		];
+		const deps = extractionDependencies(source, messages);
+		await writeSharpshooterState(agentDir, source, { v: 1, lastConsolidatedAt: Date.now() });
+
+		const pendingFirst = Promise.withResolvers<AssistantMessage>();
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1
+					? pendingFirst.promise
+					: Promise.resolve(assistantResponse([{ type: "text", text: "No tool call." }])),
+			);
+
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+		await waitFor(() => completion.mock.calls.length === 1, "first completion was not called");
+		const keptMessage = message("user", [{ type: "text", text: keptPrompt }]);
+		messages.push(keptMessage);
+		maybeStartSharpshooterExtraction({
+			agentDir,
+			message: keptMessage,
+			modelRegistry: deps.modelRegistry,
+			session: deps.session,
+			settings: deps.settings,
+		});
+
+		releaseSharpshooterSession(deps.session, { keepPending: true });
+		installPairedSharpshooter(deps, agentDir, "rebind");
+
+		pendingFirst.resolve(assistantResponse([{ type: "text", text: "No tool call." }]));
+		await waitFor(() => completion.mock.calls.length === 2, "the kept prompt was not extracted");
+		expect(JSON.stringify(completion.mock.calls[1])).toContain(keptPrompt);
+		releaseSharpshooterSession(deps.session);
+	});
+
 	it("still drops queued prompts when pairing is disabled", async () => {
 		using temp = TempDir.createSync("@sharpshooter-carry-disabled-");
 		const cwd = path.join(temp.path(), "project");
