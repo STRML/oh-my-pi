@@ -53,7 +53,9 @@ for (const addonArg of addons) {
 		if (!actual.has(name)) missing.push(`${path.basename(addonPath)}: ${name}`);
 	}
 	for (const name of actual) {
-		if (!expected.has(name)) extras.push(name);
+		// Every addon exports its own `__piNativesV*` sentinel, which `expected` skips
+		// above, so it would always land here and print a false extras note.
+		if (!expected.has(name) && !name.startsWith("__piNatives")) extras.push(name);
 	}
 }
 if (extras.length > 0) {
