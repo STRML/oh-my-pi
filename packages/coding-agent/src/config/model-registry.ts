@@ -298,6 +298,13 @@ interface LastGoodConfigOverrides {
 	modelOverrides: Map<string, Map<string, ModelOverride>>;
 	keylessProviders: Set<string>;
 	discoverableProviders: DiscoveryProviderConfig[];
+	/** `!cmd` header/key configs per provider, so a 401 retry can still invalidate them after a failed parse. */
+	commandConfigsByProvider: Map<string, Set<string>>;
+}
+
+/** Deep copy of the per-provider command-config index (the value Sets are mutated in place). */
+function cloneCommandConfigs(source: ReadonlyMap<string, ReadonlySet<string>>): Map<string, Set<string>> {
+	return new Map([...source].map(([provider, configs]) => [provider, new Set(configs)]));
 }
 
 /** Authentication material returned to legacy extensions for one model request. */
@@ -970,6 +977,7 @@ export class ModelRegistry {
 			modelOverrides: new Map(this.#modelOverrides),
 			keylessProviders: new Set(this.#keylessProviders),
 			discoverableProviders: [...this.#discoverableProviders],
+			commandConfigsByProvider: cloneCommandConfigs(this.#commandConfigsByProvider),
 		};
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
@@ -1067,6 +1075,8 @@ export class ModelRegistry {
 			modelOverrides: options?.lastGoodOverrides?.modelOverrides ?? new Map(this.#modelOverrides),
 			keylessProviders: options?.lastGoodOverrides?.keylessProviders ?? new Set(this.#keylessProviders),
 			discoverableProviders: options?.lastGoodOverrides?.discoverableProviders ?? this.#discoverableProviders,
+			commandConfigsByProvider:
+				options?.lastGoodOverrides?.commandConfigsByProvider ?? cloneCommandConfigs(this.#commandConfigsByProvider),
 		};
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
@@ -1090,6 +1100,7 @@ export class ModelRegistry {
 			this.#modelOverrides = lastGood.modelOverrides;
 			this.#keylessProviders = lastGood.keylessProviders;
 			this.#discoverableProviders = lastGood.discoverableProviders;
+			this.#commandConfigsByProvider = lastGood.commandConfigsByProvider;
 			for (const [provider, keyConfig] of options?.lastGoodConfigApiKeys ?? []) {
 				this.#installProviderApiKey(provider, keyConfig);
 			}

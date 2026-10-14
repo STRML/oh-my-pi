@@ -1023,6 +1023,17 @@ describe("/reload-settings slash command", () => {
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("Applied: mcp.enableProjectConfig"));
 	});
 
+	it("runs the plugin reload pipeline when a commands.enable* provider toggle changes on disk", async () => {
+		await writeSettings({ advisor: { syncBacklog: "1" }, commands: { enableClaudeProject: true } });
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		await writeSettings({ advisor: { syncBacklog: "1" }, commands: { enableClaudeProject: false } });
+
+		// The startup command list was discovered under the old toggle; without the
+		// reload, disabled Claude project commands stay executable.
+		const { reloadPlugins } = await runCommand(settings);
+		expect(reloadPlugins).toHaveBeenCalledTimes(1);
+	});
+
 	it("reports construction-only tool enablement as restart-required instead of applied", async () => {
 		await writeSettings({
 			advisor: { syncBacklog: "1" },

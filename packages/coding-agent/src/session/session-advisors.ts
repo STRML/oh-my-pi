@@ -732,7 +732,11 @@ export class SessionAdvisors {
 	 */
 	rebuildRuntimesForHostChange(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
-		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		// Stop unconditionally: a host change (the rebuilt obfuscator) leaves the
+		// model/config signature untouched, and #buildAdvisorRuntime returns early
+		// while any advisor is live, so a signature-gated stop would keep the old
+		// runtime sending unredacted requests.
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 	}
 

@@ -20,6 +20,7 @@ import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import * as resolveConfigValue from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1611,6 +1612,30 @@ describe("ModelRegistry", () => {
 			const after = registry.find("openrouter", "anthropic/claude-sonnet-4");
 			expect(after?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
 			expect(after?.name).toBe("Last-Good Sonnet");
+		});
+
+		test("refresh() keeps header command invalidation working when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				"cmd-prov": {
+					baseUrl: "https://cmd.example.com/v1",
+					api: "openai-completions",
+					apiKey: "!echo key-1",
+					headers: { "X-Cmd": "!echo hdr-1" },
+					models: [{ id: "m1" }],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+			expect(registry.getError()).toBeDefined();
+
+			// A 401 force-refresh must still drop the cached header credential of the
+			// restored last-good provider; otherwise retries keep sending the stale
+			// header until the file is repaired.
+			const invalidate = spyOn(resolveConfigValue, "invalidateCommandConfig");
+			await registry.getApiKeyWithCredentialForProvider("cmd-prov", undefined, { forceRefresh: true });
+			expect(invalidate).toHaveBeenCalledWith("!echo hdr-1");
+			invalidate.mockRestore();
 		});
 
 		test("refresh() keeps the last-good discoverable provider and its discovered models when models.json becomes malformed", async () => {
