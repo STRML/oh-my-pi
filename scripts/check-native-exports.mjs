@@ -28,14 +28,16 @@ if (addons.length === 0) {
 // nativeBindings.DesktopSession)`). A regex pinned to the plain re-export
 // shape silently skips adapted bindings, and an addon missing that class
 // would pass while constructing the export crashes. Match all references.
+// `__piNativesV<version>` is the loader's version sentinel. It moves every release and the
+// committed index.js lags it by design; loadNative() resolves the addon's own sentinel, so a
+// sentinel mismatch is not a missing export. `__piNativesBuildVersion` is a stable public
+// function that index.js re-exports, so only the versioned names are exempt.
+const VERSION_SENTINEL = /^__piNativesV\d/;
+
 const source = fs.readFileSync(INDEX, "utf8");
 const expected = new Set();
 for (const match of source.matchAll(/nativeBindings\??\.([A-Za-z_$][\w$]*)/g)) {
-	// `__piNativesV*` is the loader's version sentinel. It moves every
-	// release and the committed index.js lags it by design; loadNative()
-	// resolves the addon's own sentinel, so a sentinel mismatch is not a
-	// missing export and must not fail the check.
-	if (!match[1].startsWith("__piNatives")) expected.add(match[1]);
+	if (!VERSION_SENTINEL.test(match[1])) expected.add(match[1]);
 }
 if (expected.size === 0) {
 	console.error(`no native exports parsed from ${INDEX}; the parser no longer matches the generated shape`);
@@ -53,9 +55,9 @@ for (const addonArg of addons) {
 		if (!actual.has(name)) missing.push(`${path.basename(addonPath)}: ${name}`);
 	}
 	for (const name of actual) {
-		// Every addon exports its own `__piNativesV*` sentinel, which `expected` skips
-		// above, so it would always land here and print a false extras note.
-		if (!expected.has(name) && !name.startsWith("__piNatives")) extras.push(name);
+		// Every addon exports its own versioned sentinel, which `expected` skips above, so it
+		// would always land here and print a false extras note.
+		if (!expected.has(name) && !VERSION_SENTINEL.test(name)) extras.push(name);
 	}
 }
 if (extras.length > 0) {
