@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const INDEX = "packages/natives/native/index.js";
+const INDEX_TYPES = "packages/natives/native/index.d.ts";
 
 // A gate that passes vacuously is worse than no gate: zero addon arguments
 // would otherwise loop zero times, find zero missing exports, and exit 0
@@ -44,6 +45,47 @@ if (expected.size === 0) {
 	process.exit(1);
 }
 
+// index.js keeps a single `nativeBindings.<Class>` reference when a native PR adds a method to an
+// existing napi class, so only the generated typings show the new member. An addon that predates
+// it would pass the export check and the consumer would fail later with "... is not a function".
+// Read each `export declare class` body from index.d.ts and check the addon's constructor
+// (statics) and prototype (instance methods, accessors and properties) carry every member.
+const CLASS_START = /^export declare class ([A-Za-z_$][\w$]*)\b/;
+const CLASS_MEMBER = /^ {2}(static\s+)?(?:readonly\s+)?(?:(?:get|set)\s+)?([A-Za-z_$][\w$]*)\??\s*[(:<]/;
+function declaredClassMembers(typings) {
+	const classes = new Map();
+	let current;
+	let inComment = false;
+	for (const line of typings.split("\n")) {
+		if (!current) {
+			const start = CLASS_START.exec(line);
+			if (start) {
+				current = { statics: new Set(), instance: new Set() };
+				classes.set(start[1], current);
+			}
+			continue;
+		}
+		if (line.startsWith("}")) {
+			current = undefined;
+			continue;
+		}
+		const trimmed = line.trim();
+		if (inComment) {
+			if (trimmed.includes("*/")) inComment = false;
+			continue;
+		}
+		if (trimmed.startsWith("/*")) {
+			if (!trimmed.includes("*/")) inComment = true;
+			continue;
+		}
+		const member = CLASS_MEMBER.exec(line);
+		if (!member || member[2] === "constructor") continue;
+		(member[1] ? current.statics : current.instance).add(member[2]);
+	}
+	return classes;
+}
+const classMembers = declaredClassMembers(fs.readFileSync(INDEX_TYPES, "utf8"));
+
 const require = createRequire(import.meta.url);
 const missing = [];
 const extras = [];
@@ -53,6 +95,17 @@ for (const addonArg of addons) {
 	const actual = new Set(Object.keys(addon));
 	for (const name of expected) {
 		if (!actual.has(name)) missing.push(`${path.basename(addonPath)}: ${name}`);
+	}
+	for (const [className, members] of classMembers) {
+		const ctor = addon[className];
+		// A class missing outright is already reported above.
+		if (typeof ctor !== "function") continue;
+		for (const member of members.statics) {
+			if (!(member in ctor)) missing.push(`${path.basename(addonPath)}: ${className}.${member}`);
+		}
+		for (const member of members.instance) {
+			if (!(member in ctor.prototype)) missing.push(`${path.basename(addonPath)}: ${className}#${member}`);
+		}
 	}
 	for (const name of actual) {
 		// Every addon exports its own versioned sentinel, which `expected` skips above, so it
