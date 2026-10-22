@@ -360,6 +360,7 @@ import {
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
+	cfgDisplayCollapsedToolTitles,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
@@ -462,6 +463,7 @@ const cfgLiveUiSettings = combine({
 	expandThinkingBlocks: cfgExpandThinkingBlocks,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
+	"display.collapsedToolTitles": cfgDisplayCollapsedToolTitles,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
@@ -3707,6 +3709,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					child.setExpanded(false);
 				} else if (child instanceof AssistantMessageComponent) {
 					child.setToolResultImagesVisible(!hideToolActivity);
+					if (!hideToolActivity) child.setExpanded(false);
 				}
 			}
 			this.chatContainer.setToolActivityVisible(!hideToolActivity);
@@ -3755,7 +3758,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// options are baked in at build time: rebuild, then retire rows already
 		// committed to native scrollback.
 		if (
-			any("display.cacheMissMarker", "display.collapseCompacted", "display.showTokenUsage", "display.showTurnTime")
+			any(
+				"display.cacheMissMarker",
+				"display.collapseCompacted",
+				"display.collapsedToolTitles",
+				"display.showTokenUsage",
+				"display.showTurnTime",
+			)
 		) {
 			rebuildChat = true;
 		}

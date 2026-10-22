@@ -5,6 +5,7 @@
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added `display.collapsedToolTitles`: collapsed tool calls render as one title row (status, tool, target such as the command or path) with no output, diff or file preview; expanding (Ctrl+O) restores the full cards ([#16726](https://github.com/can1357/oh-my-pi/pull/16726))
 
 ### Fixed
 
