@@ -110,6 +110,8 @@ Slash commands:
 
 If the subsystem is enabled but no legacy/default or roster model resolves, status reports the configured advisors as inactive/`no_model`.
 
+Slash commands are a TUI and command-host feature. `omp -p "/advisor status"` is prompt text: print mode sends it to the model verbatim, and the model answers by narrating the transcript rather than printing the panel. To read advisor state headlessly, use `--mode json` events, or inspect the session directory (`<session>/__advisor.jsonl` exists only when an advisor runtime built).
+
 Entries left at `no_model` during startup are retried after background model discovery settles, so a model that arrives late in the catalog can start without a manual toggle.
 
 ## What the advisor sees
