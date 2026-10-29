@@ -1,24 +1,41 @@
 #!/usr/bin/env bash
-# sync-fork-main.sh — reset fork main to upstream/main and cherry-pick the fork's PR work on top.
+# sync-fork-main.sh — rebuild fork main as upstream/main plus one squashed layer per open PR.
 #
-# Replaces rebuild.sh (retired 2026-09-17). Fork main = upstream/main + cherry-picked
-# PR commits (real subjects, real review trail). No squash layer, no force-push.
+# Fork main = upstream/main
+#           + "layer #N: <title>" for each open PR, oldest first (git merge --squash of its head)
+#           + the fork-local commits carried over from the current fork main (every commit
+#             that is not a layer: .gitignore tweaks, this script, docs drafts).
+#
+# Every PR must apply to upstream alone. Run --check first: it real-merges each PR head onto
+# upstream/main and lists the ones that conflict. Rebase those onto upstream/main and
+# force-with-lease their PR branches, then build.
 #
 # Usage:
-#   ./sync-fork-main.sh              # full run: reset + cherry-pick + push (lease-guarded)
-#   ./sync-fork-main.sh --no-push    # do everything, leave the push to you
-#   ./sync-fork-main.sh --dry        # print the plan, touch nothing
+#   scripts/sync-fork-main.sh --check     # report which PRs conflict with upstream/main
+#   scripts/sync-fork-main.sh             # build, bun check, lease-push fork main
+#   scripts/sync-fork-main.sh --no-push   # build and bun check, leave the push to you
+#   scripts/sync-fork-main.sh --no-check  # skip bun check
+#   scripts/sync-fork-main.sh --resume    # continue after resolving a layer conflict by hand
 #
-# PR set: edit pr_commits() below when the PR list changes.
+# A conflict between two PRs stops the build in the worktree it prints. Resolve the files,
+# `git add` them, commit as "layer #N: <title>", then rerun with --resume. Keep rerere on
+# (rerere.enabled, rerere.autoupdate): the resolution replays on the next cycle.
+#
+# Talks to github.com, so run it outside the agent sandbox.
 set -euo pipefail
 
-cd "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+UPSTREAM_REPO="can1357/oh-my-pi"
+AUTHOR="STRML"
+# Other people's open PRs we also layer onto fork main. Drop a number once it merges.
+EXTRA_PRS=(16726)
 
-DRY=0; NO_PUSH=0
+CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0
 for arg in "$@"; do
 	case "$arg" in
+		--check) CHECK_ONLY=1;;
+		--resume) RESUME=1;;
 		--no-push) NO_PUSH=1;;
-		--dry) DRY=1;;
+		--no-check) NO_CHECK=1;;
 		*) printf 'unknown option: %s\n' "$arg" >&2; exit 1;;
 	esac
 done
@@ -26,140 +43,152 @@ done
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-say "== fetch =="
-git fetch origin main --quiet
-git fetch upstream main --quiet
+# The main checkout, even when this runs from a worktree, so the build worktree never nests.
+ROOT="$(dirname -- "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --path-format=absolute --git-common-dir)")"
+WT="$ROOT/.claude/worktrees/sync-fork-main"
+BRANCH="sync-fork-main"
 
-UPSTREAM="$(git rev-parse upstream/main)"
-ORIGIN="$(git rev-parse origin/main)"
+# Files left conflicted after a merge: unmerged paths plus staged files still holding markers.
+# rerere.autoupdate stages its replayed resolutions, so a failed merge can leave nothing here.
+unresolved() {
+	{
+		git diff --name-only --diff-filter=U
+		git diff --cached --name-only -z | xargs -0 grep -l '^<<<<<<< ' 2>/dev/null || true
+	} | sort -u
+}
+
+# Writes "<number>\t<title>" for every PR to layer, oldest first.
+list_prs() {
+	{
+		gh pr list -R "$UPSTREAM_REPO" --author "$AUTHOR" --state open --limit 200 \
+			--json number,title --jq '.[] | "\(.number)\t\(.title)"'
+		for n in "${EXTRA_PRS[@]}"; do
+			gh pr view "$n" -R "$UPSTREAM_REPO" --json number,title,state \
+				--jq 'select(.state == "OPEN") | "\(.number)\t\(.title)"'
+		done
+	} | sort -n -u -k1,1
+}
+
+fetch_prs() {
+	local refspecs=() n
+	while IFS=$'\t' read -r -u 3 n _; do refspecs+=("pull/$n/head:refs/pr/$n"); done 3< "$PRS"
+	git fetch -q --force upstream "${refspecs[@]}"
+}
+
+check_prs() {
+	local bad=0 n left
+	while IFS=$'\t' read -r -u 3 n _; do
+		git checkout -q --detach "$UPSTREAM"
+		if git merge -q --no-ff --no-edit "refs/pr/$n" >/dev/null 2>&1; then
+			say "ok        #$n"
+		else
+			left="$(unresolved | tr '\n' ' ')"
+			if [[ -n "$left" ]]; then say "CONFLICT  #$n: $left"; bad=1; else say "rerere    #$n"; fi
+		fi
+		git merge --abort >/dev/null 2>&1 || true
+		git reset -q --hard "$UPSTREAM"
+	done 3< "$PRS"
+	return "$bad"
+}
+
+# A captured list, not a `grep -q` pipe: under pipefail an early grep exit SIGPIPEs git log.
+has_subject() {
+	local subjects
+	subjects="$(git log --format=%s "$UPSTREAM..HEAD")"
+	[[ $'\n'"$subjects"$'\n' == *$'\n'"$1"$'\n'* ]]
+}
+
+layer() {
+	local n="$1" title="$2" subject="layer #$1: $2"
+	if has_subject "$subject"; then say "have      #$n"; return; fi
+	if ! git merge --squash -q "refs/pr/$n" >/dev/null 2>&1; then
+		local left; left="$(unresolved)"
+		if [[ -n "$left" ]]; then
+			say "CONFLICT  #$n in $WT:"; say "$left"
+			die "resolve, git add, git commit -m \"$subject\", then rerun with --resume"
+		fi
+		say "rerere    #$n"
+	fi
+	if git diff --cached --quiet; then say "empty     #$n (already upstream?)"; return; fi
+	git commit -q --no-verify -m "$subject"
+	say "layered   #$n"
+}
+
+# Fork-local commits: everything on the old fork main past its upstream base that is not a layer.
+carry_local() {
+	local base sha subject
+	base="$(git merge-base "$ORIGIN" "$UPSTREAM")"
+	while read -r -u 3 sha subject; do
+		[[ "$subject" == "layer #"* ]] && continue
+		if has_subject "$subject"; then say "have      $subject"; continue; fi
+		git cherry-pick "$sha" >/dev/null || die "carry of $sha ($subject) conflicted in $WT; resolve, git cherry-pick --continue, rerun with --resume"
+		say "carried   $subject"
+	done 3< <(git log --reverse --format='%H %s' "$base..$ORIGIN")
+}
+
+say "== fetch =="
+git -C "$ROOT" fetch -q origin main
+git -C "$ROOT" fetch -q upstream main
+
+if [[ ! -d "$WT" ]]; then
+	git -C "$ROOT" worktree add -q --detach "$WT" upstream/main
+fi
+cd "$WT"
+STATE="$(git rev-parse --git-path sync-fork-main.state)"
+PRS="$(git rev-parse --git-path sync-fork-main.prs)"
+
+if (( RESUME )); then
+	[[ -f "$STATE" ]] || die "no saved run to resume"
+	# shellcheck source=/dev/null
+	source "$STATE"
+	[[ "$(git branch --show-current)" == "$BRANCH" ]] || die "$WT is not on $BRANCH"
+	[[ -z "$(unresolved)" ]] || die "unresolved files remain in $WT"
+else
+	# The worktree belongs to this script: drop whatever an abandoned run left behind.
+	git merge --abort >/dev/null 2>&1 || true
+	git cherry-pick --abort >/dev/null 2>&1 || true
+	git reset -q --hard
+	UPSTREAM="$(git rev-parse upstream/main)"
+	ORIGIN="$(git rev-parse origin/main)"
+	printf 'UPSTREAM=%s\nORIGIN=%s\n' "$UPSTREAM" "$ORIGIN" > "$STATE"
+	list_prs > "$PRS"
+	fetch_prs
+fi
 say "upstream/main = $UPSTREAM"
 say "origin/main   = $ORIGIN"
+say "PRs: $(cut -f1 "$PRS" | tr '\n' ' ')"
 
-if [[ "$UPSTREAM" == "$ORIGIN" ]]; then
-	say "fork main already equals upstream main. nothing to do."
+if (( CHECK_ONLY )); then
+	say "== check PRs against upstream/main =="
+	check_prs || die "rebase the conflicting PRs onto upstream/main and lease-push them, then rerun"
 	exit 0
 fi
 
-# Fork-local base under the old protocol: the pre-merge fork main that carried the
-# PR cherry-picks (the 2026-09-17 layer 85eccd33b0 sits on dbf3afad48).
-FORK_BASE="85eccd33b0"
-if ! git rev-parse --verify --quiet "$FORK_BASE^{commit}" >/dev/null; then
-	die "fork base $FORK_BASE not found; adjust FORK_BASE"
+if (( ! RESUME )); then
+	say "== reset $BRANCH onto upstream/main =="
+	git checkout -q -B "$BRANCH" "$UPSTREAM"
 fi
 
-# ---------------------------------------------------------------
-# pr_commits — the cherry-pick set, in dependency order.
-# Each line: <sha> required
-#   sha            upstream-PR-derived tip (merge-forward head) carrying the work
-#   (order)        deps first; a failed pick aborts the run for manual replay
-# ---------------------------------------------------------------
-pr_commits() {
-	# shas verified 2026-09-21 against the PR heads (gh pr view --json headRefOid).
-	# When a PR merges upstream, DELETE its line here (an already-merged pick is a
-	# no-op empty pick, kept only for self-documentation).
-	cat <<'EOF'
-f05bdccdcf fix(retry): honor retry-after + 429 chain tests   (#8926 head)
-96e448e952 test(hashline): corpus guard + native-predicate follow  (#12170 head)
-0d1b0f23b8 feat: advisor usage windows in cost segment       (#8904 1/4)
-50b722c138 feat: two-line statusbar overflow                 (#8904 2/4)
-341454a2a1 fix: gallery fixture advisorUsage                 (#8904 3/4)
-b087285932 fix: clamp the overflow row                       (#8904 4/4)
-2caad4a07b fix: repair advisor fixture + ctor stubs          (#8904 repair)
-d9ff773d2a fix(sharpshooter): idempotent enrollment          (#12161 tail 1/3)
-b1d0376e6d fix(sharpshooter): carry queued prompts           (#12161 tail 2/3)
-3be016a3de docs(changelog): notes to Unreleased              (#12161 tail 3/3)
-7cd9b33b18 chore: ignore .watch/                             (fork hygiene)
-EOF
-}
+say "== layers =="
+while IFS=$'\t' read -r -u 3 n title; do layer "$n" "$title"; done 3< "$PRS"
 
-# The sharpshooter PAIRING trunk (#12161 core) is fork-only until upstream merges
-# the PR; it cannot be expressed as plain cherry-picks (its 30 commits were
-# conflict-stitched). After the picks, apply the trunk from the current PR head
-# 9a9532563b (re-check `gh pr view 12161 --json headRefOid` first; update if it
-# moved). When can1357 merges #12161, DELETE trunk_apply and the trunk step.
-trunk_apply() {
-	git checkout 9a9532563b -- \
-		packages/coding-agent/src/memory-backend/with-sharpshooter.ts \
-		packages/coding-agent/src/memory-backend/types.ts \
-		packages/coding-agent/src/memory-backend/resolve.ts \
-		packages/coding-agent/src/memory-backend/runtime.ts \
-		packages/coding-agent/src/session/session-memory.ts \
-		packages/coding-agent/src/hindsight/backend.ts \
-		packages/coding-agent/src/sharpshooter/consolidate.ts \
-		packages/coding-agent/test/sharpshooter-extract.test.ts \
-		packages/coding-agent/test/sharpshooter-backend.test.ts \
-		packages/coding-agent/test/sharpshooter-consolidate.test.ts \
-		packages/coding-agent/test/sharpshooter-pairing.test.ts \
-		packages/coding-agent/test/agent-session-memory-backend.test.ts
-	# side-effects applier lacks a 12161 home; committed trunk copy carries it.
-	# Hand-fixes the trunk needs (see SKILL omp-fork-sync-cherry-pick):
-	#   settings-schema.ts sharpshooter.enabled block,
-	#   selector-controller.ts sharpshooter.enabled case,
-	#   agent-session.ts applyPairedMemoryBackend,
-	#   event-controller.ts refreshIdleRecapTimer hook,
-	#   hindsight-backend.test.ts applyPairedMemoryBackend stub.
-	say "pairing trunk applied from 9a9532563b"
-}
+say "== fork-local commits =="
+carry_local
 
-if (( DRY )); then
-	say "== dry plan =="
-	say "git checkout -B sync-fork-main $UPSTREAM"
-	pr_commits | awk '{print "git cherry-pick " $1}'
-	say "git push origin +sync-fork-main:main --force-with-lease=main:$ORIGIN  # only if main moved past a merge; else plain push"
-	exit 0
+say "== result =="
+git log --oneline "$UPSTREAM..HEAD" | cat
+
+if (( ! NO_CHECK )); then
+	say "== bun check =="
+	bun install --frozen-lockfile >/dev/null
+	bun check
 fi
-
-step() { say "== $1 =="; }
-
-step "reset sync branch onto upstream/main"
-git branch -D sync-fork-main >/dev/null 2>&1 || true
-git checkout -q -B sync-fork-main "$UPSTREAM"
-
-step "cherry-pick fork PR commits"
-while read -r line; do
-	sha="$(printf '%s' "$line" | awk '{print $1}')"
-	[[ -z "$sha" ]] && continue
-	say "cherry-pick $sha  ${line#* }"
-	if ! git cherry-pick "$sha" >/dev/null 2>&1; then
-		if git diff --quiet; then
-			say "  -> empty pick (already on upstream), skipping"
-			git cherry-pick --skip >/dev/null 2>&1 || git cherry-pick --abort >/dev/null 2>&1 || true
-		else
-			die "conflict on $sha. resolve in $(pwd), then: git cherry-pick --continue && rerun with remaining shas"
-		fi
-	fi
-done < <(pr_commits)
-
-step "pairing trunk"
-if ! git show "$UPSTREAM":packages/coding-agent/src/memory-backend/with-sharpshooter.ts >/dev/null 2>&1; then
-	trunk_apply
-	git add packages/coding-agent
-	git commit --quiet -m "feat(coding-agent): sharpshooter pairing trunk + memory-backend reason wiring" || true
-fi
-
-step "sanitize trailers"
-# Strip any fork provenance trailers accidentally carried; keep real authorship.
-git filter-branch --msg-filter 'sed "/^[Cc]herry picked from/d; /^Rebased from/d"' \
-	-- "$UPSTREAM..HEAD" >/dev/null 2>&1 || true
-
-step "result"
-git log --oneline "$UPSTREAM"..HEAD | cat
-COUNT="$(git rev-list --count "$UPSTREAM"..HEAD)"
-say "fork main = upstream/main + $COUNT commits"
 
 if (( NO_PUSH )); then
-	say "no-push: branch sync-fork-main ready; push with:"
-	say "  git push origin +sync-fork-main:main --force-with-lease=main:$ORIGIN"
+	say "push with: git -C $WT push origin HEAD:refs/heads/main --force-with-lease=refs/heads/main:$ORIGIN"
 	exit 0
 fi
 
-step "push"
-# Prefer fast-forward; force-with-lease only when necessary.
-if git merge-base --is-ancestor "$ORIGIN" HEAD; then
-	git push origin HEAD:main
-else
-	say "non-ff: lease push (this is expected only when cherry-picked shas replaced squashed content)"
-	git push origin +HEAD:main --force-with-lease=main:"$ORIGIN"
-fi
-NEW_ORIGIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-say "origin/main = $NEW_ORIGIN"
+say "== push =="
+git push origin HEAD:refs/heads/main --force-with-lease=refs/heads/main:"$ORIGIN"
+say "origin/main = $(git ls-remote origin refs/heads/main | cut -f1)"
