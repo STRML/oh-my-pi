@@ -13,6 +13,13 @@ export class SentToolDefinitions {
 		for (const tool of tools) this.#byName.set(tool.name, tool);
 	}
 
+	/** A detached copy: an Agent that replays another's request history declares the same withdrawn tools. */
+	copy(): SentToolDefinitions {
+		const copy = new SentToolDefinitions();
+		copy.record([...this.#byName.values()]);
+		return copy;
+	}
+
 	/**
 	 * `context` with {@link Context.inactiveTools} set to the definitions for names the latest
 	 * `requestControls.tools.declared` in its messages holds that are not in its `tools`; cleared when
