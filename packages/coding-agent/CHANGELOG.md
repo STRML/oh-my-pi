@@ -37,6 +37,7 @@
 ### Changed
 
 - Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
+- Added `model.toolCallLoopGuard.compactAfter` (off by default): once the tool-call loop guard's redirect is ignored, the session compacts and then stops the turn if the model still repeats the same tool call ([#13955](https://github.com/can1357/oh-my-pi/pull/13955) by [@STRML](https://github.com/STRML))
 
 ## [18.14.0] - 2026-10-29
 
