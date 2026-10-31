@@ -208,6 +208,10 @@ carry_local() {
 say "== fetch =="
 git -C "$ROOT" fetch -q origin main
 git -C "$ROOT" fetch -q upstream main
+# A stale checkout runs a stale script: say so before it rebuilds main with old rules.
+if ! cmp -s "${BASH_SOURCE[0]}" <(git -C "$ROOT" show origin/main:scripts/sync-fork-main.sh); then
+	say "WARNING: this copy differs from origin/main:scripts/sync-fork-main.sh (stale checkout or local edit)"
+fi
 
 if [[ ! -d "$WT" ]]; then
 	git -C "$ROOT" worktree add -q --detach "$WT" upstream/main
@@ -262,6 +266,12 @@ carry_local
 say "== result =="
 git log --oneline "$UPSTREAM..HEAD" | cat
 
+# Same base, same tree, no rebased PRs: a push would only swap commit timestamps.
+if [[ "$(git merge-base "$ORIGIN" "$UPSTREAM")" == "$UPSTREAM" && "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "$ORIGIN^{tree}")" && ! -s "$REBASED" ]]; then
+	say "fork main already matches this rebuild; nothing to push"
+	exit 0
+fi
+
 if (( ! NO_CHECK )); then
 	say "== bun check =="
 	bun install --frozen-lockfile >/dev/null
@@ -285,3 +295,12 @@ while IFS=$'\t' read -r -u 3 n branch old new; do
 	git push origin "$new:refs/heads/$branch" --force-with-lease="refs/heads/$branch:$old"
 	say "#$n $branch = $new"
 done 3< "$REBASED"
+
+# Bring the main checkout along, so its copy of this script is the one just pushed.
+# Only when local main held nothing past the old fork main; reset --keep refuses to
+# clobber uncommitted edits.
+if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" merge-base --is-ancestor main "$ORIGIN"; then
+	git -C "$ROOT" reset -q --keep "$(git rev-parse HEAD)" && say "main checkout = $(git rev-parse --short HEAD)"
+else
+	say "main checkout left alone; to follow: git -C $ROOT checkout -B main origin/main"
+fi
