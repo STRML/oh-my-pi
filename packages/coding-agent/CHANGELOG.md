@@ -32,6 +32,11 @@
 - Sharpshooter consolidation keeps its queued decisions for the next cycle when the model returns only some of the memory files ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 - Memory search after `/move` answers for the project the session moved to ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
 - `/move` no longer drops the first destination prompt or re-files the departed project's last prompt as a decision ([#12161](https://github.com/can1357/oh-my-pi/pull/12161) by [@STRML](https://github.com/STRML))
+- Fixed advisor notes lingering invisibly until the next prompt when they arrived after the agent's last step or while it was idle; they are now shown as advisor cards ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
+
+### Changed
+
+- Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600), [#13775](https://github.com/can1357/oh-my-pi/pull/13775) by [@rthiago](https://github.com/rthiago)).
 
 ## [18.14.0] - 2026-10-29
 
