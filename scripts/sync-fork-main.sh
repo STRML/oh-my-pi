@@ -18,6 +18,11 @@
 #   scripts/sync-fork-main.sh --no-push   # same, leave the pushes to you
 #   scripts/sync-fork-main.sh --no-check  # skip bun check
 #   scripts/sync-fork-main.sh --resume    # continue after resolving a layer conflict by hand
+#   scripts/sync-fork-main.sh --no-install  # skip rebuilding and installing omp
+#
+# Every run that is not --check or --no-push ends by rebuilding the native addon and the omp
+# binary from the result and installing it over the omp on PATH, even when nothing was pushed.
+# A stale native addon or a too-old Bun has broken the installed omp before.
 #
 # A conflict between two PRs stops the build in the worktree it prints. Resolve the files,
 # `git add` them, commit as "layer #N: <title>", then rerun with --resume. Keep rerere on
@@ -31,13 +36,14 @@ AUTHOR="STRML"
 # Other people's open PRs we also layer onto fork main. Drop a number once it merges.
 EXTRA_PRS=(16726)
 
-CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0
+CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0; NO_INSTALL=0
 for arg in "$@"; do
 	case "$arg" in
 		--check) CHECK_ONLY=1;;
 		--resume) RESUME=1;;
 		--no-push) NO_PUSH=1;;
 		--no-check) NO_CHECK=1;;
+		--no-install) NO_INSTALL=1;;
 		*) printf 'unknown option: %s\n' "$arg" >&2; exit 1;;
 	esac
 done
@@ -205,6 +211,30 @@ carry_local() {
 	done 3< <(git log --reverse --format='%H %s' "$base..$ORIGIN")
 }
 
+# Rebuilds natives and the binary from the worktree, then swaps it onto PATH through a new
+# file: copying over the old inode leaves macOS holding its cached signature (Killed: 9).
+install_omp() {
+	(( NO_INSTALL )) && return
+	say "== rebuild and install omp =="
+	local need have dest want
+	need="$(sed -n 's/.*"bun": ">=\([0-9.]*\)".*/\1/p' packages/coding-agent/package.json)"
+	have="$(bun --version)"
+	if [[ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]]; then
+		say "bun $have < $need: upgrading"
+		bun upgrade >/dev/null
+	fi
+	bun install --frozen-lockfile >/dev/null
+	bun run build:native
+	bun --cwd=packages/coding-agent run build
+	dest="$(command -v omp || printf '%s' "$HOME/.local/bin/omp")"
+	[[ -L "$dest" ]] && die "$dest is a symlink (dev link?); install packages/coding-agent/dist/omp by hand"
+	cp packages/coding-agent/dist/omp "$dest.new"
+	mv -f "$dest.new" "$dest"
+	want="omp/$(sed -n 's/^\t"version": "\(.*\)",$/\1/p' packages/coding-agent/package.json)"
+	[[ "$("$dest" --version)" == "$want" ]] || die "installed $dest reports $("$dest" --version), expected $want"
+	say "installed $dest = $want"
+}
+
 say "== fetch =="
 git -C "$ROOT" fetch -q origin main
 git -C "$ROOT" fetch -q upstream main
@@ -269,6 +299,7 @@ git log --oneline "$UPSTREAM..HEAD" | cat
 # Same base, same tree, no rebased PRs: a push would only swap commit timestamps.
 if [[ "$(git merge-base "$ORIGIN" "$UPSTREAM")" == "$UPSTREAM" && "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "$ORIGIN^{tree}")" && ! -s "$REBASED" ]]; then
 	say "fork main already matches this rebuild; nothing to push"
+	install_omp
 	exit 0
 fi
 
@@ -304,3 +335,5 @@ if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" mer
 else
 	say "main checkout left alone; to follow: git -C $ROOT checkout -B main origin/main"
 fi
+
+install_omp
