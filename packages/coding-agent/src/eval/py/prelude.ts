@@ -14,9 +14,14 @@ if "__omp_spawn_gate__" not in globals():
         scope = {"__builtins__": dict(vars(builtins)), "__name__": "omp_spawn_gate"}
         exec(compile(source, "<omp-spawn-gate>", "exec"), scope)
         user_ns = globals()
-        run_id = user_ns.get("__omp_current_run_id__")
-        if not callable(run_id):
-            run_id = lambda: user_ns.get("__omp_run_id__")
+        current = user_ns.get("__omp_current_run_id__")
+
+        # Threads a cell starts do not inherit the runner's run context; they
+        # are judged under the run that is executing now.
+        def run_id():
+            rid = current() if callable(current) else None
+            return rid if rid is not None else user_ns.get("__omp_run_id__")
+
         return scope["install"](os.environ, run_id)
     __omp_spawn_gate__ = __omp_install_spawn_gate(${JSON.stringify(spawnGateSource)})
     del __omp_install_spawn_gate

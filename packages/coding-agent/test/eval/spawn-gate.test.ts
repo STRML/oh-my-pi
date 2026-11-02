@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -45,6 +46,20 @@ const session = {
 		if (verdict === "deny") throw new Error("stub host denies this spawn");
 	},
 } as unknown as ToolSession;
+
+/**
+ * A directory a cell can prepend to PATH: its `touch` and `ps` stand-ins
+ * record that they ran by creating `<arg>.hijacked` / `ps.hijacked`.
+ */
+const hijackDir = path.join(tempDir.path(), "hijack");
+fs.mkdirSync(hijackDir);
+for (const [name, body] of [
+	["touch", '#!/bin/sh\n: > "$1.hijacked"\n'],
+	["ps", `#!/bin/sh\n: > ${JSON.stringify(path.join(hijackDir, "ps.hijacked"))}\n`],
+] as const) {
+	fs.writeFileSync(path.join(hijackDir, name), body);
+	fs.chmodSync(path.join(hijackDir, name), 0o755);
+}
 
 let markerSeq = 0;
 function marker(): string {
@@ -167,6 +182,73 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		expect(judged).toEqual([{ command: `touch ${file}`, cwd: "/" }]);
 	});
 
+	it("judges a PATH-hijacked program by the file that would run, not the name it was called by", async () => {
+		const file = marker();
+		await runPython(
+			[
+				"import os, subprocess",
+				'start_path = os.environ["PATH"]',
+				`os.environ["PATH"] = ${JSON.stringify(hijackDir)} + ":" + start_path`,
+				`try: subprocess.run(["touch", ${JSON.stringify(file)}])`,
+				'finally: os.environ["PATH"] = start_path',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([`${path.join(hijackDir, "touch")} ${file}`]);
+	});
+
+	it("does not let the runner's own ps listing run a hijacked ps unjudged", async () => {
+		verdict = "deny";
+		await runPython(
+			[
+				"import os, subprocess",
+				'start_path = os.environ["PATH"]',
+				`os.environ["PATH"] = ${JSON.stringify(hijackDir)} + ":" + start_path`,
+				'try: subprocess.run(["ps", "-A", "-o", "pid=,ppid="])',
+				"except PermissionError: pass",
+				'finally: os.environ["PATH"] = start_path',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([`${path.join(hijackDir, "ps")} -A -o pid=,ppid=`]);
+		expect(await Bun.file(path.join(hijackDir, "ps.hijacked")).exists()).toBe(false);
+	});
+
+	it("leaves a caught refusal's traceback unable to switch the gate off", async () => {
+		verdict = "deny";
+		const file = marker();
+		const result = await runPython(
+			[
+				"import os",
+				'try: os.system("true")',
+				"except Exception as e:",
+				"    tb = e.__traceback__.tb_next  # past the cell's own frame, into the gate's",
+				"    while tb:",
+				"        frame = tb.tb_frame",
+				"        for value in list(frame.f_locals.values()):",
+				"            if isinstance(value, dict): value.clear()",
+				"        frame.f_globals.clear()",
+				"        frame.f_builtins.clear()",
+				"        tb = tb.tb_next",
+				`os.system("touch " + ${JSON.stringify(file)})`,
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual(["true", `touch ${file}`]);
+		expect(result.output).toContain("eval subprocess spawn refused");
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("judges a spawn from a thread the cell started under the running cell", async () => {
+		const file = marker();
+		await runPython(
+			[
+				"import subprocess",
+				"from concurrent.futures import ThreadPoolExecutor",
+				`ThreadPoolExecutor(1).submit(subprocess.run, ["touch", ${JSON.stringify(file)}]).result()`,
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([`touch ${file}`]);
+		expect(await Bun.file(file).exists()).toBe(true);
+	});
+
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
 		const file = marker();
 		const result = await runPython(`import os\nos.system("touch " + ${JSON.stringify(file)})`, null);
@@ -231,6 +313,21 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 			expect(await Bun.file(file).exists()).toBe(false);
 		});
 	}
+
+	it("judges a PATH-hijacked program by the file that would run, from process.env or options.env", async () => {
+		const [first, second] = [marker(), marker()];
+		await runJs(
+			[
+				`const hijacked = ${JSON.stringify(hijackDir)} + ":" + process.env.PATH;`,
+				`Bun.spawnSync(["touch", ${JSON.stringify(first)}], { env: { ...process.env, PATH: hijacked } });`,
+				"const startPath = process.env.PATH;",
+				"process.env.PATH = hijacked;",
+				`try { require("node:child_process").spawnSync("touch", [${JSON.stringify(second)}]); } finally { process.env.PATH = startPath; }`,
+			].join("\n"),
+		);
+		const hijackedTouch = path.join(hijackDir, "touch");
+		expect(judged.map(input => input.command)).toEqual([`${hijackedTouch} ${first}`, `${hijackedTouch} ${second}`]);
+	});
 
 	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {
 		const result = await runJs('process.binding("spawn_sync");');

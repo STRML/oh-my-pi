@@ -88,9 +88,12 @@ parentPort.on("message", ({ state, data, url, token, body, timeoutMs }) => {
 });
 `;
 
+const REFUSED_PREFIX = "eval subprocess spawn refused";
+
 class SpawnRefusedError extends Error {
 	constructor(api: string, reason: string) {
-		super(`eval subprocess spawn refused (${api}): ${reason}`);
+		// A host refusal already names itself; don't stack a second prefix on it.
+		super(reason.startsWith(REFUSED_PREFIX) ? reason : `${REFUSED_PREFIX} (${api}): ${reason}`);
 		this.name = "SpawnRefusedError";
 	}
 }
@@ -106,6 +109,9 @@ const atomicsStore = Atomics.store;
 const atomicsLoad = Atomics.load;
 const defineProperty = Object.defineProperty;
 const cwdOf = process.cwd.bind(process);
+const which = Bun.which;
+// Captured before the gate locks `worker_threads.Worker`, which named imports of it see live.
+const HelperWorker = ThreadWorker;
 
 let installed = false;
 
@@ -172,9 +178,10 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 	const flags = new Int32Array(state);
 	const bytes = new Uint8Array(data);
 	let helper: ThreadWorker | undefined;
+	const startupPath = process.env.PATH ?? "";
 
 	const ask = (endpoint: SpawnGateEndpoint, body: string): string => {
-		helper ??= new ThreadWorker(HELPER_SOURCE, { eval: true });
+		helper ??= new HelperWorker(HELPER_SOURCE, { eval: true });
 		helper.unref();
 		atomicsStore(flags, 0, 0);
 		atomicsStore(flags, 1, 0);
@@ -218,8 +225,8 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 		throw new SpawnRefusedError(api, reason);
 	};
 
-	gateBunSpawn("spawn", judge);
-	gateBunSpawn("spawnSync", judge);
+	gateBunSpawn("spawn", judge, startupPath);
+	gateBunSpawn("spawnSync", judge, startupPath);
 	gateBunShell(judge);
 	gateProcess(judge);
 	refuseNativeCode();
@@ -234,7 +241,22 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 type Judge = (api: string, request: { argv?: string[]; command?: string; cwd?: unknown }) => void;
 
 /** `Bun.spawn(cmd, options?)` and `Bun.spawn({ cmd, ...options })`, sync or not. */
-function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge): void {
+/**
+ * The argv to judge. argv[0] stays as written only when the PATH the kernel
+ * started with resolves it to the same file the spawn's own PATH does;
+ * otherwise it becomes that file's path, so a PATH a cell set shows.
+ */
+function displayArgv(argv: string[], spawnPath: string, startupPath: string): string[] {
+	const program = argv[0];
+	if (program === undefined || program.includes("/")) return argv;
+	const executed = which(program, { PATH: spawnPath });
+	if (executed === null || executed === which(program, { PATH: startupPath })) return argv;
+	const shown = argv.slice();
+	shown[0] = executed;
+	return shown;
+}
+
+function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge, startupPath: string): void {
 	const original = Bun[key] as (...args: unknown[]) => unknown;
 	const api = `Bun.${key}`;
 	const gated = function (this: unknown, first: unknown, second?: unknown): unknown {
@@ -244,7 +266,10 @@ function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge): void {
 		const options: Record<string, unknown> = source && typeof source === "object" ? { ...source } : {};
 		const argv = snapshotArgv(fromArgv ? first : options.cmd);
 		if (options.cwd !== undefined && options.cwd !== null) options.cwd = asText(options.cwd);
-		judge(api, { argv, cwd: options.cwd });
+		if (options.env && typeof options.env === "object") options.env = { ...options.env };
+		const env = options.env as Record<string, unknown> | undefined;
+		const spawnPath = env && env.PATH !== undefined ? asText(env.PATH) : (process.env.PATH ?? "");
+		judge(api, { argv: displayArgv(argv, spawnPath, startupPath), cwd: options.cwd });
 		if (fromArgv) return original.call(Bun, argv, options);
 		options.cmd = argv;
 		return original.call(Bun, options);

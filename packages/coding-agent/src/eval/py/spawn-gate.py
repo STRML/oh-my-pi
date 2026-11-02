@@ -9,21 +9,44 @@
 # `importlib.reload` all reach the same hook. Native FFI is refused outright:
 # a `ctypes`/`cffi` call has no argv to judge.
 #
-# Everything the hook needs is captured at install time and the bridge client
-# speaks HTTP over the C socket type, so monkeypatching `json`, `urllib`,
-# `socket` or a prelude global cannot change what is judged.
+# Everything the gate needs is captured at install time, and the bridge client
+# speaks HTTP over the C socket type with hand-built JSON, so monkeypatching
+# `json`, `urllib`, `socket` or a prelude global cannot change what is judged.
+# A refusal leaves nothing behind for the cell: handlers return a message
+# instead of raising, and the hook raises a fresh error from a frame whose
+# locals hold only the event, so a caught refusal's traceback reaches no gate
+# state.
+
+# The hook looks up no global or builtin name: everything it touches arrives
+# as a default argument, so clearing its frame's globals or builtins from a
+# caught traceback changes nothing.
+_HOOK_SOURCE = """
+def hook(event, args, _dispatch=None, _refused=None, _interrupt=None):
+    message = _dispatch(event, args)
+    del _dispatch
+    if message is None:
+        return
+    if message == "\\x00interrupt":
+        raise _interrupt
+    raise _refused(message)
+"""
+
+_INTERRUPT = "\x00interrupt"
+_NATIVE_CODE = "native FFI can load and call any libc function, so the eval kernel refuses it"
 
 
 def install(environ, run_id_getter, timeout=600.0):
-    """Install the hook. The bridge endpoint and token are pinned now, before
-    any cell runs, so a cell cannot point the gate at a server of its own. The
-    bridge session is read per spawn: it only selects which host registration
-    judges, and a wrong one is refused."""
-    import sys, os, _socket, _thread
+    """Install the hook. The bridge endpoint, token and PATH are pinned now,
+    before any cell runs, so a cell cannot point the gate at a server of its
+    own or hide a binary behind a PATH it set. The bridge session is read per
+    spawn: it only selects which host registration judges, and a wrong one is
+    refused."""
+    import sys, os, _socket
 
     url = environ.get("PI_TOOL_BRIDGE_URL") or ""
     token = environ.get("PI_TOOL_BRIDGE_TOKEN") or ""
-    session_of = environ.get
+    env_of = environ.get
+    startup_path = environ.get("PATH") or ""
     host, port = "", 0
     if url.startswith("http://"):
         host, _, port_text = url[len("http://"):].rstrip("/").rpartition(":")
@@ -33,15 +56,18 @@ def install(environ, run_id_getter, timeout=600.0):
     socket_type = _socket.socket
     af_inet, sock_stream = _socket.AF_INET, _socket.SOCK_STREAM
     getcwd, fspath, getpid, write, exit_now = os.getcwd, os.fspath, os.getpid, os.write, os._exit
+    stat, access, x_ok = os.stat, os.access, os.X_OK
     install_pid = getpid()
-    # A forked child's last verdict: (key, allowed).
+    # A forked child's last verdict: (key, message or None).
     last_child_verdict = [None]
+    popen_cwd = {}  # thread id -> cwd of the Popen whose fork_exec comes next
+    get_ident = __import__("_thread").get_ident
     py_version = sys.version_info[:2]
-    local = _thread._local()
     json_loads = __import__("json").loads  # Error text only; never decides a verdict.
 
     # Runner housekeeping: listing child pids to stop an installer's process tree.
-    internal = frozenset({("/bin/ps", "-A", "-o", "pid=,ppid="), ("ps", "-A", "-o", "pid=,ppid=")})
+    internal = ("/bin/ps", ("/bin/ps", "-A", "-o", "pid=,ppid="))
+    refused_prefix = "eval subprocess spawn refused"
     allowed_prefix = b'{"ok":true,"value":{"allowed":true'
     escapes = {i: "\\u%04x" % i for i in range(0x20)}
     escapes.update({ord('"'): '\\"', ord("\\"): "\\\\", 0x2028: "\\u2028", 0x2029: "\\u2029"})
@@ -55,33 +81,46 @@ def install(environ, run_id_getter, timeout=600.0):
     def json_str(value):
         return '"' + value.encode("utf-8", "surrogatepass").decode("utf-8", "replace").translate(escapes) + '"'
 
-    def basename(value):
-        return value.rsplit("/", 1)[-1]
+    def is_executable(candidate):
+        try:
+            return (stat(candidate).st_mode & 0o170000) == 0o100000 and access(candidate, x_ok)
+        except (OSError, ValueError):
+            return False
 
-    def argv_of(program, args):
-        """Real argv, with argv[0] replaced when the executed program differs from it."""
+    def resolve(name, search_path):
+        """The file an exec-p call would run for `name` under `search_path`."""
+        if "/" in name:
+            return name
+        for directory in search_path.split(":"):
+            candidate = (directory or ".") + "/" + name
+            if is_executable(candidate):
+                return candidate
+        return None
+
+    def display_argv(executed, args):
+        """The argv to judge. argv[0] stays as written only when the startup
+        PATH resolves it to the file that actually runs; otherwise it becomes
+        that file's path, so a PATH hijack or an `executable=` override shows."""
         argv = [text(arg) for arg in (args or ())]
-        if program is None:
+        if executed is None:
             return argv
-        program = text(program)
+        executed = text(executed)
         if not argv:
-            return [program]
-        if basename(program) != basename(argv[0]):
-            argv[0] = program
+            return [executed]
+        if argv[0] != executed and ("/" in argv[0] or resolve(argv[0], startup_path) != executed):
+            argv[0] = executed
         return argv
 
-    class SpawnRefused(PermissionError):
-        pass
-
-    def refuse(api, reason):
-        message = f"eval subprocess spawn refused ({api}): {reason}"
+    def refusal(api, reason):
+        # A host refusal already names itself; don't stack a second prefix on it.
+        message = reason if reason.startswith(refused_prefix) else f"{refused_prefix} ({api}): {reason}"
         if api == "os.exec" and getpid() != install_pid:
             # A forked child whose exec is refused must not fall back into the
             # kernel's own code (pty.spawn, os.spawn* and hand-rolled fork+exec
             # all do on an exec error), so it ends here.
             write(2, (message + "\n").encode("utf-8", "replace"))
             exit_now(126)
-        raise SpawnRefused(message)
+        return message
 
     def post(body):
         conn = socket_type(af_inet, sock_stream)
@@ -105,22 +144,20 @@ def install(environ, run_id_getter, timeout=600.0):
         return b"".join(chunks)
 
     def judge(api, argv=None, command=None, cwd=None):
-        if argv is not None and tuple(argv) in internal:
-            return
+        """None when the host allows the spawn, else the refusal message."""
         if not bridge_ready:
-            refuse(api, "no host bridge in this kernel")
+            return refusal(api, "no host bridge in this kernel")
         cwd = text(cwd) if cwd is not None else getcwd()
-        # `execvp` in a forked child tries each PATH entry with the same argv;
-        # one verdict covers those retries, and the child is gone after exec.
+        # `execvp` in a forked child tries each PATH entry; one verdict covers
+        # those retries, and the child is gone after exec.
         key = (api, tuple(argv or ()), command, cwd)
         in_child = getpid() != install_pid
         if in_child and last_child_verdict[0] is not None and last_child_verdict[0][0] == key:
-            if last_child_verdict[0][1]:
-                return
-            refuse(api, "denied")
+            reason = last_child_verdict[0][1]
+            return None if reason is None else refusal(api, reason)
         run = run_id_getter()
         fields = [
-            '"session":' + json_str(text(session_of("PI_TOOL_BRIDGE_SESSION") or "")),
+            '"session":' + json_str(text(env_of("PI_TOOL_BRIDGE_SESSION") or "")),
             '"run":' + json_str(text(run) if run is not None else ""),
             '"name":"__spawn__"',
         ]
@@ -133,64 +170,84 @@ def install(environ, run_id_getter, timeout=600.0):
         try:
             response = post(body)
         except OSError as exc:
-            refuse(api, f"host bridge unreachable: {exc}")
+            return refusal(api, f"host bridge unreachable: {exc}")
         head, _, payload = response.partition(b"\r\n\r\n")
-        if head.startswith((b"HTTP/1.1 200 ", b"HTTP/1.0 200 ")) and payload.startswith(allowed_prefix):
-            if in_child:
-                last_child_verdict[0] = (key, True)
-            return
-        try:
-            reason = json_loads(payload).get("error") or "denied"
-        except Exception:
-            reason = "malformed host verdict"
+        reason = None
+        if not (head.startswith((b"HTTP/1.1 200 ", b"HTTP/1.0 200 ")) and payload.startswith(allowed_prefix)):
+            try:
+                reason = json_loads(payload).get("error") or "denied"
+            except Exception:
+                reason = "malformed host verdict"
         if in_child:
-            last_child_verdict[0] = (key, False)
-        refuse(api, reason)
+            last_child_verdict[0] = (key, reason)
+        return None if reason is None else refusal(api, reason)
+
+    def judge_exec(api, executed, args, cwd=None):
+        executed_text = text(executed)
+        if not is_executable(executed_text):
+            # Nothing can run: the call fails with ENOENT/EACCES on its own.
+            # `execvp` probes every PATH entry this way before the real one.
+            return None
+        argv = display_argv(executed_text, args)
+        if (executed_text, tuple(argv)) == internal:
+            return None
+        return judge(api, argv=argv, cwd=cwd)
 
     def on_popen(args):
         # Python 3.14+ audits the C `fork_exec`; remember Popen's cwd for it.
-        local.cwd = args[2]
+        popen_cwd[get_ident()] = args[2]
 
     def on_fork_exec(args):
-        cwd, local.cwd = getattr(local, "cwd", None), None
+        cwd = popen_cwd.pop(get_ident(), None)
         candidates, argv = args[0], args[1]
-        program = candidates[0] if candidates and len(candidates) > 0 else None
-        if program is not None and argv and all(basename(text(c)) == basename(text(argv[0])) for c in candidates):
-            program = None
-        judge("subprocess", argv=argv_of(program, argv), cwd=cwd)
+        executed = None
+        for candidate in candidates or ():
+            if is_executable(text(candidate)):
+                executed = candidate
+                break
+        if executed is None:
+            return None
+        return judge_exec("subprocess", executed, argv, cwd)
 
     def on_system(args):
-        judge("os.system", command=text(args[0]))
+        return judge("os.system", command=text(args[0]))
 
     def on_exec(args):
-        judge("os.exec", argv=argv_of(args[0], args[1]))
+        return judge_exec("os.exec", args[0], args[1])
 
     def on_posix_spawn(args):
-        judge("os.posix_spawn", argv=argv_of(args[0], args[1]))
+        path = text(args[0])
+        # posix_spawnp searches the PATH the process holds right now.
+        executed = path if "/" in path else resolve(path, text(env_of("PATH") or ""))
+        if executed is None:
+            return None
+        return judge_exec("os.posix_spawn", executed, args[1])
 
     def on_spawn(args):
-        judge("os.spawn", argv=argv_of(args[1], args[2]))
+        return judge("os.spawn", argv=display_argv(args[1], args[2]))
 
     def on_create_process(args):
-        judge("_winapi.CreateProcess", command=text(args[1] or args[0]), cwd=args[2])
+        return judge("_winapi.CreateProcess", command=text(args[1] or args[0]), cwd=args[2])
 
     def on_ffi(args):
-        refuse("ctypes", "native FFI can load and call any libc function, so the eval kernel refuses it")
+        return f"eval subprocess spawn refused (ctypes): {_NATIVE_CODE}"
 
     def on_import(args):
         if args and args[0] in ("_ctypes", "_cffi_backend"):
-            refuse(args[0], "native FFI can load and call any libc function, so the eval kernel refuses it")
+            return f"eval subprocess spawn refused ({args[0]}): {_NATIVE_CODE}"
+        return None
 
     def on_introspect(args):
-        # These reach the hook's own frames and closures, which is how a cell
-        # would rewrite what the gate judges.
-        raise PermissionError("eval kernel: this introspection is disabled by the spawn gate")
+        # These reach live gate frames, which is how a cell would rewrite what
+        # the gate judges.
+        return "eval kernel: this introspection is disabled by the spawn gate"
 
     protected = set()
 
     def on_setattr(args):
         if id(args[0]) in protected:
-            raise PermissionError("eval kernel: the spawn gate cannot be modified")
+            return "eval kernel: the spawn gate cannot be modified"
+        return None
 
     handlers = {
         "os.system": on_system,
@@ -215,14 +272,27 @@ def install(environ, run_id_getter, timeout=600.0):
         "sys.monitoring.register_callback": on_introspect,
     }
 
+    def dispatch(event, args):
+        handler = handlers.get(event)
+        if handler is None:
+            return None
+        try:
+            return handler(args)
+        except KeyboardInterrupt:
+            return _INTERRUPT
+        except BaseException as exc:  # Fail closed, and let no gate frame escape.
+            message = f"eval subprocess spawn refused: gate error {type(exc).__name__}: {exc}"
+            del exc
+            return message
+
     if py_version >= (3, 14):
         handlers["subprocess.Popen"] = on_popen
         handlers["_posixsubprocess.fork_exec"] = on_fork_exec
     else:
         # Before 3.14 the C `fork_exec` raises no audit event, so the gate wraps
         # it. Both bindings are wrapped because `subprocess` captured its own at
-        # import. A cell that builds a fresh `_posixsubprocess` module reaches
-        # the unwrapped C function; that residual closes on 3.14+.
+        # import. The original stays reachable through the wrapper's closure
+        # and a freshly built `_posixsubprocess` module; both close on 3.14+.
         try:
             import _posixsubprocess, subprocess
         except ImportError:
@@ -232,21 +302,27 @@ def install(environ, run_id_getter, timeout=600.0):
 
             def gated_fork_exec(*args, **kwargs):
                 cwd = args[4] if len(args) > 4 else kwargs.get("cwd")
-                judge("subprocess", argv=argv_of(None, args[0]), cwd=cwd)
+                message = dispatch("_posixsubprocess.fork_exec", (args[1], args[0], None, cwd))
+                if message is not None:
+                    raise PermissionError(message)
                 return original_fork_exec(*args, **kwargs)
 
+            def on_wrapped_fork_exec(args):
+                popen_cwd[get_ident()] = args[3]
+                return on_fork_exec(args)
+
+            handlers["_posixsubprocess.fork_exec"] = on_wrapped_fork_exec
             protected.add(id(gated_fork_exec))
             protected.add(id(gated_fork_exec.__code__))
             _posixsubprocess.fork_exec = gated_fork_exec
             if subprocess is not None and hasattr(subprocess, "_fork_exec"):
                 subprocess._fork_exec = gated_fork_exec
 
-    def hook(event, args):
-        handler = handlers.get(event)
-        if handler is not None:
-            handler(args)
-
-    for fn in (hook, judge, post, text, json_str, argv_of, refuse, *handlers.values()):
+    hook_globals = {"__builtins__": {}}
+    exec(_HOOK_SOURCE, hook_globals)
+    hook = hook_globals.pop("hook")
+    hook.__defaults__ = (dispatch, PermissionError, KeyboardInterrupt)
+    for fn in (hook, dispatch, judge, judge_exec, post, text, json_str, display_argv, refusal, *handlers.values()):
         protected.add(id(fn))
         protected.add(id(fn.__code__))
     sys.addaudithook(hook)
