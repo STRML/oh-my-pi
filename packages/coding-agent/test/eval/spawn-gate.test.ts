@@ -667,20 +667,17 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				.stdout.toString()
 				.trim();
 			fs.symlinkSync(path.dirname(foreignExtension!), path.join(site, "linked"));
-			// The venv and the link are new; an epoch after them isolates the symlink check.
-			await Bun.sleep(1_100);
-			const loaded = path.join(fs.realpathSync(site), "linked", path.basename(foreignExtension!));
-			const output = await runPreludeIn(
-				venvPython,
+			const loaded = path.join(site, "linked", path.basename(foreignExtension!));
+			const result = await executePython(
 				[
 					"import importlib.machinery, importlib.util",
 					`loader = importlib.machinery.ExtensionFileLoader("_json", ${JSON.stringify(loaded)})`,
 					`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("_json", ${JSON.stringify(loaded)}, loader=loader)); print("RAN")`,
 					"except BaseException as e: print(type(e).__name__, e)",
 				].join("\n"),
-				Date.now() / 1000,
+				{ cwd: tempDir.path(), sessionId: "spawn-gate-py-venv", toolSession: session, interpreter: venvPython },
 			);
-			expect(output).toContain("is a symlink");
+			expect(result.output).toContain("is a symlink");
 		},
 	);
 
@@ -735,9 +732,47 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		});
 		const output = await new Response(proc.stdout).text();
 		await proc.exited;
-		// Moving the directory in changed site-packages too; the walk refuses there.
-		expect(output).toContain("changed during this omp session");
-		expect(output).not.toContain("RAN");
+		expect(output).toContain(`${path.join(fs.realpathSync(site), "moved_pkg")} changed during this omp session`);
+	});
+
+	it("still loads an old extension from a root a pip-style install wrote into this session", async () => {
+		// `pip install` adds files and directories to site-packages, changing its
+		// ctime; extensions already there must keep loading.
+		const venv = path.join(tempDir.path(), "venv-pip");
+		expect(Bun.spawnSync([python!, "-m", "venv", "--without-pip", venv]).exitCode).toBe(0);
+		const venvPython = path.join(venv, "bin", "python");
+		const site = fs.realpathSync(
+			Bun.spawnSync([venvPython, "-c", "import site; print(site.getsitepackages()[0])"], { stdout: "pipe" })
+				.stdout.toString()
+				.trim(),
+		);
+		const suffix = Bun.spawnSync(
+			[venvPython, "-c", "import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])"],
+			{
+				stdout: "pipe",
+			},
+		)
+			.stdout.toString()
+			.trim();
+		fs.mkdirSync(path.join(site, "oldpkg"));
+		const existing = path.join(site, "oldpkg", `old_mod${suffix}`);
+		fs.writeFileSync(existing, "not really a shared object");
+		await Bun.sleep(1_100);
+		const output = await runPreludeIn(
+			venvPython,
+			[
+				"import importlib.machinery, importlib.util, os",
+				`os.mkdir(${JSON.stringify(path.join(site, "newpkg"))})`,
+				`open(${JSON.stringify(path.join(site, "newpkg-1.0.dist-info"))}, "w").close()`,
+				`loader = importlib.machinery.ExtensionFileLoader("old_mod", ${JSON.stringify(existing)})`,
+				`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("old_mod", ${JSON.stringify(existing)}, loader=loader)); print("RAN")`,
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+			Date.now() / 1000,
+		);
+		// The gate let it through: the load got as far as dlopen, which rejects the dummy file.
+		expect(output).not.toContain("spawn refused");
+		expect(output).toContain("dlopen(");
 	});
 
 	it("refuses an old extension under a trusted root that a cell moved into place after the gate installed", async () => {
