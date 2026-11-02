@@ -214,7 +214,9 @@ layer() {
 	say "layered   #$n"
 }
 
-# Fork-local commits: everything on the old fork main past its upstream base that is not a layer.
+# Fork-local commits: everything on the old fork main past its upstream base that is not a layer,
+# plus unpushed commits on the main checkout's local main when it builds on the old fork main
+# (agents cannot push main directly; this run is how a local script fix reaches it).
 carry_local() {
 	local base sha subject
 	base="$(git merge-base "$ORIGIN" "$UPSTREAM")"
@@ -223,7 +225,7 @@ carry_local() {
 		if has_subject "$subject"; then say "have      $subject"; continue; fi
 		git cherry-pick "$sha" >/dev/null || die "carry of $sha ($subject) conflicted in $WT; resolve, git cherry-pick --continue, rerun with --resume"
 		say "carried   $subject"
-	done 3< <(git log --reverse --format='%H %s' "$base..$ORIGIN")
+	done 3< <(git log --reverse --format='%H %s' "$base..$CARRY")
 }
 
 # Rebuilds natives and the binary from the worktree, then swaps it onto PATH through a new
@@ -310,6 +312,7 @@ if (( RESUME )); then
 	[[ -f "$STATE" ]] || die "no saved run to resume"
 	# shellcheck source=/dev/null
 	source "$STATE"
+	CARRY="${CARRY:-$ORIGIN}"
 	[[ "$(git branch --show-current)" == "$BRANCH" ]] || die "$WT is not on $BRANCH"
 	[[ -z "$(unresolved)" ]] || die "unresolved files remain in $WT"
 else
@@ -321,12 +324,17 @@ else
 	: > "$REBASED"
 	UPSTREAM="$(git rev-parse upstream/main)"
 	ORIGIN="$(git rev-parse origin/main)"
-	printf 'UPSTREAM=%s\nORIGIN=%s\n' "$UPSTREAM" "$ORIGIN" > "$STATE"
+	CARRY="$ORIGIN"
+	if git -C "$ROOT" merge-base --is-ancestor "$ORIGIN" refs/heads/main; then
+		CARRY="$(git -C "$ROOT" rev-parse refs/heads/main)"
+	fi
+	printf 'UPSTREAM=%s\nORIGIN=%s\nCARRY=%s\n' "$UPSTREAM" "$ORIGIN" "$CARRY" > "$STATE"
 	list_prs > "$PRS"
 	fetch_prs
 fi
 say "upstream/main = $UPSTREAM"
 say "origin/main   = $ORIGIN"
+[[ "$CARRY" == "$ORIGIN" ]] || say "local main    = $CARRY (unpushed commits carried)"
 say "PRs: $(cut -f1 "$PRS" | tr '\n' ' ')"
 
 if (( CHECK_ONLY )); then
@@ -385,7 +393,7 @@ done 3< "$REBASED"
 # Bring the main checkout along, so its copy of this script is the one just pushed.
 # Only when local main held nothing past the old fork main; reset --keep refuses to
 # clobber uncommitted edits.
-if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" merge-base --is-ancestor main "$ORIGIN"; then
+if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" merge-base --is-ancestor main "$CARRY"; then
 	git -C "$ROOT" reset -q --keep "$(git rev-parse HEAD)" && say "main checkout = $(git rev-parse --short HEAD)"
 else
 	say "main checkout left alone; to follow: git -C $ROOT checkout -B main origin/main"
