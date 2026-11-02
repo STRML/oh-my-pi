@@ -18,11 +18,16 @@
 #   scripts/sync-fork-main.sh --no-push   # same, leave the pushes to you
 #   scripts/sync-fork-main.sh --no-check  # skip bun check
 #   scripts/sync-fork-main.sh --resume    # continue after resolving a layer conflict by hand
-#   scripts/sync-fork-main.sh --no-install  # skip rebuilding and installing omp
+#   scripts/sync-fork-main.sh --no-install  # skip rebuilding and installing omp (here and Studio)
+#   scripts/sync-fork-main.sh --no-studio   # install here, leave the Studio alone
+#   scripts/sync-fork-main.sh --install-only  # build origin/main and install it here; no layering
 #
 # Every run that is not --check or --no-push ends by rebuilding the native addon and the omp
 # binary from the result and installing it over the omp on PATH, even when nothing was pushed.
-# A stale native addon or a too-old Bun has broken the installed omp before.
+# A stale native addon or a too-old Bun has broken the installed omp before. It then does the
+# same on the Studio through studio-sh (LAN as studio-local, else the personal tailnet as
+# studio), running origin/main's copy of this script there with --install-only. An unreachable
+# Studio prints "STUDIO NOT UPDATED" and the run exits 3 after everything else is done.
 #
 # A conflict between two PRs stops the build in the worktree it prints. Resolve the files,
 # `git add` them, commit as "layer #N: <title>", then rerun with --resume. Keep rerere on
@@ -36,7 +41,7 @@ AUTHOR="STRML"
 # Other people's open PRs we also layer onto fork main. Drop a number once it merges.
 EXTRA_PRS=(16726)
 
-CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0; NO_INSTALL=0
+CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0; NO_INSTALL=0; NO_STUDIO=0; INSTALL_ONLY=0
 for arg in "$@"; do
 	case "$arg" in
 		--check) CHECK_ONLY=1;;
@@ -44,6 +49,8 @@ for arg in "$@"; do
 		--no-push) NO_PUSH=1;;
 		--no-check) NO_CHECK=1;;
 		--no-install) NO_INSTALL=1;;
+		--no-studio) NO_STUDIO=1;;
+		--install-only) INSTALL_ONLY=1;;
 		*) printf 'unknown option: %s\n' "$arg" >&2; exit 1;;
 	esac
 done
@@ -110,13 +117,21 @@ suspect() {
 }
 
 # Rebases refs/pr/N onto upstream/main in the worktree, continuing through every stop that
-# rerere fully resolved. Leaves the rebased head checked out (detached) on success; aborts
-# and returns 1 on a conflict rerere does not know.
+# rerere fully resolved, or that scripts/changelog-reapply.ts resolved (only Unreleased entries
+# conflicting). Leaves the rebased head checked out (detached) on success; aborts and returns 1 on
+# a conflict neither knows.
 rebase_pr() {
 	local n="$1" stops=0
 	git checkout -q --detach "refs/pr/$n"
 	git rebase -q "$UPSTREAM" >/dev/null 2>&1 && return 0
 	while [[ -d "$(git rev-parse --git-path rebase-merge)" ]]; do
+		# Two PRs adding entries to one Unreleased section always conflict; re-add ours on top of upstream's.
+		local left
+		left="$(unresolved)"
+		if [[ -n "$left" ]] && ! grep -qv 'CHANGELOG\.md$' <<<"$left"; then
+			# shellcheck disable=SC2086 # one path per line, none with spaces
+			bun "$ROOT/scripts/changelog-reapply.ts" $left || true
+		fi
 		if [[ -n "$(unresolved)" ]] || (( ++stops > 200 )); then
 			git rebase --abort >/dev/null 2>&1
 			return 1
@@ -199,7 +214,9 @@ layer() {
 	say "layered   #$n"
 }
 
-# Fork-local commits: everything on the old fork main past its upstream base that is not a layer.
+# Fork-local commits: everything on the old fork main past its upstream base that is not a layer,
+# plus unpushed commits on the main checkout's local main when it builds on the old fork main
+# (agents cannot push main directly; this run is how a local script fix reaches it).
 carry_local() {
 	local base sha subject
 	base="$(git merge-base "$ORIGIN" "$UPSTREAM")"
@@ -208,7 +225,7 @@ carry_local() {
 		if has_subject "$subject"; then say "have      $subject"; continue; fi
 		git cherry-pick "$sha" >/dev/null || die "carry of $sha ($subject) conflicted in $WT; resolve, git cherry-pick --continue, rerun with --resume"
 		say "carried   $subject"
-	done 3< <(git log --reverse --format='%H %s' "$base..$ORIGIN")
+	done 3< <(git log --reverse --format='%H %s' "$base..$CARRY")
 }
 
 # Rebuilds natives and the binary from the worktree, then swaps it onto PATH through a new
@@ -235,8 +252,48 @@ install_omp() {
 	say "installed $dest = $want"
 }
 
+# Runs --install-only on the Studio from origin/main's copy of this script (the Studio checkout
+# may hold an older one). Tailscale SSH always exits 0, so success is the "installed" line.
+install_studio() {
+	(( NO_INSTALL || NO_STUDIO )) && return 0
+	say "== rebuild and install omp on the Studio =="
+	local log url
+	url="$(git -C "$ROOT" remote get-url origin)"
+	log="$(mktemp)"
+	studio-sh <<-EOF 2>&1 | tee "$log" || true
+		set -euo pipefail
+		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
+		dir="\$HOME/git/forks/omp"
+		[[ -d "\$dir/.git" ]] || git clone -q "$url" "\$dir"
+		cd "\$dir"
+		git fetch -q origin main
+		mkdir -p .watch
+		git show origin/main:scripts/sync-fork-main.sh > .watch/sync-fork-main.sh
+		bash .watch/sync-fork-main.sh --install-only
+	EOF
+	if ! grep -q '^installed .* = omp/' "$log"; then
+		STUDIO_FAILED=1
+		say "STUDIO NOT UPDATED (see output above); rerun: scripts/sync-fork-main.sh --install-only on the Studio"
+	fi
+}
+
+# Last step of every installing run: the Studio, then the exit code that reports it.
+finish() {
+	STUDIO_FAILED=0
+	install_studio
+	(( STUDIO_FAILED )) && exit 3
+	exit 0
+}
+
 say "== fetch =="
 git -C "$ROOT" fetch -q origin main
+if (( INSTALL_ONLY )); then
+	[[ -d "$WT" ]] || git -C "$ROOT" worktree add -q --detach "$WT" origin/main
+	cd "$WT"
+	git checkout -q --detach origin/main
+	install_omp
+	exit 0
+fi
 git -C "$ROOT" fetch -q upstream main
 # A stale checkout runs a stale script: say so before it rebuilds main with old rules.
 if ! cmp -s "${BASH_SOURCE[0]}" <(git -C "$ROOT" show origin/main:scripts/sync-fork-main.sh); then
@@ -255,6 +312,7 @@ if (( RESUME )); then
 	[[ -f "$STATE" ]] || die "no saved run to resume"
 	# shellcheck source=/dev/null
 	source "$STATE"
+	CARRY="${CARRY:-$ORIGIN}"
 	[[ "$(git branch --show-current)" == "$BRANCH" ]] || die "$WT is not on $BRANCH"
 	[[ -z "$(unresolved)" ]] || die "unresolved files remain in $WT"
 else
@@ -266,12 +324,17 @@ else
 	: > "$REBASED"
 	UPSTREAM="$(git rev-parse upstream/main)"
 	ORIGIN="$(git rev-parse origin/main)"
-	printf 'UPSTREAM=%s\nORIGIN=%s\n' "$UPSTREAM" "$ORIGIN" > "$STATE"
+	CARRY="$ORIGIN"
+	if git -C "$ROOT" merge-base --is-ancestor "$ORIGIN" refs/heads/main; then
+		CARRY="$(git -C "$ROOT" rev-parse refs/heads/main)"
+	fi
+	printf 'UPSTREAM=%s\nORIGIN=%s\nCARRY=%s\n' "$UPSTREAM" "$ORIGIN" "$CARRY" > "$STATE"
 	list_prs > "$PRS"
 	fetch_prs
 fi
 say "upstream/main = $UPSTREAM"
 say "origin/main   = $ORIGIN"
+[[ "$CARRY" == "$ORIGIN" ]] || say "local main    = $CARRY (unpushed commits carried)"
 say "PRs: $(cut -f1 "$PRS" | tr '\n' ' ')"
 
 if (( CHECK_ONLY )); then
@@ -300,7 +363,7 @@ git log --oneline "$UPSTREAM..HEAD" | cat
 if [[ "$(git merge-base "$ORIGIN" "$UPSTREAM")" == "$UPSTREAM" && "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "$ORIGIN^{tree}")" && ! -s "$REBASED" ]]; then
 	say "fork main already matches this rebuild; nothing to push"
 	install_omp
-	exit 0
+	finish
 fi
 
 if (( ! NO_CHECK )); then
@@ -330,10 +393,11 @@ done 3< "$REBASED"
 # Bring the main checkout along, so its copy of this script is the one just pushed.
 # Only when local main held nothing past the old fork main; reset --keep refuses to
 # clobber uncommitted edits.
-if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" merge-base --is-ancestor main "$ORIGIN"; then
+if [[ "$(git -C "$ROOT" branch --show-current)" == main ]] && git -C "$ROOT" merge-base --is-ancestor main "$CARRY"; then
 	git -C "$ROOT" reset -q --keep "$(git rev-parse HEAD)" && say "main checkout = $(git rev-parse --short HEAD)"
 else
 	say "main checkout left alone; to follow: git -C $ROOT checkout -B main origin/main"
 fi
 
 install_omp
+finish

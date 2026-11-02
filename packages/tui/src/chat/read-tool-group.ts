@@ -1114,7 +1114,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatRow(row: ReadSummaryRow): string {
 		const status = this.#statusForTargets(row.targets);
-		const statusPrefix = status === "success" ? "" : `${this.#formatStatus(status)} `;
+		const statusPrefix = status === "success" ? "" : `${formatStatusIcon(status, theme)} `;
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
@@ -1304,24 +1304,11 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this.#expanded && entry.contentText !== undefined;
 	}
 
-	#formatStatus(status: ReadEntry["status"]): string {
-		if (status === "success") {
-			return theme.fg("text", theme.status.enabled);
-		}
-		if (status === "warning") {
-			return theme.fg("warning", theme.status.warning);
-		}
-		if (status === "error") {
-			return theme.fg("error", theme.status.error);
-		}
-		return theme.fg("dim", theme.status.pending);
-	}
-
 	/** Title mode matches the shared tool title row: status glyph, label, ` · ` target. */
 	#titleHead(status: ReadEntry["status"], target: string): string {
 		const label = theme.fg("toolTitle", theme.bold("Read"));
 		if (!chatTranscriptDisplayPreferences.collapsedToolTitles) {
-			return ` ${this.#formatStatus(status)} ${label} ${target}`.trimEnd();
+			return ` ${formatStatusIcon(status, theme)} ${label} ${target}`.trimEnd();
 		}
 		return `${formatStatusIcon(status, theme)} ${label}${theme.fg("muted", " · ")}${target}`;
 	}

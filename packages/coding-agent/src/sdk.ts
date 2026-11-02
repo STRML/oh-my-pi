@@ -198,7 +198,12 @@ import {
 	CREDENTIAL_DISABLED_NOTICE_SOURCE,
 	formatCredentialDisabledNotice,
 } from "./session/credential-disabled-notice";
-import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
+import {
+	createSessionDateCwdReminderJournal,
+	type DateCwdReminderJournal,
+	DateCwdReminderInjector,
+	readOnlyDateCwdReminderJournal,
+} from "./session/date-cwd-reminder";
 import { createInterruptedToolResults, createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
@@ -2608,7 +2613,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
-			refreshSkills: () => session.refreshSkills(),
+			refreshSkills: () => session.reloadSkills(),
 			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
@@ -4363,7 +4368,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
-				skills: cfgSkillful.get(settings) ? (session?.skills ?? skills) : [],
+				skills: cfgSkillful.get(settings) ? (session?.promptSkills ?? skills) : [],
 				skillDescriptions,
 				contextFiles,
 				tools: promptTools,
@@ -4646,8 +4651,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
-		const createTransformProviderContext = () => {
-			const dateCwdReminder = new DateCwdReminderInjector();
+		// Only the main loop journals its reminders in the session.
+		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
+			const dateCwdReminder = new DateCwdReminderInjector(journal);
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
@@ -4672,7 +4678,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			};
 		};
-		const transformProviderContext = createTransformProviderContext();
+		const transformProviderContext = createTransformProviderContext(
+			createSessionDateCwdReminderJournal(sessionManager),
+		);
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
 		};
@@ -5115,7 +5123,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
-			createAdvisorTransformProviderContext: createTransformProviderContext,
+			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
@@ -5673,27 +5681,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
-				const captureDateCwdReminder = new DateCwdReminderInjector();
 				return new Agent({
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
-					transformProviderContext: async (context, transformModel) => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						transformed = capArchiveFrameBytes(transformed, transformModel);
-						transformed = clampProviderContextImages(transformed, transformModel);
-						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						transformed = await blobBroker.decorateContext(transformed, transformModel);
-						transformed = clampProviderContextImageBytes(transformed, transformModel);
-						return captureDateCwdReminder.transform(
-							transformed,
-							formatLocalCalendarDate(),
-							normalizePromptPath(sessionManager.getCwd()),
-						);
-					},
+					// The primary's chain, snapcompact included: a capture that sent the tool results the primary
+					// rasterized as text would diverge from the primary prompt at the first frame. The reminder
+					// journal is read-only, so the capture repeats the primary's date/cwd placements (a session
+					// past midnight or a /move) without recording its own into the session.
+					transformProviderContext: createTransformProviderContext(
+						readOnlyDateCwdReminderJournal(createSessionDateCwdReminderJournal(sessionManager)),
+					),
 					temperature: agent.temperature,
 					topP: agent.topP,
 					topK: agent.topK,
