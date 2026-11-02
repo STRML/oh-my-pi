@@ -110,13 +110,21 @@ suspect() {
 }
 
 # Rebases refs/pr/N onto upstream/main in the worktree, continuing through every stop that
-# rerere fully resolved. Leaves the rebased head checked out (detached) on success; aborts
-# and returns 1 on a conflict rerere does not know.
+# rerere fully resolved, or that scripts/changelog-reapply.ts resolved (only Unreleased entries
+# conflicting). Leaves the rebased head checked out (detached) on success; aborts and returns 1 on
+# a conflict neither knows.
 rebase_pr() {
 	local n="$1" stops=0
 	git checkout -q --detach "refs/pr/$n"
 	git rebase -q "$UPSTREAM" >/dev/null 2>&1 && return 0
 	while [[ -d "$(git rev-parse --git-path rebase-merge)" ]]; do
+		# Two PRs adding entries to one Unreleased section always conflict; re-add ours on top of upstream's.
+		local left
+		left="$(unresolved)"
+		if [[ -n "$left" ]] && ! grep -qv 'CHANGELOG\.md$' <<<"$left"; then
+			# shellcheck disable=SC2086 # one path per line, none with spaces
+			bun "$ROOT/scripts/changelog-reapply.ts" $left || true
+		fi
 		if [[ -n "$(unresolved)" ]] || (( ++stops > 200 )); then
 			git rebase --abort >/dev/null 2>&1
 			return 1
