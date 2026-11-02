@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
+import { installJsSpawnGate } from "./spawn-gate";
 import { WorkerCore } from "./worker-core";
 import type { Transport, WorkerInbound, WorkerOutbound } from "./worker-protocol";
 
@@ -34,4 +35,6 @@ const transport: Transport = {
 	},
 };
 
-new WorkerCore(transport, { mode: "isolated" });
+const core = new WorkerCore(transport, { mode: "isolated" });
+// This realm runs only eval cells, so every spawn in it is gated.
+installJsSpawnGate(() => core.spawnGateContext());
