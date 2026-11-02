@@ -61,6 +61,19 @@ for (const [name, body] of [
 	fs.chmodSync(path.join(hijackDir, name), 0o755);
 }
 
+/** A hijacked spawn names the file that runs and carries the PATH that picked it. */
+function expectHijacked(command: string, expectedTail: string): void {
+	expect(command.startsWith("PATH=")).toBe(true);
+	expect(command).toContain(hijackDir);
+	expect(command.endsWith(` ${expectedTail}`)).toBe(true);
+}
+
+/** A directory with an executable `x` that creates `<dir>/x.ran`, for relative-path spawns. */
+const otherDir = path.join(tempDir.path(), "other");
+fs.mkdirSync(otherDir);
+fs.writeFileSync(path.join(otherDir, "x"), `#!/bin/sh\n: > ${JSON.stringify(path.join(otherDir, "x.ran"))}\n`);
+fs.chmodSync(path.join(otherDir, "x"), 0o755);
+
 let markerSeq = 0;
 function marker(): string {
 	markerSeq += 1;
@@ -193,7 +206,8 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				'finally: os.environ["PATH"] = start_path',
 			].join("\n"),
 		);
-		expect(judged.map(input => input.command)).toEqual([`${path.join(hijackDir, "touch")} ${file}`]);
+		expect(judged).toHaveLength(1);
+		expectHijacked(judged[0]!.command, `${path.join(hijackDir, "touch")} ${file}`);
 	});
 
 	it("does not let the runner's own ps listing run a hijacked ps unjudged", async () => {
@@ -208,7 +222,8 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				'finally: os.environ["PATH"] = start_path',
 			].join("\n"),
 		);
-		expect(judged.map(input => input.command)).toEqual([`${path.join(hijackDir, "ps")} -A -o pid=,ppid=`]);
+		expect(judged).toHaveLength(1);
+		expectHijacked(judged[0]!.command, `${path.join(hijackDir, "ps")} -A -o pid=,ppid=`);
 		expect(await Bun.file(path.join(hijackDir, "ps.hijacked")).exists()).toBe(false);
 	});
 
@@ -247,6 +262,51 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		);
 		expect(judged.map(input => input.command)).toEqual([`touch ${file}`]);
 		expect(await Bun.file(file).exists()).toBe(true);
+	});
+
+	it("judges a relative executable in the subprocess cwd it runs from, and a deny stops it", async () => {
+		const ran = path.join(otherDir, "x.ran");
+		const code = `import subprocess\nsubprocess.run(["./x"], cwd=${JSON.stringify(otherDir)})`;
+		verdict = "deny";
+		const denied = await runPython(code);
+		expect(denied.output).toContain("eval subprocess spawn refused");
+		expect(judged).toEqual([{ command: `${otherDir}/./x`, cwd: otherDir }]);
+		expect(await Bun.file(ran).exists()).toBe(false);
+		verdict = "allow";
+		await runPython(code);
+		expect(await Bun.file(ran).exists()).toBe(true);
+	});
+
+	it("puts changed execution-affecting variables in front of the judged command", async () => {
+		verdict = "deny";
+		await runPython(
+			[
+				"import os, subprocess",
+				'try: subprocess.run(["true"], env={**os.environ, "LD_PRELOAD": "/tmp/evil.so"})',
+				"except PermissionError: pass",
+				'os.environ["GIT_SSH_COMMAND"] = "ssh -o ProxyCommand=evil"',
+				'try: os.system("git fetch")',
+				"except PermissionError: pass",
+				'finally: del os.environ["GIT_SSH_COMMAND"]',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([
+			"LD_PRELOAD=/tmp/evil.so true",
+			"GIT_SSH_COMMAND='ssh -o ProxyCommand=evil' /bin/sh -c 'git fetch'",
+		]);
+	});
+
+	it("keeps the raw C fork_exec out of reach of cell code", async () => {
+		const result = await runPython(
+			[
+				"import sys, _posixsubprocess",
+				"print(_posixsubprocess.fork_exec.__closure__, _posixsubprocess.fork_exec.__defaults__)",
+				'del sys.modules["_posixsubprocess"]',
+				"import _posixsubprocess",
+			].join("\n"),
+		);
+		expect(result.output).toContain("None None");
+		expect(result.output).toContain("re-importing it would bypass the gate");
 	});
 
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
@@ -326,7 +386,36 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 			].join("\n"),
 		);
 		const hijackedTouch = path.join(hijackDir, "touch");
-		expect(judged.map(input => input.command)).toEqual([`${hijackedTouch} ${first}`, `${hijackedTouch} ${second}`]);
+		expect(judged).toHaveLength(2);
+		expectHijacked(judged[0]!.command, `${hijackedTouch} ${first}`);
+		expectHijacked(judged[1]!.command, `${hijackedTouch} ${second}`);
+	});
+
+	it("puts changed execution-affecting variables in front of the judged command", async () => {
+		verdict = "deny";
+		await runJs(
+			[
+				'try { Bun.spawnSync(["true"], { env: { ...process.env, LD_PRELOAD: "/tmp/evil.so" } }); } catch {}',
+				'Bun.$.env({ ...process.env, GIT_SSH_COMMAND: "evil" });',
+				"try { Bun.$`git fetch`; } catch {} finally { Bun.$.env(); }",
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([
+			"LD_PRELOAD=/tmp/evil.so true",
+			"GIT_SSH_COMMAND=evil /bin/sh -c 'git fetch'",
+		]);
+	});
+
+	it("judges Bun.$ again when .cwd() changes where it runs, before it runs", async () => {
+		const file = marker();
+		const result = await runJs(`await Bun.$\`touch \${${JSON.stringify(file)}}\`.cwd("/");`);
+		expect(result.output).not.toContain("spawn refused");
+		const command = `touch ${Bun.$.escape(file)}`;
+		expect(judged).toEqual([
+			{ command, cwd: expect.any(String) },
+			{ command, cwd: "/" },
+		]);
+		expect(judged[0]!.cwd).not.toBe("/");
 	});
 
 	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {
@@ -337,6 +426,8 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 	it("refuses native code loading and new realms without asking the host", async () => {
 		const attempts = [
 			'await import("bun:" + "ffi")',
+			"await (0, eval)(\"import('bun:ffi')\")",
+			"await new Function(\"return import('bun:' + 'ffi')\")()",
 			'require("bun:ffi").dlopen("libc.dylib", {})',
 			'process.dlopen({ exports: {} }, "x.node")',
 			'new Worker("data:text/javascript,0")',

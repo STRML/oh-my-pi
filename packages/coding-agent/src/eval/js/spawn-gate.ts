@@ -30,6 +30,9 @@
  * non-configurable, so cell code cannot put the original back.
  */
 import { Worker as ThreadWorker } from "node:worker_threads";
+// The CLI host imports this lazily after startup, and it imports `bun:ffi`,
+// which the gate's resolver refuses once installed; load it before that.
+import "@oh-my-pi/pi-utils/process-name";
 
 export interface SpawnGateEndpoint {
 	url: string;
@@ -115,19 +118,6 @@ const HelperWorker = ThreadWorker;
 
 let installed = false;
 
-/** Modules whose ESM namespace predates the gate and so cannot be patched in place. */
-const REFUSED_IMPORTS = new Set(["bun:ffi"]);
-
-/** Whether the installed gate refuses a cell import of `specifier`. */
-export function isRefusedImport(specifier: string): boolean {
-	return installed && REFUSED_IMPORTS.has(specifier);
-}
-
-/** Throws the gate's refusal for an import {@link isRefusedImport} rejects. */
-export function refuseImport(specifier: string): never {
-	throw new SpawnRefusedError(`import ${stringify(specifier)}`, NATIVE_CODE);
-}
-
 type BuiltinModule = Record<string, unknown>;
 const getBuiltinModule = (process as unknown as { getBuiltinModule(id: string): BuiltinModule }).getBuiltinModule.bind(
 	process,
@@ -144,6 +134,34 @@ function snapshotArgv(value: unknown): string[] {
 	const out: string[] = [];
 	const length = value.length;
 	for (let i = 0; i < length; i++) out[i] = asText(value[i]);
+	return out;
+}
+
+/** Variables that change which program runs or what it loads, beyond its argv. */
+const WATCHED_ENV = new Set([
+	"PATH",
+	"BASH_ENV",
+	"ENV",
+	"LD_PRELOAD",
+	"LD_LIBRARY_PATH",
+	"NODE_OPTIONS",
+	"PYTHONSTARTUP",
+	"PYTHONPATH",
+	"GIT_SSH",
+	"GIT_SSH_COMMAND",
+	"GIT_EXEC_PATH",
+	"PERL5OPT",
+	"RUBYOPT",
+]);
+
+const isWatched = (name: string): boolean => WATCHED_ENV.has(name) || name.startsWith("DYLD_");
+
+/** Copy an environment into fresh string values; the copy is what both the judge and the spawn see. */
+function snapshotEnv(value: object): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [name, entry] of Object.entries(value)) {
+		if (entry !== undefined && entry !== null) out[name] = asText(entry);
+	}
 	return out;
 }
 
@@ -178,7 +196,7 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 	const flags = new Int32Array(state);
 	const bytes = new Uint8Array(data);
 	let helper: ThreadWorker | undefined;
-	const startupPath = process.env.PATH ?? "";
+	const startupEnv = snapshotEnv(process.env);
 
 	const ask = (endpoint: SpawnGateEndpoint, body: string): string => {
 		helper ??= new HelperWorker(HELPER_SOURCE, { eval: true });
@@ -202,17 +220,23 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 		return decoder.decode(bytes.slice(0, atomicsLoad(flags, 1)));
 	};
 
-	const judge = (api: string, request: { argv?: string[]; command?: string; cwd?: unknown }): void => {
+	const judge: Judge = (api, request) => {
 		const { endpoint, runId } = context();
 		if (!endpoint) throw new SpawnRefusedError(api, "no host bridge in this kernel");
 		if (!runId) throw new SpawnRefusedError(api, "no active eval run owns this spawn");
-		const cwd = request.cwd === undefined || request.cwd === null ? cwdOf() : asText(request.cwd);
 		const what =
 			request.command !== undefined
 				? `"command":${stringify(request.command)}`
 				: `"argv":${jsonArray(request.argv ?? [])}`;
+		// Changed execution-affecting variables lead the judged command on the host.
+		let delta = "";
+		for (const [name, value] of Object.entries(request.env)) {
+			if (!isWatched(name) || startupEnv[name] === value) continue;
+			delta += `${delta ? "," : ""}${stringify(name)}:${stringify(value)}`;
+		}
+		const env = delta ? `,"env":{${delta}}` : "";
 		// Built from primitives: JSON.stringify of an object or array would consult a cell-defined `toJSON`.
-		const body = `{"session":${stringify(endpoint.session)},"run":${stringify(runId)},"name":"__spawn__","args":{"api":${stringify(api)},"cwd":${stringify(cwd)},${what}}}`;
+		const body = `{"session":${stringify(endpoint.session)},"run":${stringify(runId)},"name":"__spawn__","args":{"api":${stringify(api)},"cwd":${stringify(request.cwd)},${what}${env}}}`;
 		const response = ask(endpoint, body);
 		if (response.startsWith(ALLOWED_PREFIX)) return;
 		let reason = "denied";
@@ -225,8 +249,8 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 		throw new SpawnRefusedError(api, reason);
 	};
 
-	gateBunSpawn("spawn", judge, startupPath);
-	gateBunSpawn("spawnSync", judge, startupPath);
+	gateBunSpawn("spawn", judge, startupEnv.PATH ?? "");
+	gateBunSpawn("spawnSync", judge, startupEnv.PATH ?? "");
 	gateBunShell(judge);
 	gateProcess(judge);
 	refuseNativeCode();
@@ -238,38 +262,50 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 	lock(getBuiltinModule("node:worker_threads"), "Worker", refuseWorker);
 }
 
-type Judge = (api: string, request: { argv?: string[]; command?: string; cwd?: unknown }) => void;
+interface JudgeRequest {
+	argv?: string[];
+	command?: string;
+	cwd: string;
+	/** The full environment the spawn runs with, as strings. */
+	env: Record<string, string>;
+}
 
-/** `Bun.spawn(cmd, options?)` and `Bun.spawn({ cmd, ...options })`, sync or not. */
+type Judge = (api: string, request: JudgeRequest) => void;
+
 /**
- * The argv to judge. argv[0] stays as written only when the PATH the kernel
- * started with resolves it to the same file the spawn's own PATH does;
- * otherwise it becomes that file's path, so a PATH a cell set shows.
+ * The argv to judge. argv[0] stays as written when it names a path (judged
+ * with the spawn's cwd), when PATH has relative entries or the lookup fails (a
+ * changed PATH is judged as a `PATH=` prefix instead), or when the startup PATH
+ * resolves it to the same file the spawn's PATH does. Otherwise it becomes the
+ * file that runs, so a PATH a cell set shows in the command itself.
  */
-function displayArgv(argv: string[], spawnPath: string, startupPath: string): string[] {
+function displayArgv(argv: string[], spawnPath: string, startupPath: string, cwd: string): string[] {
 	const program = argv[0];
 	if (program === undefined || program.includes("/")) return argv;
-	const executed = which(program, { PATH: spawnPath });
-	if (executed === null || executed === which(program, { PATH: startupPath })) return argv;
+	if (spawnPath.split(":").some(entry => !entry.startsWith("/"))) return argv;
+	const executed = which(program, { PATH: spawnPath, cwd });
+	if (executed === null || executed === which(program, { PATH: startupPath, cwd })) return argv;
 	const shown = argv.slice();
 	shown[0] = executed;
 	return shown;
 }
 
+/** `Bun.spawn(cmd, options?)` and `Bun.spawn({ cmd, ...options })`, sync or not. */
 function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge, startupPath: string): void {
 	const original = Bun[key] as (...args: unknown[]) => unknown;
 	const api = `Bun.${key}`;
 	const gated = function (this: unknown, first: unknown, second?: unknown): unknown {
-		// One read of each option, then only the copies are used.
+		// One read of each option, then only the copies are judged and spawned:
+		// the spawn always gets an explicit cwd and env of plain strings.
 		const fromArgv = isArray(first);
 		const source = fromArgv ? second : first;
 		const options: Record<string, unknown> = source && typeof source === "object" ? { ...source } : {};
 		const argv = snapshotArgv(fromArgv ? first : options.cmd);
-		if (options.cwd !== undefined && options.cwd !== null) options.cwd = asText(options.cwd);
-		if (options.env && typeof options.env === "object") options.env = { ...options.env };
-		const env = options.env as Record<string, unknown> | undefined;
-		const spawnPath = env && env.PATH !== undefined ? asText(env.PATH) : (process.env.PATH ?? "");
-		judge(api, { argv: displayArgv(argv, spawnPath, startupPath), cwd: options.cwd });
+		const cwd = options.cwd !== undefined && options.cwd !== null ? asText(options.cwd) : cwdOf();
+		const env = snapshotEnv(options.env && typeof options.env === "object" ? options.env : process.env);
+		options.cwd = cwd;
+		options.env = env;
+		judge(api, { argv: displayArgv(argv, env.PATH ?? "", startupPath, cwd), cwd, env });
 		if (fromArgv) return original.call(Bun, argv, options);
 		options.cmd = argv;
 		return original.call(Bun, options);
@@ -308,19 +344,57 @@ function gateBunShell(judge: Judge): void {
 				command += "<object>";
 			}
 		}
-		judge("Bun.$", { command });
+		let cwd = defaults.cwd ?? cwdOf();
+		let env = defaults.env ?? snapshotEnv(process.env);
+		judge("Bun.$", { command, cwd, env });
 		const template = Object.assign([...parts], { raw: [...parts] }) as unknown as TemplateStringsArray;
-		return original(template, ...words);
+		const promise = original(template, ...words) as Bun.$.ShellPromise;
+		// `.cwd()` / `.env()` change what runs after the judgment above, so each
+		// is judged again with the new value before it takes effect.
+		const setCwd = promise.cwd.bind(promise);
+		const setEnv = promise.env.bind(promise);
+		defineProperty(promise, "cwd", {
+			value: (dir: unknown) => {
+				const next = asText(dir);
+				judge("Bun.$", { command, cwd: next, env });
+				cwd = next;
+				setCwd(next);
+				return promise;
+			},
+		});
+		defineProperty(promise, "env", {
+			value: (vars: unknown) => {
+				const next = snapshotEnv(vars && typeof vars === "object" ? vars : process.env);
+				judge("Bun.$", { command, cwd, env: next });
+				env = next;
+				setEnv(next);
+				return promise;
+			},
+		});
+		return promise;
 	} as typeof Bun.$;
-	const chain = (method: "cwd" | "env" | "nothrow" | "throws") =>
+	// `$.cwd()` / `$.env()` set defaults for later commands; the gate keeps its
+	// own copy so each command is judged with the values it will run with.
+	const defaults: { cwd?: string; env?: Record<string, string> } = {};
+	const chain = (method: "nothrow" | "throws") =>
 		function (...args: unknown[]) {
 			(original[method] as (...a: unknown[]) => unknown)(...args);
 			return gated;
 		};
+	const setDefaultCwd = function (dir?: unknown) {
+		defaults.cwd = dir === undefined || dir === null ? undefined : asText(dir);
+		original.cwd(defaults.cwd);
+		return gated;
+	};
+	const setDefaultEnv = function (vars?: unknown) {
+		defaults.env = vars && typeof vars === "object" ? snapshotEnv(vars) : undefined;
+		original.env(defaults.env);
+		return gated;
+	};
 	defineProperty(gated, "escape", { value: escape });
 	defineProperty(gated, "braces", { value: original.braces.bind(original) });
-	defineProperty(gated, "cwd", { value: chain("cwd") });
-	defineProperty(gated, "env", { value: chain("env") });
+	defineProperty(gated, "cwd", { value: setDefaultCwd });
+	defineProperty(gated, "env", { value: setDefaultEnv });
 	defineProperty(gated, "nothrow", { value: chain("nothrow") });
 	defineProperty(gated, "throws", { value: chain("throws") });
 	defineProperty(gated, "ShellError", { value: original.ShellError });
@@ -337,8 +411,13 @@ function gateProcess(judge: Judge): void {
 		lock(proc, "execve", (file: unknown, args?: unknown, env?: unknown) => {
 			const path = asText(file);
 			const argv = args === undefined ? [path] : snapshotArgv(args);
-			judge("process.execve", { argv: argv.length === 0 ? [path] : [path, ...argv.slice(1)] });
-			return execve.call(process, path, argv, env);
+			const vars = snapshotEnv(env && typeof env === "object" ? env : process.env);
+			judge("process.execve", {
+				argv: argv.length === 0 ? [path] : [path, ...argv.slice(1)],
+				cwd: cwdOf(),
+				env: vars,
+			});
+			return execve.call(process, path, argv, vars);
 		});
 	}
 	const binding = proc.binding as ((name: string) => unknown) | undefined;
@@ -360,6 +439,20 @@ function gateProcess(judge: Judge): void {
 
 function refuseNativeCode(): void {
 	const refused = refuser("bun:ffi", NATIVE_CODE);
+	// The ESM namespace of `bun:ffi` was fixed when the kernel's own module graph
+	// imported it, so it cannot be patched in place. A resolver plugin refuses the
+	// specifier for every loader path: static and dynamic imports, `require`,
+	// indirect eval and `new Function`. The first plugin to throw wins over any a
+	// cell registers later, and `clearAll` is locked so ours cannot be removed.
+	Bun.plugin({
+		name: "omp-eval-spawn-gate",
+		setup(build) {
+			build.onResolve({ filter: /^ffi$/, namespace: "bun" }, () => {
+				throw new SpawnRefusedError('import "bun:ffi"', NATIVE_CODE);
+			});
+		},
+	});
+	lock(Bun.plugin, "clearAll", refuser("Bun.plugin.clearAll", "it would remove the spawn gate's resolver"));
 	const module = getBuiltinModule("bun:ffi");
 	for (const key of ["dlopen", "linkSymbols", "CFunction", "cc"]) {
 		if (key in module) lock(module, key, refused);
