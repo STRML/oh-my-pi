@@ -590,7 +590,11 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
             return SpawnRefused(
                 f"{refused_prefix} (native extension): {path} is outside the interpreter's install and site directories"
             )
-        prefix, info = "", None
+        root_length = 0
+        for root in extension_roots:
+            if path.startswith(root) and len(root) > root_length:
+                root_length = len(root)
+        prefix = ""
         for part in path.split("/")[1:]:
             prefix += "/" + part
             try:
@@ -599,12 +603,14 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
                 return SpawnRefused(f"{refused_prefix} (native extension): cannot stat {prefix}")
             if (info.st_mode & 0o170000) == 0o120000:
                 return SpawnRefused(f"{refused_prefix} (native extension): {prefix} is a symlink")
-        changed_at = info.st_ctime
-        if changed_at >= native_epoch:
-            return SpawnRefused(
-                f"{refused_prefix} (native extension): {path} changed during this omp session, "
-                "so a cell may have written it; restart omp to load newly installed extensions"
-            )
+            # Every component below the root, not just the file: renaming a
+            # directory under a root changes only that directory's ctime, so an
+            # old file inside it would otherwise pass.
+            if len(prefix) >= root_length and info.st_ctime >= native_epoch:
+                return SpawnRefused(
+                    f"{refused_prefix} (native extension): {prefix} changed during this omp session, "
+                    "so a cell may have written it; restart omp to load newly installed extensions"
+                )
         return None
 
     def on_new_interpreter(args):

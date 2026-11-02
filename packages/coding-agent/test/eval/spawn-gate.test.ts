@@ -663,6 +663,60 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		},
 	);
 
+	it("refuses an old extension file inside a directory moved under a trusted root during the session", async () => {
+		// Renaming a directory changes its ctime but not the ctimes of the files
+		// in it, so an extension written before the epoch arrives under a root
+		// looking old. The prelude runs in a plain venv interpreter, with an
+		// epoch set between writing the file and moving its directory in.
+		const venv = path.join(tempDir.path(), "venv-moved");
+		expect(Bun.spawnSync([python!, "-m", "venv", "--without-pip", venv]).exitCode).toBe(0);
+		const venvPython = path.join(venv, "bin", "python");
+		const site = Bun.spawnSync([venvPython, "-c", "import site; print(site.getsitepackages()[0])"], {
+			stdout: "pipe",
+		})
+			.stdout.toString()
+			.trim();
+		const staged = path.join(tempDir.path(), "staged-pkg");
+		fs.mkdirSync(staged);
+		const suffix = Bun.spawnSync(
+			[venvPython, "-c", "import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])"],
+			{
+				stdout: "pipe",
+			},
+		)
+			.stdout.toString()
+			.trim();
+		fs.writeFileSync(path.join(staged, `moved_mod${suffix}`), "not really a shared object");
+		await Bun.sleep(1_100);
+		const epoch = Date.now() / 1000;
+		await Bun.sleep(100);
+		fs.renameSync(staged, path.join(site, "moved_pkg"));
+		const loaded = path.join(fs.realpathSync(site), "moved_pkg", `moved_mod${suffix}`);
+		const script = path.join(tempDir.path(), "moved-extension.py");
+		const prelude = PYTHON_PRELUDE.replace(
+			"from __future__ import annotations",
+			"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
+		);
+		await Bun.write(
+			script,
+			[
+				prelude,
+				"import importlib.machinery, importlib.util",
+				`loader = importlib.machinery.ExtensionFileLoader("moved_mod", ${JSON.stringify(loaded)})`,
+				`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("moved_mod", ${JSON.stringify(loaded)}, loader=loader)); print("RAN")`,
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		const proc = Bun.spawn([venvPython, script], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, PI_EVAL_GATE_EPOCH: String(epoch) },
+		});
+		const output = await new Response(proc.stdout).text();
+		await proc.exited;
+		expect(output).toContain(`${path.join(fs.realpathSync(site), "moved_pkg")} changed during this omp session`);
+	});
+
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
 		const file = marker();
 		const result = await runPython(`import os\nos.system("touch " + ${JSON.stringify(file)})`, null);
