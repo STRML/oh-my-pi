@@ -36,6 +36,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import { EVAL_SPAWN_BRIDGE_NAME, type EvalSpawnVerdict, runEvalSpawnGate } from "../spawn-gate";
 import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import {
@@ -81,6 +82,7 @@ type ToolValue =
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
 	| MCPNamespaceValue
+	| EvalSpawnVerdict
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -303,6 +305,9 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 	}
 	if (name === EVAL_MCP_BRIDGE_NAME) {
 		return await runEvalMcpCall(args, options);
+	}
+	if (name === EVAL_SPAWN_BRIDGE_NAME) {
+		return await runEvalSpawnGate(args, options);
 	}
 	const call = await runSessionTool(getTool(options.session, name), args, options);
 	return bridgeValueFromToolResult(call.name, call.args, call.result, options.emitStatus);

@@ -1,5 +1,6 @@
 import type { EvalDisplayOutput } from "../types";
 import type { RuntimeCallIdentity, ShadowSnapshot } from "./shared/runtime";
+import type { SpawnGateEndpoint } from "./spawn-gate";
 
 export interface EvalPreludeSource {
 	name: string;
@@ -22,6 +23,8 @@ export interface SessionSnapshot {
 	packageRoot?: string;
 	/** Model-visible description of the selected package environment. */
 	packageEnvironment?: string;
+	/** Loopback endpoint where the kernel's spawn gate asks the host for verdicts. */
+	spawnGate?: SpawnGateEndpoint;
 }
 
 export interface RunErrorPayload {

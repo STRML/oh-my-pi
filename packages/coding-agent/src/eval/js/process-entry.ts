@@ -1,3 +1,4 @@
+import { installJsSpawnGate } from "./spawn-gate";
 import { type RejectionInterceptor, WorkerCore } from "./worker-core";
 import type { WorkerInbound, WorkerOutbound } from "./worker-protocol";
 
@@ -9,7 +10,7 @@ export function startJsEvalProcess(
 	},
 	interceptUnhandledRejections: RejectionInterceptor,
 ): void {
-	new WorkerCore(
+	const core = new WorkerCore(
 		{
 			send: message => transport.send(message),
 			onMessage: handler => transport.onMessage(handler),
@@ -28,4 +29,9 @@ export function startJsEvalProcess(
 			interceptUnhandledRejections,
 		},
 	);
+	// This process runs only eval cells, so every spawn in it is gated. The
+	// install waits one microtask so the subprocess host can start its
+	// parent-watchdog Worker first (the gate refuses new Workers); no cell can
+	// run before then, since cells arrive as IPC messages on later turns.
+	queueMicrotask(() => installJsSpawnGate(() => core.spawnGateContext()));
 }
