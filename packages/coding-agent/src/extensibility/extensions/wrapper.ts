@@ -232,23 +232,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return target.restartForModeChange();
 	}
 
-	async execute(
+	async #gate(
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
-	): Promise<AgentToolResult<TDetails, TParameters>> {
-		return withToolApprovalScope(() => this.#execute(toolCallId, params, signal, onUpdate, context));
-	}
-
-	async #execute(
-		toolCallId: string,
-		params: Static<TParameters>,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
-		context?: AgentToolContext,
-	): Promise<AgentToolResult<TDetails, TParameters>> {
+	): Promise<{
+		effectiveParams: Static<TParameters>;
+		loopDispatchedToolCall: boolean;
+		pendingAdditionalContext: string | undefined;
+	}> {
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -504,6 +497,56 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				context.providerSafetyApproved = true;
 			}
 		}
+		return { effectiveParams, loopDispatchedToolCall, pendingAdditionalContext };
+	}
+
+	/**
+	 * Runs the same gate `execute` runs — approval pre-deny, extension `tool_call`, preflight, and the
+	 * full approval gate — without running the tool. Throws when the call is blocked or denied.
+	 *
+	 * Eval kernels use this to judge a subprocess spawn as the bash call it amounts to. The kernel can
+	 * only run the spawn it asked about, so a handler that revises the input refuses the call instead
+	 * of approving a command that will not execute.
+	 */
+	async authorize(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	): Promise<void> {
+		const gate = await withToolApprovalScope(() => this.#gate(toolCallId, params, signal, context));
+		// Nothing executes after a judge-only call, so any preflight state opened for it is released.
+		if (!gate.loopDispatchedToolCall) this.runner.cancelToolCallPreflight?.(toolCallId);
+		if (!Bun.deepEquals(gate.effectiveParams, params)) {
+			throw new Error(
+				`Tool "${this.tool.name}" input was revised by an extension; a judge-only call cannot run a different input.`,
+			);
+		}
+	}
+
+	async execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>> {
+		return withToolApprovalScope(() => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>> {
+		const { effectiveParams, loopDispatchedToolCall, pendingAdditionalContext } = await this.#gate(
+			toolCallId,
+			params,
+			signal,
+			context,
+		);
 
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;

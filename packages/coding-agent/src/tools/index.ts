@@ -1,4 +1,5 @@
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { EvalSpawnBashInput } from "../eval/spawn-gate";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -385,6 +386,18 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Tool names the eval description advertises as callable from cells; frozen with the cached prompt prefix. */
 	getAdvertisedEvalToolNames?: () => readonly string[];
+	/**
+	 * Judge an eval-kernel subprocess spawn as the bash call it amounts to, without running anything.
+	 * Resolves when the spawn may proceed; throws when it is blocked, denied, or cannot be judged.
+	 */
+	authorizeEvalSpawn?: (
+		input: EvalSpawnBashInput,
+		toolCallId: string,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	) => Promise<void>;
+	/** Names currently authorized for invocation through the eval bridge. */
+	getEvalBridgeToolNames?: () => readonly string[];
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */

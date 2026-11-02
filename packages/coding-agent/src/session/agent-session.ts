@@ -143,6 +143,7 @@ import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
+import type { EvalSpawnBashInput } from "../eval/spawn-gate";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
 import { type BashResult, releaseShellSessions } from "../exec/bash-executor";
@@ -7324,6 +7325,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Looks up an enabled eval-bridge tool with the session's permission gate applied. */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		return this.#tools.getToolForEvalBridge(name);
+	}
+
+	/** Judges an eval-kernel spawn as a bash call without running it. */
+	authorizeEvalSpawn(
+		input: EvalSpawnBashInput,
+		toolCallId: string,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	): Promise<void> {
+		return this.#tools.authorizeEvalSpawn(input, toolCallId, signal, context);
 	}
 
 	/** Names currently authorized through the eval bridge. */
