@@ -97,21 +97,32 @@ describe("ExtensionToolWrapper.authorize (eval spawn judge)", () => {
 
 describe("evalSpawnCommand", () => {
 	it("judges a shell form as its script and quotes any other argv so it runs the same words", () => {
-		expect(evalSpawnCommand({ argv: ["/bin/sh", "-c", "rm -rf build && make"] })).toBe("rm -rf build && make");
+		expect(evalSpawnCommand({ argv: ["/bin/sh", "-c", "rm -rf build && make"], program: "/bin/sh" })).toBe(
+			"rm -rf build && make",
+		);
 		expect(evalSpawnCommand({ argv: ["touch", "a b", "it's", "$HOME"] })).toBe(`touch 'a b' 'it'\\''s' '$HOME'`);
 		expect(evalSpawnCommand({ argv: ["sh", "-c", "echo $0", "arg0"] })).toBe(`sh -c 'echo $0' arg0`);
 	});
 
-	it("collapses -c only for a system shell; any other program is judged with its whole argv", () => {
-		expect(evalSpawnCommand({ argv: ["/tmp/not-a-shell/sh", "-c", "rm -rf ~"] })).toBe(
-			"/tmp/not-a-shell/sh -c 'rm -rf ~'",
+	it("collapses -c only when the kernel resolved the program to a system shell", () => {
+		const script = { argv: ["sh", "-c", "rm -rf ~"] };
+		expect(evalSpawnCommand({ ...script, program: "/tmp/not-a-shell/sh" })).toBe("sh -c 'rm -rf ~'");
+		// Never resolved host-side: a bare or relative name without the kernel's answer stays whole.
+		expect(evalSpawnCommand(script)).toBe("sh -c 'rm -rf ~'");
+		expect(evalSpawnCommand({ argv: ["./sh", "-c", "x"], program: "/tmp/x/sh" })).toBe("./sh -c x");
+		expect(evalSpawnCommand({ ...script, program: "/bin/sh" })).toBe("rm -rf ~");
+	});
+
+	it("spells removed variables as env -u ahead of the assignments", () => {
+		expect(evalSpawnCommand({ argv: ["git", "status"], env: { GIT_DIR: "/x" }, unset: ["HOME"] })).toBe(
+			"env -u HOME GIT_DIR=/x git status",
 		);
 	});
 
 	it("leads with changed variables, spelling a script as the sh -c it runs as", () => {
 		const env = { PATH: "/tmp/x:/usr/bin", LD_PRELOAD: "/tmp/e.so" };
 		expect(evalSpawnCommand({ argv: ["touch", "f"], env })).toBe("LD_PRELOAD=/tmp/e.so PATH=/tmp/x:/usr/bin touch f");
-		expect(evalSpawnCommand({ argv: ["/bin/sh", "-c", "a; b"], env })).toBe(
+		expect(evalSpawnCommand({ argv: ["/bin/sh", "-c", "a; b"], env, program: "/bin/sh" })).toBe(
 			"LD_PRELOAD=/tmp/e.so PATH=/tmp/x:/usr/bin /bin/sh -c 'a; b'",
 		);
 		expect(evalSpawnCommand({ command: "a; b", env })).toBe(
