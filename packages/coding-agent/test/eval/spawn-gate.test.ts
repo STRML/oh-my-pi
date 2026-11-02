@@ -1,0 +1,283 @@
+import { afterAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
+import type { EvalSpawnBashInput } from "@oh-my-pi/pi-coding-agent/eval/spawn-gate";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
+
+/**
+ * Contract: every subprocess an eval kernel would start reaches the host's
+ * `authorizeEvalSpawn` (the bash tool's gate) with its real command before it
+ * runs, however the spawn was spelled; a refusal or a missing host bridge means
+ * the process never starts.
+ *
+ * Each shape runs `touch <marker>` through a real kernel against a stub host
+ * that records what it was asked and allows or denies. The marker file is the
+ * proof: present after an allow, absent after a deny.
+ */
+
+// Kernel cold starts (Python runner, JS subprocess) exceed Bun's 5s default under load.
+setDefaultTimeout(60_000);
+
+const python = $which("python3") ?? $which("python");
+const posix = process.platform !== "win32";
+// Sandboxed hosts can lack pty devices; pty.spawn then fails before any spawn.
+const ptyAvailable =
+	!!python && posix && Bun.spawnSync([python, "-c", "import os; os.openpty()"], { stderr: "ignore" }).exitCode === 0;
+
+const tempDir = TempDir.createSync("@omp-eval-spawn-gate-");
+const sessionFile = path.join(tempDir.path(), "session.jsonl");
+const judged: EvalSpawnBashInput[] = [];
+let verdict: "allow" | "deny" = "allow";
+
+const session = {
+	cwd: tempDir.path(),
+	hasUI: false,
+	getSessionFile: () => sessionFile,
+	getSessionSpawns: () => null,
+	settings: Settings.isolated(),
+	authorizeEvalSpawn: async (input: EvalSpawnBashInput) => {
+		judged.push(input);
+		if (verdict === "deny") throw new Error("stub host denies this spawn");
+	},
+} as unknown as ToolSession;
+
+let markerSeq = 0;
+function marker(): string {
+	markerSeq += 1;
+	return path.join(tempDir.path(), `marker-${markerSeq}`);
+}
+
+beforeEach(() => {
+	judged.length = 0;
+	verdict = "allow";
+});
+
+afterAll(async () => {
+	await disposeAllKernelSessions();
+	await disposeAllVmContexts();
+	await disposePyToolBridge();
+	tempDir.removeSync();
+});
+
+interface SpawnShape {
+	name: string;
+	/** Cell source that spawns `touch <file>`; `file` is already a valid string literal. */
+	code: (file: string) => string;
+	/** The command the host must be asked about; `touch <file>` unless the API quotes it. */
+	expected?: (file: string) => string;
+	/** The refusal lands in a forked child, which exits; its message is not cell output. */
+	refusedInChild?: boolean;
+	skip?: boolean;
+}
+
+const expectedCommand = (shape: SpawnShape, file: string) => shape.expected?.(file) ?? `touch ${file}`;
+
+/** `null` runs on a kernel started with no tool session, so it has no host bridge. */
+async function runPython(code: string, toolSession: ToolSession | null = session) {
+	return await executePython(code, {
+		cwd: tempDir.path(),
+		sessionId: toolSession ? "spawn-gate-py" : "spawn-gate-py-unbridged",
+		...(toolSession ? { toolSession } : {}),
+	});
+}
+
+async function runJs(code: string) {
+	return await executeJs(code, { cwd: tempDir.path(), sessionId: "spawn-gate-js", session, sessionFile });
+}
+
+const pythonShapes: SpawnShape[] = [
+	{
+		name: "getattr(os, 'sys' + 'tem')",
+		code: f => `import os\ngetattr(os, "sys" + "tem")("touch " + ${f})`,
+	},
+	{
+		name: "__builtins__ __import__ by string arithmetic, then popen",
+		code: f =>
+			[
+				"b = __builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__",
+				'm = b["__imp" + "ort__"]("o" + "s")',
+				`getattr(m, "po" + "pen")("touch " + ${f}).read()`,
+			].join("\n"),
+	},
+	{ name: "subprocess.run argv", code: f => `import subprocess\nsubprocess.run(["touch", ${f}])` },
+	{
+		name: "os.fork then os.execv",
+		code: f =>
+			[
+				"import os",
+				"pid = os.fork()",
+				"if pid == 0:",
+				"    try:",
+				`        os.execv("/usr/bin/touch", ["touch", ${f}])`,
+				"    finally:",
+				"        os._exit(127)",
+				"os.waitpid(pid, 0)",
+			].join("\n"),
+		refusedInChild: true,
+	},
+	{
+		name: "os.posix_spawn",
+		code: f => `import os\nos.waitpid(os.posix_spawn("/usr/bin/touch", ["touch", ${f}], os.environ), 0)`,
+	},
+	{
+		name: "os.spawnv",
+		code: f => `import os\nos.spawnv(os.P_WAIT, "/usr/bin/touch", ["touch", ${f}])`,
+		refusedInChild: true,
+	},
+	{
+		name: "pty.spawn",
+		code: f => `import pty\npty.spawn(["touch", ${f}])`,
+		refusedInChild: true,
+		skip: !ptyAvailable,
+	},
+	{
+		name: "a re-imported posix module",
+		code: f => `import sys\ndel sys.modules["posix"]\nimport posix\nposix.system("touch " + ${f})`,
+	},
+];
+
+describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
+	for (const shape of pythonShapes) {
+		it.skipIf(!!shape.skip)(`${shape.name}: reaches the host with its real command, then runs`, async () => {
+			const file = marker();
+			const result = await runPython(shape.code(JSON.stringify(file)));
+			expect(result.output).not.toContain("spawn refused");
+			expect(judged.map(input => input.command)).toContain(expectedCommand(shape, file));
+			expect(await Bun.file(file).exists()).toBe(true);
+		});
+
+		it.skipIf(!!shape.skip)(`${shape.name}: a host deny stops it`, async () => {
+			verdict = "deny";
+			const file = marker();
+			const result = await runPython(shape.code(JSON.stringify(file)));
+			expect(judged.map(input => input.command)).toContain(expectedCommand(shape, file));
+			expect(await Bun.file(file).exists()).toBe(false);
+			if (!shape.refusedInChild) expect(result.output).toContain("eval subprocess spawn refused");
+		});
+	}
+
+	it("judges a subprocess in the cwd it will run in", async () => {
+		const file = marker();
+		await runPython(`import subprocess\nsubprocess.run(["touch", ${JSON.stringify(file)}], cwd="/")`);
+		expect(judged).toEqual([{ command: `touch ${file}`, cwd: "/" }]);
+	});
+
+	it("a kernel without a host bridge refuses spawns without running them", async () => {
+		const file = marker();
+		const result = await runPython(`import os\nos.system("touch " + ${JSON.stringify(file)})`, null);
+		expect(result.output).toContain("no host bridge in this kernel");
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("refuses ctypes before it can load libc, without asking the host", async () => {
+		const result = await runPython('import ctypes\nctypes.CDLL(None).system(b"true")');
+		expect(result.output).toContain("eval subprocess spawn refused (_ctypes)");
+		expect(judged).toEqual([]);
+	});
+
+	it("refuses tampering with the gate through gc introspection", async () => {
+		const result = await runPython("import gc\ngc.get_objects()");
+		expect(result.output).toContain("disabled by the spawn gate");
+	});
+});
+
+const jsShapes: SpawnShape[] = [
+	{
+		name: "require of a computed child_process specifier",
+		code: f => `require(["child", "_process"].join("")).execSync("touch " + ${f});`,
+	},
+	{
+		name: "import() of a computed specifier with a computed method name",
+		code: f => `const m = await import(["child", "_process"].join(""));\nm["ex" + "ecSync"]("touch " + ${f});`,
+	},
+	{
+		name: '"child_pro" + "cess" spelling',
+		code: f => `require("child_pro" + "cess").spawnSync("touch", [${f}]);`,
+	},
+	{
+		name: "process.getBuiltinModule",
+		code: f => `process.getBuiltinModule("child_process").execFileSync("touch", [${f}]);`,
+	},
+	{
+		name: "async child_process.spawn",
+		code: f => `await new Promise(r => require("node:child_process").spawn("touch", [${f}]).on("exit", r));`,
+	},
+	{ name: "Bun.spawnSync", code: f => `Bun.spawnSync(["touch", ${f}]);` },
+	{ name: "Bun.spawn", code: f => `await Bun.spawn({ cmd: ["touch", ${f}] }).exited;` },
+	{ name: "Bun.$", code: f => `await Bun.$\`touch \${${f}}\`;`, expected: f => `touch ${Bun.$.escape(f)}` },
+];
+
+describe.skipIf(!posix)("javascript kernel spawn gate", () => {
+	for (const shape of jsShapes) {
+		it(`${shape.name}: reaches the host with its real command, then runs`, async () => {
+			const file = marker();
+			const result = await runJs(shape.code(JSON.stringify(file)));
+			expect(result.output).not.toContain("spawn refused");
+			expect(judged.map(input => input.command)).toContain(expectedCommand(shape, file));
+			expect(await Bun.file(file).exists()).toBe(true);
+		});
+
+		it(`${shape.name}: a host deny stops it`, async () => {
+			verdict = "deny";
+			const file = marker();
+			const result = await runJs(shape.code(JSON.stringify(file)));
+			expect(judged.map(input => input.command)).toContain(expectedCommand(shape, file));
+			expect(result.output).toContain("eval subprocess spawn refused");
+			expect(await Bun.file(file).exists()).toBe(false);
+		});
+	}
+
+	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {
+		const result = await runJs('process.binding("spawn_sync");');
+		expect(result.output).toContain('eval subprocess spawn refused (process.binding("spawn_sync"))');
+	});
+
+	it("refuses native code loading and new realms without asking the host", async () => {
+		const attempts = [
+			'await import("bun:" + "ffi")',
+			'require("bun:ffi").dlopen("libc.dylib", {})',
+			'process.dlopen({ exports: {} }, "x.node")',
+			'new Worker("data:text/javascript,0")',
+			'new (require("node:worker_threads").Worker)("0", { eval: true })',
+		];
+		const code = attempts
+			.map(attempt => `try { ${attempt}; console.log("RAN"); } catch (e) { console.log(String(e.message)); }`)
+			.join("\n");
+		const result = await runJs(code);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(attempts.length);
+		expect(judged).toEqual([]);
+	});
+
+	it("keeps the gated spawn functions in place when a cell tries to replace them", async () => {
+		verdict = "deny";
+		const file = marker();
+		const result = await runJs(
+			[
+				"const own = (...a) => 0;",
+				"try { Bun.spawnSync = own; } catch {}",
+				'try { Object.defineProperty(Bun, "spawnSync", { value: own }); } catch {}',
+				`Bun.spawnSync(["touch", ${JSON.stringify(file)}]);`,
+			].join("\n"),
+		);
+		expect(result.output).toContain("eval subprocess spawn refused");
+		expect(judged.map(input => input.command)).toEqual([`touch ${file}`]);
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	// Last: disposing the host bridge leaves the live kernel pointing at a dead endpoint.
+	it("refuses spawns once the host bridge is gone", async () => {
+		await runJs("1");
+		await disposePyToolBridge();
+		const file = marker();
+		const result = await runJs(`Bun.spawnSync(["touch", ${JSON.stringify(file)}]);`);
+		expect(result.output).toContain("host bridge unreachable");
+		expect(judged).toEqual([]);
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+});
