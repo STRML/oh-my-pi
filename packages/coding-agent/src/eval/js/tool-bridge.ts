@@ -35,6 +35,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import { EVAL_SPAWN_BRIDGE_NAME, type EvalSpawnVerdict, runEvalSpawnGate } from "../spawn-gate";
 import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
@@ -71,6 +72,7 @@ type ToolValue =
 	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
+	| EvalSpawnVerdict
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -278,6 +280,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
+	}
+	if (name === EVAL_SPAWN_BRIDGE_NAME) {
+		return await runEvalSpawnGate(args, options);
 	}
 	const tool = getTool(options.session, name);
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.

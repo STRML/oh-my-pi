@@ -1,8 +1,13 @@
-import { parentPort } from "node:worker_threads";
+import type * as WorkerThreads from "node:worker_threads";
 import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
+import { installJsSpawnGate } from "./spawn-gate";
 import { WorkerCore } from "./worker-core";
 import type { Transport, WorkerInbound, WorkerOutbound } from "./worker-protocol";
 
+// Read through the CommonJS object, not an ESM import: a `node:*` namespace
+// copies its exports when first imported, and the spawn gate locks
+// `worker_threads.Worker` only after this module loads.
+const { parentPort } = process.getBuiltinModule("node:worker_threads") as typeof WorkerThreads;
 if (!parentPort) throw new Error("js worker-entry: missing parentPort");
 
 const port = parentPort;
@@ -34,4 +39,6 @@ const transport: Transport = {
 	},
 };
 
-new WorkerCore(transport, { mode: "isolated" });
+const core = new WorkerCore(transport, { mode: "isolated" });
+// This realm runs only eval cells, so every spawn in it is gated.
+installJsSpawnGate(() => core.spawnGateContext());
