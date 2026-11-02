@@ -1,26 +1,32 @@
 # OMP eval spawn gate. The prelude executes this source in its own namespace
 # (not the user's), then calls `install`. Every subprocess the kernel would
-# start is first sent to the host with its real argv, cwd and changed
-# execution-affecting environment, and runs only after the host's bash gate
-# approves it.
+# start is first sent to the host with its real argv, cwd and environment
+# changes, and runs only after the host's bash gate approves it.
 #
 # Interception is a CPython audit hook (PEP 578). Hooks cannot be removed, and
-# the events are raised by the C functions themselves, so a re-imported `os`,
-# `posix` or `_posixsubprocess`, a `getattr` with a computed name, or
-# `importlib.reload` all reach the same hook. The C `fork_exec` behind
-# `subprocess` gets a wrapper as well, because its audit event (3.14+) carries
-# no cwd; on 3.14+ a `fork_exec` that did not come through the wrapper is
-# refused. Native FFI is refused outright: a `ctypes`/`cffi` call has no argv
-# to judge.
+# the events are raised by the C functions themselves, so a re-imported `os` or
+# `posix`, a `getattr` with a computed name, or `importlib.reload` all reach the
+# same hook. The C `fork_exec` behind `subprocess` is replaced by a wrapper that
+# judges a snapshot of its arguments and hands the C function that snapshot; on
+# 3.14+ a C `fork_exec` the wrapper did not vouch for is refused. Code the gate
+# cannot see into is refused outright: native FFI (`ctypes`, `cffi`), native
+# extension modules written after the omp session started, and
+# subinterpreters, which run without this interpreter's audit hooks.
 #
 # Rules that keep the judged text equal to what runs:
-# - A spawn is never let through because its target looked missing. A target
+# - Only exact `str`/`bytes` values (and exact `list`/`tuple` argv) are read.
+#   A subclass could read one way to the gate and another way to C, so it is
+#   refused. Where the gate makes the call itself (fork_exec) C gets the
+#   gate's own snapshot; where it only observes (exec, posix_spawn) the
+#   arguments are compared again after the verdict.
+# - A spawn is never let through because its target looked missing: a target
 #   that is not an executable file is refused with the error the call would
 #   have raised (ENOENT/EACCES), so nothing runs and nothing needs judging.
 # - argv[0] is shown as the file that will run whenever the startup PATH would
-#   not pick that file for the name as written.
-# - Execution-affecting variables that differ from the kernel's startup
-#   environment travel with the request and lead the judged command.
+#   not pick that file for the name as written, and cwd is always absolute.
+# - Every environment variable that differs from the kernel's startup
+#   environment (set, changed or removed) travels with the request and leads
+#   the judged command.
 #
 # Everything the gate needs is captured at install time, and the bridge client
 # speaks HTTP over the C socket type with hand-built JSON, so monkeypatching
@@ -38,47 +44,44 @@ def hook(event, args, _dispatch=None):
     raise error
 """
 
-# Installed as `_posixsubprocess.fork_exec`. It holds no reference to the
-# gate (a closure would hand the gate's state to any cell that reads
-# `fork_exec.__closure__`); it reaches the gate through `sys.audit`, whose hook
-# runs the judged call and returns the pid in `box`.
-_FORK_EXEC_SOURCE = """
-def fork_exec(*args, _audit=None, **kwargs):
+# Installed in place of `_posixsubprocess.fork_exec` and `_imp.create_builtin`.
+# They hold no reference to the gate (a closure would hand the gate's state to
+# any cell that reads `__closure__`); they reach it through `sys.audit`, whose
+# hook makes the call and returns the result in `box`.
+_CALL_THROUGH_AUDIT_SOURCE = """
+def call(*args, _audit=None, _event=None, **kwargs):
     box = []
-    _audit("omp.spawn_gate.fork_exec", args, kwargs, box)
+    _audit(_event, args, kwargs, box)
     return box[0]
 """
 
 _NATIVE_CODE = "native FFI can load and call any libc function, so the eval kernel refuses it"
 
-# Variables that change which program runs or what it loads, beyond its argv.
-_WATCHED_ENV = frozenset(
+# Kernel-managed variables the runner rewrites per request; not cell changes.
+_MANAGED_ENV = frozenset(
     {
-        "PATH",
-        "BASH_ENV",
-        "ENV",
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "NODE_OPTIONS",
-        "PYTHONSTARTUP",
-        "PYTHONPATH",
-        "GIT_SSH",
-        "GIT_SSH_COMMAND",
-        "GIT_EXEC_PATH",
-        "PERL5OPT",
-        "RUBYOPT",
+        "PI_SESSION_FILE",
+        "PI_ARTIFACTS_DIR",
+        "PI_TOOL_BRIDGE_URL",
+        "PI_TOOL_BRIDGE_TOKEN",
+        "PI_TOOL_BRIDGE_SESSION",
+        "PI_EVAL_LOCAL_ROOTS",
     }
 )
-_WATCHED_ENV_PREFIXES = ("DYLD_",)
+
+# Subinterpreters start without this interpreter's audit hooks.
+_SUBINTERPRETER_MODULES = frozenset(
+    {"_interpreters", "_xxsubinterpreters", "_interpqueues", "_interpchannels", "concurrent.interpreters"}
+)
 
 
 def install(environ, run_id_getter, timeout=600.0):
-    """Install the hook. The bridge endpoint, token and startup environment are
-    pinned now, before any cell runs, so a cell cannot point the gate at a
-    server of its own or move what counts as a changed variable. The bridge
-    session is read per spawn: it only selects which host registration judges,
-    and a wrong one is refused."""
-    import sys, os, _socket, _thread
+    """Install the hook. The bridge endpoint, token, startup environment and
+    native-code epoch are pinned now, before any cell runs. The bridge session
+    is read per spawn: it only selects which host registration judges, and a
+    wrong one is refused."""
+    import sys, os, _socket, _thread, _imp, time
+    import importlib.machinery
 
     url = environ.get("PI_TOOL_BRIDGE_URL") or ""
     token = environ.get("PI_TOOL_BRIDGE_TOKEN") or ""
@@ -93,17 +96,69 @@ def install(environ, run_id_getter, timeout=600.0):
     af_inet, sock_stream = _socket.AF_INET, _socket.SOCK_STREAM
     getcwd, fspath, getpid, write, exit_now = os.getcwd, os.fspath, os.getpid, os.write, os._exit
     stat, access, x_ok, strerror = os.stat, os.access, os.X_OK, os.strerror
-    environ_type = type(environ)
+    path_like = os.PathLike
     get_ident = _thread.get_ident
     install_pid = getpid()
     py_version = sys.version_info[:2]
     json_loads = __import__("json").loads  # Error text only; never decides a verdict.
+    extension_suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    module_spec = importlib.machinery.ModuleSpec
+    # Native extensions load only from the interpreter's own installation and
+    # site directories, and only when their file predates this omp session: a
+    # file changed since then may have been written by a cell.
+    import site
+    extension_roots = []
+    for root in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *site.getsitepackages()):
+        real = os.path.realpath(root).rstrip("/") + "/"
+        if real not in extension_roots:
+            extension_roots.append(real)
+    user_site = site.getusersitepackages()
+    if user_site:
+        extension_roots.append(os.path.realpath(user_site).rstrip("/") + "/")
+    extension_roots = tuple(extension_roots)
+    realpath = os.path.realpath
+    try:
+        native_epoch = float(environ.get("PI_EVAL_GATE_EPOCH") or "")
+    except ValueError:
+        native_epoch = time.time()
+    refused_prefix = "eval subprocess spawn refused"
+
+    class SpawnRefused(PermissionError):
+        pass
+
+    class Refuse(Exception):
+        """Raised inside gate code; `guarded` turns it into a SpawnRefused."""
 
     def text(value):
-        value = fspath(value) if not isinstance(value, (str, bytes, bytearray)) else value
+        """Trusted values only: the startup environment and the gate's snapshots."""
         if isinstance(value, (bytes, bytearray)):
             return bytes(value).decode("utf-8", "surrogateescape")
         return str(value)
+
+    def exact_text(value, what):
+        kind = type(value)
+        if kind is str:
+            return value
+        if kind is bytes:
+            return value.decode("utf-8", "surrogateescape")
+        raise Refuse(f"{what} must be str or bytes, not {kind.__name__}")
+
+    def exact_seq(value, what):
+        if type(value) is not list and type(value) is not tuple:
+            raise Refuse(f"{what} must be a list or tuple, not {type(value).__name__}")
+        return tuple(value)
+
+    def snapshot_word(value, what):
+        """One conversion of a word the gate passes on itself: exact str/bytes
+        kept, an os.PathLike converted once, anything else refused."""
+        kind = type(value)
+        if kind is str or kind is bytes:
+            return value
+        if isinstance(value, path_like) and not isinstance(value, (str, bytes)):
+            converted = fspath(value)
+            if type(converted) is str or type(converted) is bytes:
+                return converted
+        raise Refuse(f"{what} must be str, bytes or os.PathLike, not {kind.__name__}")
 
     startup_env = {text(k): text(v) for k, v in environ.items()}
     # The process environment as the C library sees it: os.environ writes and
@@ -113,40 +168,51 @@ def install(environ, run_id_getter, timeout=600.0):
 
     # Runner housekeeping: listing child pids to stop an installer's process tree.
     internal = ("/bin/ps", ("/bin/ps", "-A", "-o", "pid=,ppid="))
-    refused_prefix = "eval subprocess spawn refused"
     allowed_prefix = b'{"ok":true,"value":{"allowed":true'
     escapes = {i: "\\u%04x" % i for i in range(0x20)}
     escapes.update({ord('"'): '\\"', ord("\\"): "\\\\", 0x2028: "\\u2028", 0x2029: "\\u2029"})
     # fork_exec calls the wrapper vouched for, per thread: the argv it passed on.
     vouched = {}
 
-    class SpawnRefused(PermissionError):
-        pass
-
     def json_str(value):
         return '"' + value.encode("utf-8", "surrogatepass").decode("utf-8", "replace").translate(escapes) + '"'
 
-    def is_watched(name):
-        return name in _WATCHED_ENV or name.startswith(_WATCHED_ENV_PREFIXES)
-
     def env_mapping(env):
-        """The environment a spawn runs with, as text, or None if it cannot be
-        read without asking cell code (a mapping type the gate does not know)."""
+        """The environment a spawn runs with, read only from exact types."""
         if env is None:
             return live_env
-        if type(env) is dict or type(env) is environ_type:
-            return {text(k): text(v) for k, v in env.items()}
-        if type(env) in (list, tuple):
-            out = {}
-            for item in env:
-                name, sep, value = text(item).partition("=")
-                if sep:
-                    out[name] = value
+        out = {}
+        # A dict, or os.environ as the kernel started with it: any other mapping
+        # could answer the gate and the C call differently.
+        if type(env) is dict or env is environ:
+            for key, value in tuple(env.items()):
+                out[exact_text(key, "env name")] = exact_text(value, "env value")
             return out
-        return None
+        for item in exact_seq(env, "env (a dict, os.environ, or a list of NAME=value)"):
+            name, sep, value = exact_text(item, "env entry").partition("=")
+            if sep:
+                out[name] = value
+        return out
 
-    def env_delta(env):
-        return {k: v for k, v in env.items() if is_watched(k) and startup_env.get(k) != v}
+    def env_snapshot(env):
+        if env is None:
+            return None
+        if type(env) is dict or env is environ:
+            return tuple(env.items())
+        return tuple(env)
+
+    def env_change(env):
+        """(set or changed, removed) relative to the startup environment."""
+        changed = {}
+        for name, value in env.items():
+            if name in _MANAGED_ENV:
+                continue
+            if name.startswith("BASH_FUNC_"):
+                raise Refuse(f"exported shell function {name} would run inside any bash the spawn starts")
+            if startup_env.get(name) != value:
+                changed[name] = value
+        removed = [name for name in startup_env if name not in env and name not in _MANAGED_ENV]
+        return changed, removed
 
     def is_executable(candidate):
         try:
@@ -162,22 +228,23 @@ def install(environ, run_id_getter, timeout=600.0):
             return FileNotFoundError(2, strerror(2), path)
         return PermissionError(13, strerror(13), path)
 
+    def absolute(path, base):
+        return path if path.startswith("/") else base.rstrip("/") + "/" + path
+
     def resolve(name, search_path, base):
         """The file an exec-p call would run for `name` under `search_path`."""
         if "/" in name:
-            return name
+            return absolute(name, base)
         for directory in search_path.split(":"):
-            candidate = (directory or ".") + "/" + name
-            full = candidate if candidate.startswith("/") else base + "/" + candidate
+            full = absolute((directory or ".") + "/" + name, base)
             if is_executable(full):
                 return full
         return None
 
-    def display_argv(executed, args):
+    def display_argv(executed, argv):
         """argv[0] stays as written only when the startup PATH resolves it to
-        the file that runs; otherwise it becomes that file's path, so a PATH
-        hijack or an `executable=` override shows."""
-        argv = [text(arg) for arg in (args or ())]
+        the file that runs; otherwise it becomes that file's path."""
+        argv = list(argv)
         if not argv:
             return [executed]
         if argv[0] != executed and ("/" in argv[0] or resolve(argv[0], startup_path, getcwd()) != executed):
@@ -216,28 +283,30 @@ def install(environ, run_id_getter, timeout=600.0):
             conn.close()
         return b"".join(chunks)
 
-    def judge(api, argv=None, command=None, cwd=None, env=None):
-        """None when the host allows the spawn, else the refusal to raise."""
+    def judge(api, env, argv=None, command=None, cwd=None, program=None):
+        """None when the host allows the spawn, else the refusal to return.
+        Text arguments are already exact; `env` is the full environment the
+        spawn runs with."""
         if not bridge_ready:
             return refusal(api, "no host bridge in this kernel")
-        spawn_env = env_mapping(env)
-        if spawn_env is None:
-            return refusal(api, "the spawn environment must be a dict or os.environ")
-        delta = env_delta(spawn_env)
-        cwd = text(cwd) if cwd is not None else getcwd()
+        changed, removed = env_change(env)
         run = run_id_getter()
         fields = [
             '"session":' + json_str(text(env_of("PI_TOOL_BRIDGE_SESSION") or "")),
-            '"run":' + json_str(text(run) if run is not None else ""),
+            '"run":' + json_str(run if type(run) is str else ""),
             '"name":"__spawn__"',
         ]
-        request = ['"api":' + json_str(api), '"cwd":' + json_str(cwd)]
+        request = ['"api":' + json_str(api), '"cwd":' + json_str(cwd if cwd is not None else getcwd())]
         if command is not None:
             request.append('"command":' + json_str(command))
         else:
             request.append('"argv":[' + ",".join(json_str(arg) for arg in argv) + "]")
-        if delta:
-            request.append('"env":{' + ",".join(json_str(k) + ":" + json_str(v) for k, v in delta.items()) + "}")
+        if program is not None:
+            request.append('"program":' + json_str(program))
+        if changed:
+            request.append('"env":{' + ",".join(json_str(k) + ":" + json_str(v) for k, v in changed.items()) + "}")
+        if removed:
+            request.append('"unset":[' + ",".join(json_str(k) for k in removed) + "]")
         body = ("{" + ",".join(fields) + ',"args":{' + ",".join(request) + "}}").encode("utf-8")
         try:
             response = post(body)
@@ -252,33 +321,40 @@ def install(environ, run_id_getter, timeout=600.0):
             reason = "malformed host verdict"
         return refusal(api, reason)
 
-    def judge_executable(api, executed, args, cwd=None, env=None):
+    def judge_executable(api, executed, argv, cwd, env):
+        """Judge running the file `executed` (absolute) with `argv` (exact text)."""
         if not is_executable(executed):
             return missing(executed)
-        argv = display_argv(executed, args)
-        if (executed, tuple(argv)) == internal:
-            spawn_env = env_mapping(env)
-            if spawn_env is not None and not env_delta(spawn_env):
-                return None
-        return judge(api, argv=argv, cwd=cwd, env=env)
+        shown = display_argv(executed, argv)
+        if (executed, tuple(shown)) == internal and env_change(env) == ({}, []):
+            return None
+        return judge(api, env, argv=shown, cwd=cwd, program=executed)
 
     def check_fork_exec(args):
-        """The fork_exec arguments to run (executable list narrowed to the one
-        file judged) or the refusal. Relative candidates resolve against the
-        cwd the child will chdir to before exec."""
-        argv, candidates, cwd, env = args[0], args[1], args[4], args[5]
-        base = text(cwd) if cwd is not None else getcwd()
-        for candidate in candidates or ():
-            path = text(candidate)
-            full = path if path.startswith("/") else base + "/" + path
+        """The fork_exec arguments to run: argv, executable, cwd and env are the
+        gate's own snapshots, the executable list narrowed to the one file
+        judged and cwd made absolute; or the refusal."""
+        if len(args) < 6:
+            raise Refuse("malformed fork_exec call")
+        argv = [snapshot_word(a, "argv item") for a in exact_seq(args[0], "argv")]
+        candidates = [snapshot_word(c, "executable") for c in exact_seq(args[1], "executable list")]
+        cwd = getcwd() if args[4] is None else absolute(text(snapshot_word(args[4], "cwd")), getcwd())
+        env = None if args[5] is None else [snapshot_word(e, "env entry") for e in exact_seq(args[5], "env")]
+        argv_text = [text(a) for a in argv]
+        env_full = env_mapping(env)
+        for candidate in candidates:
+            full = absolute(text(candidate), cwd)
             if is_executable(full):
-                error = judge_executable("subprocess", full, argv, cwd=base, env=env)
-                return error if error is not None else (argv, (candidate,), *args[2:])
-        return FileNotFoundError(2, strerror(2), text(argv[0]) if argv else "")
+                error = judge_executable("subprocess", full, argv_text, cwd, env_full)
+                if error is not None:
+                    return error
+                executable = (full.encode("utf-8", "surrogateescape"),)
+                return (argv, executable, args[2], args[3], cwd, env, *args[6:])
+        return FileNotFoundError(2, strerror(2), argv_text[0] if argv_text else "")
 
     def on_fork_exec_call(args):
         call_args, call_kwargs, box = args
-        if type(call_args) is not tuple or type(call_kwargs) is not dict or type(box) is not list:
+        if type(call_args) is not tuple or type(call_kwargs) is not dict or call_kwargs or type(box) is not list:
             return refusal("subprocess", "malformed fork_exec call")
         outcome = check_fork_exec(call_args)
         if isinstance(outcome, BaseException):
@@ -286,7 +362,7 @@ def install(environ, run_id_getter, timeout=600.0):
         ident = get_ident()
         vouched[ident] = outcome[0]
         try:
-            box.append(original_fork_exec(*outcome, **call_kwargs))
+            box.append(original_fork_exec(*outcome))
         except BaseException as exc:
             error = exc.with_traceback(None)
             del exc
@@ -302,34 +378,58 @@ def install(environ, run_id_getter, timeout=600.0):
             return None
         return refusal("_posixsubprocess.fork_exec", "called outside subprocess; its cwd cannot be judged")
 
+    def observed(path, argv, env):
+        """Exact-type readings of an exec/spawn call the gate only observes,
+        plus a snapshot to compare once the verdict is in: C reads a list or
+        dict only after this hook returns."""
+        path_text = exact_text(path, "executable path")
+        argv_text = [exact_text(a, "argv item") for a in exact_seq(argv, "argv")]
+        return path_text, argv_text, env_mapping(env), (tuple(argv), env_snapshot(env))
+
+    def unchanged(api, error, before, argv, env):
+        if error is not None:
+            return error
+        if before != (tuple(argv), env_snapshot(env)):
+            return refusal(api, "the arguments changed while the spawn was being judged")
+        return None
+
     def on_system(args):
-        return judge("os.system", command=text(args[0]))
+        return judge("os.system", live_env, command=exact_text(args[0], "command"))
 
     def on_exec(args):
-        path = text(args[0])
-        full = path if path.startswith("/") else getcwd() + "/" + path
-        return judge_executable("os.exec", full, args[1], env=args[2])
+        path, argv, env = args
+        path_text, argv_text, env_full, before = observed(path, argv, env)
+        error = judge_executable("os.exec", absolute(path_text, getcwd()), argv_text, None, env_full)
+        return unchanged("os.exec", error, before, argv, env)
 
     def on_posix_spawn(args):
-        path, env = text(args[0]), args[2]
-        if "/" in path:
-            return judge_executable("os.posix_spawn", path if path.startswith("/") else getcwd() + "/" + path, args[1], env=env)
-        # posix_spawnp: the C library searches the caller's PATH; require the
-        # PATH the call passes to agree, so there is one answer to judge.
-        spawn_env = env_mapping(env)
-        passed_path = spawn_env.get("PATH", "") if spawn_env is not None else None
-        executed = resolve(path, live_env.get("PATH", ""), getcwd())
-        if passed_path is not None and resolve(path, passed_path, getcwd()) != executed:
-            return refusal("os.posix_spawn", "posix_spawnp resolves differently under the PATH it was passed")
-        if executed is None:
-            return FileNotFoundError(2, strerror(2), path)
-        return judge_executable("os.posix_spawn", executed, args[1], env=env)
+        path, argv, env = args
+        path_text, argv_text, env_full, before = observed(path, argv, env)
+        if "/" in path_text:
+            executed = absolute(path_text, getcwd())
+        else:
+            # posix_spawnp: the C library searches the caller's PATH; require
+            # the PATH the call passes to agree, so there is one answer.
+            executed = resolve(path_text, live_env.get("PATH", ""), getcwd())
+            if resolve(path_text, env_full.get("PATH", ""), getcwd()) != executed:
+                return refusal("os.posix_spawn", "posix_spawnp resolves differently under the PATH it was passed")
+            if executed is None:
+                return FileNotFoundError(2, strerror(2), path_text)
+        error = judge_executable("os.posix_spawn", executed, argv_text, None, env_full)
+        return unchanged("os.posix_spawn", error, before, argv, env)
 
     def on_spawn(args):
-        return judge("os.spawn", argv=display_argv(text(args[1]), args[2]), env=args[3])
+        _mode, path, argv, env = args
+        path_text, argv_text, env_full, before = observed(path, argv, env)
+        error = judge("os.spawn", env_full, argv=display_argv(path_text, argv_text), program=path_text)
+        return unchanged("os.spawn", error, before, argv, env)
 
     def on_create_process(args):
-        return judge("_winapi.CreateProcess", command=text(args[1] or args[0]), cwd=args[2])
+        application, command_line, cwd = args[0], args[1], args[2]
+        command = exact_text(command_line if command_line is not None else application, "command line")
+        return judge(
+            "_winapi.CreateProcess", live_env, command=command, cwd=None if cwd is None else exact_text(cwd, "cwd")
+        )
 
     def on_putenv(args):
         live_env[text(args[0])] = text(args[1])
@@ -341,11 +441,50 @@ def install(environ, run_id_getter, timeout=600.0):
         return SpawnRefused(f"{refused_prefix} (ctypes): {_NATIVE_CODE}")
 
     def on_import(args):
-        if args and args[0] in ("_ctypes", "_cffi_backend"):
-            return SpawnRefused(f"{refused_prefix} ({args[0]}): {_NATIVE_CODE}")
-        if args and args[0] == "_posixsubprocess":
+        name = args[0] if args else None
+        if name in ("_ctypes", "_cffi_backend"):
+            return SpawnRefused(f"{refused_prefix} ({name}): {_NATIVE_CODE}")
+        if name == "_posixsubprocess":
             # A fresh copy would carry the unwrapped C fork_exec.
             return SpawnRefused(f"{refused_prefix} (_posixsubprocess): re-importing it would bypass the gate")
+        if name in _SUBINTERPRETER_MODULES:
+            return SpawnRefused(f"{refused_prefix} ({name}): subinterpreters run without the spawn gate")
+        filename = args[1] if len(args) > 1 else None
+        if filename is None:
+            return None
+        # The second `import` event carries the file a native extension loads
+        # from, however it was reached (import, ExtensionFileLoader,
+        # _imp.create_dynamic).
+        path = exact_text(filename, "extension path")
+        if not path.endswith(extension_suffixes):
+            return None
+        if not realpath(path).startswith(extension_roots):
+            return SpawnRefused(
+                f"{refused_prefix} (native extension): {path} is outside the interpreter's install and site directories"
+            )
+        try:
+            changed_at = stat(path).st_ctime
+        except (OSError, ValueError):
+            return SpawnRefused(f"{refused_prefix} (native extension): cannot stat {path}")
+        if changed_at >= native_epoch:
+            return SpawnRefused(
+                f"{refused_prefix} (native extension): {path} changed during this omp session, "
+                "so a cell may have written it; restart omp to load newly installed extensions"
+            )
+        return None
+
+    def on_new_interpreter(args):
+        return SpawnRefused(f"{refused_prefix} (subinterpreter): subinterpreters run without the spawn gate")
+
+    def on_create_builtin_call(args):
+        call_args, call_kwargs, box = args
+        if type(call_args) is not tuple or len(call_args) != 1 or call_kwargs or type(box) is not list:
+            return refusal("_imp.create_builtin", "malformed call")
+        spec = call_args[0]
+        name = exact_text(getattr(spec, "name", None), "module name")
+        if name in ("posix", "nt", "_posixsubprocess", "_winapi"):
+            return SpawnRefused(f"{refused_prefix} (_imp.create_builtin): a fresh {name} would bypass the gate")
+        box.append(original_create_builtin(module_spec(name, getattr(spec, "loader", None))))
         return None
 
     def on_introspect(args):
@@ -373,6 +512,7 @@ def install(environ, run_id_getter, timeout=600.0):
         "ctypes.dlsym/handle": on_ffi,
         "ctypes.call_function": on_ffi,
         "import": on_import,
+        "cpython.PyInterpreterState_New": on_new_interpreter,
         "object.__setattr__": on_setattr,
         "gc.get_referrers": on_introspect,
         "gc.get_referents": on_introspect,
@@ -391,6 +531,10 @@ def install(environ, run_id_getter, timeout=600.0):
             return fn(*args)
         except KeyboardInterrupt:
             return KeyboardInterrupt()
+        except Refuse as exc:
+            error = SpawnRefused(f"{refused_prefix}: {exc}")
+            del exc
+            return error
         except BaseException as exc:
             error = SpawnRefused(f"{refused_prefix}: gate error {type(exc).__name__}: {exc}")
             del exc
@@ -400,6 +544,15 @@ def install(environ, run_id_getter, timeout=600.0):
         handler = handlers.get(event)
         return None if handler is None else guarded(handler, args)
 
+    def call_through_audit(event):
+        scope = {"__builtins__": {}}
+        exec(_CALL_THROUGH_AUDIT_SOURCE, scope)
+        fn = scope.pop("call")
+        fn.__kwdefaults__ = {"_audit": sys.audit, "_event": event}
+        protected.add(id(fn))
+        protected.add(id(fn.__code__))
+        return fn
+
     try:
         import _posixsubprocess, subprocess
     except ImportError:
@@ -407,26 +560,42 @@ def install(environ, run_id_getter, timeout=600.0):
     original_fork_exec = None
     if _posixsubprocess is not None:
         original_fork_exec = _posixsubprocess.fork_exec
-        wrapper_globals = {"__builtins__": {}}
-        exec(_FORK_EXEC_SOURCE, wrapper_globals)
-        gated_fork_exec = wrapper_globals.pop("fork_exec")
-        gated_fork_exec.__kwdefaults__ = {"_audit": sys.audit}
+        gated_fork_exec = call_through_audit("omp.spawn_gate.fork_exec")
         # Both bindings: `subprocess` captured its own at import, and
         # multiprocessing looks the module attribute up at call time.
         _posixsubprocess.fork_exec = gated_fork_exec
         if subprocess is not None and hasattr(subprocess, "_fork_exec"):
             subprocess._fork_exec = gated_fork_exec
-        protected.add(id(gated_fork_exec))
-        protected.add(id(gated_fork_exec.__code__))
         handlers["omp.spawn_gate.fork_exec"] = on_fork_exec_call
         if py_version >= (3, 14):
             handlers["_posixsubprocess.fork_exec"] = on_fork_exec_event
+
+    # A subinterpreter runs without this interpreter's audit hooks. Importing
+    # the modules that create one is refused above; one already loaded (the
+    # stdlib's concurrent.futures imports `_interpreters`) loses its functions.
+    def on_subinterpreter_call(args):
+        return SpawnRefused(f"{refused_prefix} (subinterpreter): subinterpreters run without the spawn gate")
+
+    handlers["omp.spawn_gate.subinterpreter"] = on_subinterpreter_call
+    refuse_subinterpreter = call_through_audit("omp.spawn_gate.subinterpreter")
+    for name in _SUBINTERPRETER_MODULES:
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        for attribute, value in tuple(vars(module).items()):
+            if type(value).__name__ == "builtin_function_or_method":
+                setattr(module, attribute, refuse_subinterpreter)
+
+    original_create_builtin = _imp.create_builtin
+    _imp.create_builtin = call_through_audit("omp.spawn_gate.create_builtin")
+    handlers["omp.spawn_gate.create_builtin"] = on_create_builtin_call
 
     hook_globals = {"__builtins__": {}}
     exec(_HOOK_SOURCE, hook_globals)
     hook = hook_globals.pop("hook")
     hook.__defaults__ = (dispatch,)
-    for fn in (hook, dispatch, guarded, judge, judge_executable, check_fork_exec, on_fork_exec_call, post, text, json_str, display_argv, refusal, *handlers.values()):
+    gate_functions = (hook, dispatch, guarded, judge, judge_executable, check_fork_exec, post, text, json_str)
+    for fn in (*gate_functions, display_argv, refusal, observed, unchanged, *handlers.values()):
         protected.add(id(fn))
         protected.add(id(fn.__code__))
     sys.addaudithook(hook)
