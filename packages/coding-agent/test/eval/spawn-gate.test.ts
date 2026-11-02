@@ -605,6 +605,64 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		}
 	});
 
+	it("copies a posix_spawn env in the gate, so a caller-overridden wrapper default cannot leave C reading the cell's dict", async () => {
+		const file = marker();
+		const result = await runPython(
+			[
+				"import os, threading, time",
+				'env = {"PATH": os.environ["PATH"], "A": "1"}',
+				"def racer():",
+				"    time.sleep(0.4)",
+				'    env["INJECTED"] = "after-judge"',
+				"threading.Thread(target=racer).start()",
+				`pid = os.posix_spawn("/bin/sh", ["sh", "-c", "env > ${file} #slow-1"], env, _dict=lambda e: e)`,
+				"os.waitpid(pid, 0)",
+				"time.sleep(0.5)",
+				`print("CHILD", [l for l in open(${JSON.stringify(file)}).read().split(chr(10)) if l.startswith(("INJECTED", "A="))])`,
+			].join("\n"),
+		);
+		expect(result.output).toContain("CHILD ['A=1']");
+	});
+
+	// A symlink in a parent directory under a trusted root can point at an old
+	// extension outside every root. Needs another interpreter's extension module
+	// on disk to point at, and a venv whose site-packages is a root.
+	const foreignExtension = (() => {
+		for (const version of ["3.11", "3.12", "3.13", "3.14"]) {
+			const other = $which(`python${version}`);
+			if (!other || !python) continue;
+			const probe = Bun.spawnSync([other, "-c", "import _json; print(_json.__file__)"], { stdout: "pipe" });
+			const file = probe.stdout.toString().trim();
+			if (probe.exitCode === 0 && file.endsWith(".so")) return file;
+		}
+		return undefined;
+	})();
+	it.skipIf(!foreignExtension)(
+		"refuses an extension reached through a symlinked directory under a trusted root",
+		async () => {
+			const venv = path.join(tempDir.path(), "venv");
+			expect(Bun.spawnSync([python!, "-m", "venv", "--without-pip", venv]).exitCode).toBe(0);
+			const venvPython = path.join(venv, "bin", "python");
+			const site = Bun.spawnSync([venvPython, "-c", "import site; print(site.getsitepackages()[0])"], {
+				stdout: "pipe",
+			})
+				.stdout.toString()
+				.trim();
+			fs.symlinkSync(path.dirname(foreignExtension!), path.join(site, "linked"));
+			const loaded = path.join(site, "linked", path.basename(foreignExtension!));
+			const result = await executePython(
+				[
+					"import importlib.machinery, importlib.util",
+					`loader = importlib.machinery.ExtensionFileLoader("_json", ${JSON.stringify(loaded)})`,
+					`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("_json", ${JSON.stringify(loaded)}, loader=loader)); print("RAN")`,
+					"except BaseException as e: print(type(e).__name__, e)",
+				].join("\n"),
+				{ cwd: tempDir.path(), sessionId: "spawn-gate-py-venv", toolSession: session, interpreter: venvPython },
+			);
+			expect(result.output).toContain("is a symlink");
+		},
+	);
+
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
 		const file = marker();
 		const result = await runPython(`import os\nos.system("touch " + ${JSON.stringify(file)})`, null);
@@ -876,6 +934,71 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 		);
 		expect(result.output).toContain("true");
 		expect(judged.map(input => input.command)).toEqual(["true"]);
+	});
+
+	it("refuses new realms: ShadowRealm, and vm contexts, which carry their own", async () => {
+		const file = marker();
+		const quoted = JSON.stringify(`touch ${file}`);
+		const attempts = [
+			`new ShadowRealm().evaluate("(a) => { Bun.spawnSync(a.split(' ')); }")(${quoted})`,
+			'require("node:vm").runInNewContext("new ShadowRealm()")',
+			'require("node:vm").createContext({})',
+			'(await import("node:vm")).createContext({})',
+			'new (require("node:vm").Script)("1").runInNewContext()',
+		];
+		const code = attempts
+			.map(attempt => `try { ${attempt}; console.log("RAN"); } catch (e) { console.log(String(e.message)); }`)
+			.join("\n");
+		const result = await runJs(code);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(attempts.length);
+		expect(judged).toEqual([]);
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("refuses every native-load entry point besides process.dlopen", async () => {
+		const addon = path.join(tempDir.path(), "native-addon.node");
+		fs.writeFileSync(addon, "not really a native addon");
+		const quoted = JSON.stringify(addon);
+		const attempts = [
+			`require("node:module")._extensions[".node"]({ exports: {} }, ${quoted})`,
+			`process.getBuiltinModule("module")._extensions[".node"]({ exports: {} }, ${quoted})`,
+			`require.extensions[".node"]({ exports: {} }, ${quoted})`,
+			`require(${quoted})`,
+			`new (require("bun:sqlite").Database)(":memory:").loadExtension(${quoted})`,
+			`require("bun:sqlite").Database.setCustomSQLite(${quoted})`,
+			'require("bun:jsc").startRemoteDebugger()',
+		];
+		const code = attempts
+			.map(attempt => `try { ${attempt}; console.log("RAN"); } catch (e) { console.log(String(e.message)); }`)
+			.join("\n");
+		const result = await runJs(code);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(attempts.length);
+	});
+
+	it("calls the original spawn without Function.prototype.call or the array iterator a cell replaced", async () => {
+		const file = marker();
+		await runJs(
+			[
+				"const call = Function.prototype.call;",
+				"Function.prototype.call = function (self, ...args) {",
+				`  if (Array.isArray(args[0]) && args[0][0] === "true") args[0] = ["touch", ${JSON.stringify(file)}];`,
+				"  return Reflect.apply(call, this, [self, ...args]);",
+				"};",
+				'try { Bun.spawnSync(["true"]); } finally { Function.prototype.call = call; }',
+				"const iter = Object.getPrototypeOf([][Symbol.iterator]());",
+				"const next = iter.next;",
+				"iter.next = function () {",
+				"  const r = next.call(this);",
+				`  if (!r.done && r.value === "benign") r.value = { raw: "; touch ${file}" };`,
+				"  return r;",
+				"};",
+				'try { await Bun.$`echo ${"benign"}`; } finally { iter.next = next; }',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual(["true", "echo benign"]);
+		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
 	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {

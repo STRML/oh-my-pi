@@ -156,17 +156,17 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
     # site directories, and only when their file predates this omp session: a
     # file changed since then may have been written by a cell.
     import site
-    # Both spellings of each root (as configured and resolved), computed now,
-    # before any cell runs; a loaded path is matched as given, never resolved.
+    # Roots in resolved form, computed now, before any cell runs. A loaded path
+    # must start with one and contain no symlink in any component, so it is
+    # already its own realpath: nothing under a root can point outside it.
     extension_roots = []
     user_site = site.getusersitepackages()
     for root in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *site.getsitepackages(), user_site):
         if not root:
             continue
-        for spelling in (root, os.path.realpath(root)):
-            spelling = spelling.rstrip("/") + "/"
-            if spelling not in extension_roots:
-                extension_roots.append(spelling)
+        resolved = os.path.realpath(root).rstrip("/") + "/"
+        if resolved not in extension_roots:
+            extension_roots.append(resolved)
     extension_roots = tuple(extension_roots)
     try:
         native_epoch = float(environ.get("PI_EVAL_GATE_EPOCH") or "")
@@ -485,6 +485,11 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
         argv_text = [exact_text(a, "argv item") for a in argv_seq]
         if env is not None and type(env) is not dict:
             raise Refuse("malformed call")
+        # The wrapper's own copy is only as good as its keyword defaults, which a
+        # caller can override (`_dict=lambda e: e`); the gate copies again, from
+        # an exact dict, and C gets that copy.
+        if env is not None:
+            env = env.copy()
         env_full = env_mapping(env)
         if kind == "posix_spawnp" and "/" not in path_text:
             # The C library searches the caller's PATH; require the PATH the
@@ -585,12 +590,15 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
             return SpawnRefused(
                 f"{refused_prefix} (native extension): {path} is outside the interpreter's install and site directories"
             )
-        try:
-            info = lstat(path)
-        except (OSError, ValueError):
-            return SpawnRefused(f"{refused_prefix} (native extension): cannot stat {path}")
-        if (info.st_mode & 0o170000) == 0o120000:
-            return SpawnRefused(f"{refused_prefix} (native extension): {path} is a symlink")
+        prefix, info = "", None
+        for part in path.split("/")[1:]:
+            prefix += "/" + part
+            try:
+                info = lstat(prefix)
+            except (OSError, ValueError):
+                return SpawnRefused(f"{refused_prefix} (native extension): cannot stat {prefix}")
+            if (info.st_mode & 0o170000) == 0o120000:
+                return SpawnRefused(f"{refused_prefix} (native extension): {prefix} is a symlink")
         changed_at = info.st_ctime
         if changed_at >= native_epoch:
             return SpawnRefused(

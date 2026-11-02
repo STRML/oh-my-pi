@@ -42,6 +42,7 @@
  */
 import * as ffiNamespace from "bun:ffi";
 import * as path from "node:path";
+import * as vmNamespace from "node:vm";
 import type { Worker as ThreadWorker } from "node:worker_threads";
 
 export interface SpawnGateEndpoint {
@@ -114,6 +115,9 @@ const sliceBytes = uncurry(Uint8Array.prototype.slice) as (self: Uint8Array, sta
 const decode = uncurry(TextDecoder.prototype.decode) as (self: TextDecoder, input: Uint8Array) => string;
 const weakGet = uncurry(WeakMap.prototype.get) as (self: WeakMap<object, unknown>, key: object) => unknown;
 const weakSet = uncurry(WeakMap.prototype.set) as (self: WeakMap<object, unknown>, key: object, value: unknown) => void;
+// `Function.prototype.call` and the array iterator a spread uses are both
+// cell-replaceable; every call into an original goes through this instead.
+const apply = Reflect.apply;
 const stringify = JSON.stringify;
 const parseJson = JSON.parse;
 const isArray = Array.isArray;
@@ -345,6 +349,39 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 	};
 	lock(globalThis, "Worker", refuseWorker);
 	lock(getBuiltinModule("node:worker_threads"), "Worker", refuseWorker);
+	refuseNewRealms();
+	lockMockApi();
+}
+
+/**
+ * Every way found to get a global the gate was never installed in. A
+ * ShadowRealm (directly, or from a vm context's own `ShadowRealm`) has a
+ * fresh `Bun`, `process` and module loader. `vm.createContext` is kept for
+ * the one object the runtime contextifies, this realm's own `globalThis`
+ * (the local module loader runs cell modules in it); any other object, and
+ * `runInNewContext`, is refused.
+ */
+function refuseNewRealms(): void {
+	lock(globalThis, "ShadowRealm", function ShadowRealm(): never {
+		throw new SpawnRefusedError("ShadowRealm", "a new realm would start without the spawn gate");
+	});
+	const vm = getBuiltinModule("node:vm");
+	const createContext = vm.createContext as (...args: unknown[]) => unknown;
+	const realm = globalThis;
+	const gatedCreateContext = function (...args: unknown[]): unknown {
+		if (args[0] !== realm) {
+			throw new SpawnRefusedError("vm.createContext", "a new context has its own ShadowRealm and module loader");
+		}
+		return apply(createContext, vm, args);
+	};
+	const refuseNewContext = refuser("vm.runInNewContext", "a new context has its own ShadowRealm and module loader");
+	lock(vm, "createContext", gatedCreateContext);
+	lock(vm, "runInNewContext", refuseNewContext);
+	lock((vm.Script as { prototype: object }).prototype, "runInNewContext", refuseNewContext);
+	// The kernel's module loader imported `node:vm` as ESM before the gate ran,
+	// so that namespace holds the originals; rebind them there too.
+	mockNamespaceExport(vmNamespace as unknown as BuiltinModule, "createContext", gatedCreateContext);
+	mockNamespaceExport(vmNamespace as unknown as BuiltinModule, "runInNewContext", refuseNewContext);
 }
 
 /**
@@ -401,9 +438,9 @@ function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge, startupPath: str
 		options.env = plainEnv(env);
 		const resolved = resolveArgv(argv, env.PATH ?? "", startupPath, cwd);
 		judge(api, { argv: resolved.argv, program: resolved.program, cwd, env });
-		if (fromArgv) return original.call(Bun, argv, options);
+		if (fromArgv) return apply(original, Bun, [argv, options]);
 		options.cmd = argv;
-		return original.call(Bun, options);
+		return apply(original, Bun, [options]);
 	};
 	lock(Bun, key, gated);
 }
@@ -478,7 +515,9 @@ function gateBunShell(judge: Judge): void {
 		judge("Bun.$", shell);
 		const template = copyArray(parts);
 		defineProperty(template, "raw", { value: freeze(copyArray(parts)) });
-		const promise = original(freeze(template) as unknown as TemplateStringsArray, ...words) as Bun.$.ShellPromise;
+		const callArgs: unknown[] = [freeze(template)];
+		for (let i = 0; i < words.length; i++) put(callArgs, i + 1, words[i]);
+		const promise = apply(original, undefined, callArgs) as Bun.$.ShellPromise;
 		// Run with exactly what was judged, whatever the shell's own defaults are.
 		setCwd(promise, shell.cwd);
 		setEnv(promise, plainEnv(shell.env));
@@ -514,19 +553,26 @@ function gateBunShell(judge: Judge): void {
 		return this;
 	});
 
+	// Captured, not looked up per call: they may live on a prototype a cell can reach.
+	const shellMethods = {
+		cwd: original.cwd as (...a: unknown[]) => unknown,
+		env: original.env as (...a: unknown[]) => unknown,
+		nothrow: original.nothrow as (...a: unknown[]) => unknown,
+		throws: original.throws as (...a: unknown[]) => unknown,
+	};
 	const chain = (method: "nothrow" | "throws") =>
 		function (...args: unknown[]) {
-			(original[method] as (...a: unknown[]) => unknown)(...args);
+			apply(shellMethods[method], original, args);
 			return gated;
 		};
 	const setDefaultCwd = function (dir?: unknown) {
 		defaults.cwd = dir === undefined || dir === null ? undefined : absoluteCwd(dir);
-		original.cwd(defaults.cwd);
+		apply(shellMethods.cwd, original, [defaults.cwd]);
 		return gated;
 	};
 	const setDefaultEnv = function (vars?: unknown) {
 		defaults.env = vars && typeof vars === "object" ? snapshotEnv(vars) : undefined;
-		original.env(defaults.env ? plainEnv(defaults.env) : undefined);
+		apply(shellMethods.env, original, [defaults.env ? plainEnv(defaults.env) : undefined]);
 		return gated;
 	};
 	defineProperty(gated, "escape", { value: escape });
@@ -555,7 +601,7 @@ function gateProcess(judge: Judge): void {
 			for (let i = 1; i < given.length; i++) put(argv, i, given[i] as string);
 			const vars = snapshotEnv(env && typeof env === "object" ? env : process.env);
 			judge("process.execve", { argv: freeze(argv), cwd: cwdOf(), env: vars, program });
-			return execve.call(process, program, given, plainEnv(vars));
+			return apply(execve, process, [program, given, plainEnv(vars)]);
 		});
 	}
 	const binding = proc.binding as ((name: string) => unknown) | undefined;
@@ -568,11 +614,30 @@ function gateProcess(judge: Judge): void {
 					"it creates processes outside the gate",
 				);
 			}
-			return binding.call(process, module);
+			return apply(binding, process, [module]);
 		});
 	}
 	lock(proc, "_linkedBinding", refuser("process._linkedBinding", NATIVE_CODE));
 	lock(proc, "dlopen", refuser("process.dlopen", NATIVE_CODE));
+	refuseNativeLoaders();
+}
+
+/**
+ * Native-code entry points besides `process.dlopen`: the CommonJS `.node`
+ * loader (`require.extensions` is the same object), SQLite extension loading
+ * and custom SQLite libraries, and the JSC remote debugger.
+ */
+function refuseNativeLoaders(): void {
+	const module = getBuiltinModule("node:module") as { _extensions: BuiltinModule };
+	lock(module._extensions, ".node", refuser("Module._extensions['.node']", NATIVE_CODE));
+	const sqlite = getBuiltinModule("bun:sqlite") as { Database: { prototype: object } & BuiltinModule };
+	lock(sqlite.Database.prototype, "loadExtension", refuser("Database.loadExtension", NATIVE_CODE));
+	lock(sqlite.Database, "setCustomSQLite", refuser("Database.setCustomSQLite", NATIVE_CODE));
+	lock(
+		getBuiltinModule("bun:jsc"),
+		"startRemoteDebugger",
+		refuser("bun:jsc.startRemoteDebugger", "a debugger client could run code the gate never sees"),
+	);
 }
 
 /** Replace every function or class export with a refuser and empty every nested table. */
@@ -607,16 +672,13 @@ function refuseNativeCode(): void {
 	// Each mock is detached from the mock prototype and made non-extensible, so
 	// `mockRestore()` cannot be reached; `Bun.jest` and `bun:test` are then
 	// locked, so no `restoreAllMocks` can undo them.
-	const jest = (bun.jest as (path: string) => JestApi)("omp-eval-spawn-gate");
 	const namespace = ffiNamespace as unknown as BuiltinModule;
 	const names = ownNames(namespace);
 	for (let i = 0; i < names.length; i++) {
 		const key = names[i] as string;
 		const value = namespace[key];
 		if (typeof value === "function") {
-			const mock = jest.spyOn(namespace, key).mockImplementation(refused) as object;
-			setPrototypeOf(mock, functionPrototype);
-			preventExtensions(mock);
+			mockNamespaceExport(namespace, key, refused);
 		} else if (value !== null && typeof value === "object") {
 			// `read` holds raw memory readers.
 			const table = value as BuiltinModule;
@@ -626,7 +688,30 @@ function refuseNativeCode(): void {
 			}
 		}
 	}
+}
+
+/** Captured once; `lockMockApi` then locks it away for good. */
+let jest: JestApi | undefined;
+
+/**
+ * Rebind one export of an ESM namespace (which plain assignment cannot do)
+ * through the test runner's spyOn. The mock is detached from the mock
+ * prototype and made non-extensible, so `mockRestore()` cannot be reached.
+ */
+function mockNamespaceExport(
+	namespace: BuiltinModule,
+	key: string,
+	implementation: (...args: never[]) => unknown,
+): void {
+	jest ??= ((Bun as unknown as BuiltinModule).jest as (path: string) => JestApi)("omp-eval-spawn-gate");
+	const mock = jest.spyOn(namespace, key).mockImplementation(implementation as () => never) as object;
+	setPrototypeOf(mock, functionPrototype);
+	preventExtensions(mock);
+}
+
+/** After the last mock: no `restoreAllMocks` may undo them. */
+function lockMockApi(): void {
 	const refusedMocks = refuser("Bun.jest", "the test runner's mock API could restore what the spawn gate replaced");
-	lock(bun, "jest", refusedMocks);
+	lock(Bun as unknown as BuiltinModule, "jest", refusedMocks);
 	lockAllExports(getBuiltinModule("bun:test"), refusedMocks);
 }
