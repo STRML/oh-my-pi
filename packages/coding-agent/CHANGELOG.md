@@ -10,7 +10,7 @@
 
 ### Changed
 
-- Every subprocess an eval cell starts, in Python or JavaScript and however the call is spelled, now goes through the bash tool's gate (extension `tool_call` handlers, then approval policy) with its real command and cwd before it runs. A spawn is refused when the session has no bash tool or the host does not answer. Eval kernels also refuse native FFI (`ctypes`, `cffi`, `bun:ffi`, `process.dlopen`) and new Workers.
+- Every subprocess an eval cell starts, in Python or JavaScript and however the call is spelled, now goes through the bash tool's gate (extension `tool_call` handlers, then approval policy) with its real command, absolute cwd and any environment changes before it runs. A spawn is refused when the session has no bash tool or the host does not answer. Eval kernels also refuse native code they cannot judge: FFI (`ctypes`, `cffi`, `bun:ffi`, `process.dlopen`), Python extension modules from outside the interpreter's install and site directories or changed during the omp session (restart omp to load one installed mid-session), subinterpreters, and new Workers.
 
 ### Fixed
 

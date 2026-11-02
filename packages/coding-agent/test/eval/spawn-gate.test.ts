@@ -8,6 +8,7 @@ import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-age
 import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalSpawnBashInput } from "@oh-my-pi/pi-coding-agent/eval/spawn-gate";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { shellQuote } from "@oh-my-pi/pi-coding-agent/tools/bash-worktree-rewrite";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -43,6 +44,8 @@ const session = {
 	settings: Settings.isolated(),
 	authorizeEvalSpawn: async (input: EvalSpawnBashInput) => {
 		judged.push(input);
+		// Holds a verdict open long enough for a cell thread to edit the call's arguments.
+		if (input.command.includes("slow-")) await Bun.sleep(1_000);
 		if (verdict === "deny") throw new Error("stub host denies this spawn");
 	},
 } as unknown as ToolSession;
@@ -164,8 +167,8 @@ const pythonShapes: SpawnShape[] = [
 		skip: !ptyAvailable,
 	},
 	{
-		name: "a re-imported posix module",
-		code: f => `import sys\ndel sys.modules["posix"]\nimport posix\nposix.system("touch " + ${f})`,
+		name: "a reloaded os module",
+		code: f => `import importlib, os\nimportlib.reload(os).system("touch " + ${f})`,
 	},
 ];
 
@@ -309,6 +312,127 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		expect(result.output).toContain("re-importing it would bypass the gate");
 	});
 
+	it("refuses a str subclass or argv list subclass, which could read one way to the gate and another to C", async () => {
+		const file = marker();
+		const quoted = JSON.stringify(file);
+		const result = await runPython(
+			[
+				"import os, subprocess",
+				"class S(str):",
+				'    def __str__(self): return "echo benign"',
+				"class L(list):",
+				'    def __iter__(self): return iter(["true"])',
+				"for attempt in (",
+				`    lambda: subprocess.run(["/bin/sh", "-c", S("touch " + ${quoted})]),`,
+				`    lambda: os.posix_spawn("/usr/bin/touch", L(["touch", ${quoted}]), os.environ),`,
+				`    lambda: os.posix_spawn("/usr/bin/touch", ["touch", S(${quoted})], os.environ),`,
+				"):",
+				"    try: attempt(); print('RAN')",
+				"    except PermissionError as e: print(e)",
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(3);
+		expect(judged).toEqual([]);
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("refuses an argv list another thread edits while the host is judging", async () => {
+		const file = marker();
+		const result = await runPython(
+			[
+				"import os, threading, time",
+				`a = ["touch", "slow-" + ${JSON.stringify(file)}]`,
+				"def flip():",
+				"    time.sleep(0.4)",
+				`    a[1] = ${JSON.stringify(file)}`,
+				"threading.Thread(target=flip).start()",
+				"try: os.waitpid(os.posix_spawn('/usr/bin/touch', a, dict(os.environ)), 0)",
+				"except PermissionError as e: print(e)",
+			].join("\n"),
+		);
+		expect(result.output).toContain("the arguments changed while the spawn was being judged");
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("refuses native extensions a cell writes, however they are loaded, without asking the host", async () => {
+		const library = path.join(tempDir.path(), "native_mod.so");
+		fs.writeFileSync(library, "not really a shared object");
+		const result = await runPython(
+			[
+				"import importlib.machinery, importlib.util, _imp",
+				"def by_loader():",
+				`    loader = importlib.machinery.ExtensionFileLoader("native_mod", ${JSON.stringify(library)})`,
+				`    importlib.util.module_from_spec(importlib.util.spec_from_file_location("native_mod", ${JSON.stringify(library)}, loader=loader))`,
+				"def by_imp():",
+				`    _imp.create_dynamic(importlib.machinery.ModuleSpec("native_mod", None, origin=${JSON.stringify(library)}))`,
+				"def fresh_posix():",
+				"    _imp.create_builtin(importlib.machinery.ModuleSpec('posix', None))",
+				"for attempt in (by_loader, by_imp, fresh_posix):",
+				"    try: attempt(); print('RAN')",
+				"    except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused \(native extension\)/g)?.length).toBe(2);
+		expect(result.output).toContain("eval subprocess spawn refused (_imp.create_builtin)");
+		expect(judged).toEqual([]);
+	});
+
+	it("refuses subinterpreters, which run without the audit hook", async () => {
+		const file = marker();
+		const result = await runPython(
+			[
+				`F = ${JSON.stringify(file)}`,
+				"def public():",
+				"    import concurrent.interpreters as I",
+				"    I.create().exec(f\"import os; os.system('touch {F}')\")",
+				"def private():",
+				"    import _interpreters as I",
+				"    I.exec(I.create(), f\"import os; os.system('touch {F}')\")",
+				"for attempt in (public, private):",
+				"    try: attempt(); print('RAN')",
+				"    except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/subinterpreters run without the spawn gate/g)?.length).toBe(2);
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("judges a relative subprocess cwd as the absolute directory it runs in", async () => {
+		verdict = "deny";
+		await runPython(
+			[
+				"import os, subprocess",
+				"start = os.getcwd()",
+				'os.chdir("/usr")',
+				'try: subprocess.run(["true"], cwd="bin")',
+				"except PermissionError: pass",
+				"finally: os.chdir(start)",
+			].join("\n"),
+		);
+		expect(judged.map(input => input.cwd)).toEqual(["/usr/bin"]);
+	});
+
+	it("judges every changed variable, not a list of known ones, and refuses exported bash functions", async () => {
+		verdict = "deny";
+		const result = await runPython(
+			[
+				"import os, subprocess",
+				"env = dict(os.environ, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.fsmonitor', GIT_CONFIG_VALUE_0='touch x #')",
+				'try: subprocess.run(["git", "status"], env=env)',
+				"except PermissionError: pass",
+				"try: subprocess.run(['true'], env=dict(os.environ, **{'BASH_FUNC_ls%%': '() { :; }'}))",
+				"except PermissionError as e: print(e)",
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([
+			"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='touch x #' git status",
+		]);
+		expect(result.output).toContain("exported shell function BASH_FUNC_ls%%");
+	});
+
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
 		const file = marker();
 		const result = await runPython(`import os\nos.system("touch " + ${JSON.stringify(file)})`, null);
@@ -416,6 +540,100 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 			{ command, cwd: "/" },
 		]);
 		expect(judged[0]!.cwd).not.toBe("/");
+	});
+
+	it("judges Bun.$ again when the prototype's .cwd()/.env() are called directly", async () => {
+		verdict = "allow";
+		const file = marker();
+		await runJs(
+			[
+				`const p = Bun.$\`touch \${${JSON.stringify(file)}}\`;`,
+				'Object.getPrototypeOf(p).cwd.call(p, "/");',
+				'Object.getPrototypeOf(p).env.call(p, { ...process.env, GIT_DIR: "/tmp/elsewhere" });',
+				"await p;",
+			].join("\n"),
+		);
+		const command = `touch ${Bun.$.escape(file)}`;
+		expect(judged.map(input => [input.command, input.cwd === "/"])).toEqual([
+			[command, false],
+			[command, true],
+			[`GIT_DIR=/tmp/elsewhere /bin/sh -c ${shellQuote(command)}`, true],
+		]);
+	});
+
+	it("judges a { raw } interpolation verbatim and refuses objects it cannot spell", async () => {
+		verdict = "deny";
+		const file = marker();
+		const result = await runJs(
+			[
+				`try { await Bun.$\`echo hi \${{ raw: "; touch ${file}" }}\`; } catch (e) { console.log(e.message); }`,
+				`try { await Bun.$\`echo hi > \${Bun.file(${JSON.stringify(file)})}\`; } catch (e) { console.log(e.message); }`,
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([`echo hi ; touch ${file}`]);
+		expect(result.output).toContain("only strings, numbers, arrays of them, { raw } and Buffers can be judged");
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("refuses Workers reached through any worker_threads import", async () => {
+		const attempts = [
+			'new (await import("node:worker_threads")).Worker("0", { eval: true })',
+			'new (await import("worker_threads")).Worker("0", { eval: true })',
+			'new (await (0, eval)("import(\'worker_threads\')")).Worker("0", { eval: true })',
+		];
+		const code = attempts
+			.map(attempt => `try { ${attempt}; console.log("RAN"); } catch (e) { console.log(String(e.message)); }`)
+			.join("\n");
+		const result = await runJs(code);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/a new realm would start without the spawn gate/g)?.length).toBe(attempts.length);
+	});
+
+	it("refuses every bun:ffi export, raw-pointer access included, and a cell resolver cannot reorder that", async () => {
+		const attempts = [
+			'process.getBuiltinModule("bun:ffi").ptr(new Uint8Array(8))',
+			'process.getBuiltinModule("bun:ffi").toArrayBuffer(0, 0, 8)',
+			'new (process.getBuiltinModule("bun:ffi").JSCallback)(() => 1, { returns: "int", args: [] })',
+			"Bun.FFI.ptr(new Uint8Array(8))",
+			[
+				'Bun.plugin({ name: "cell", setup(b) { b.onResolve({ filter: /ffi/, namespace: "bun" }, a => ({ path: a.path, namespace: "bun" })); } });',
+				'await import("bun:ffi")',
+			].join(" "),
+		];
+		const code = attempts
+			.map(attempt => `try { ${attempt}; console.log("RAN"); } catch (e) { console.log(String(e.message)); }`)
+			.join("\n");
+		const result = await runJs(code);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(attempts.length - 1);
+		expect(result.output).toContain("is not a constructor");
+	});
+
+	it("judges a relative spawn cwd as the absolute directory it runs in", async () => {
+		verdict = "deny";
+		await runJs(
+			[
+				"const start = process.cwd();",
+				'process.chdir("/usr");',
+				'try { Bun.spawnSync(["true"], { cwd: "bin" }); } catch {} finally { process.chdir(start); }',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.cwd)).toEqual(["/usr/bin"]);
+	});
+
+	it("judges every changed variable and refuses exported bash functions", async () => {
+		verdict = "deny";
+		const result = await runJs(
+			[
+				'const env = { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor" };',
+				'try { Bun.spawnSync(["git", "status"], { env }); } catch {}',
+				'try { Bun.spawnSync(["true"], { env: { ...process.env, "BASH_FUNC_ls%%": "() { :; }" } }); } catch (e) { console.log(e.message); }',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([
+			"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor git status",
+		]);
+		expect(result.output).toContain("exported shell function BASH_FUNC_ls%%");
 	});
 
 	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {
