@@ -14,6 +14,7 @@ import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
+import type { EvalSpawnBashInput } from "../eval/spawn-gate";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import {
@@ -912,6 +913,27 @@ export class SessionTools {
 			enabled.has(candidate) ? this.#toolRegistry.get(candidate) : undefined,
 		);
 		return alias && this.#wrapToolForAcpPermission(alias);
+	}
+
+	/**
+	 * Judges an eval-kernel subprocess spawn through the bash tool's gate — extension `tool_call`
+	 * handlers, preflight, and approval policy — without running it.
+	 *
+	 * A spawn is refused when bash is not enabled here: a session that cannot run a command through
+	 * bash must not run it through an eval kernel either. The registry entry, not the ACP-decorated
+	 * view, is used because the ACP proxy only decorates `execute`.
+	 */
+	async authorizeEvalSpawn(
+		input: EvalSpawnBashInput,
+		toolCallId: string,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	): Promise<void> {
+		const bash = this.getEnabledToolNames().includes("bash") ? this.#toolRegistry.get("bash") : undefined;
+		if (!(bash instanceof ExtensionToolWrapper)) {
+			throw new ToolError("eval subprocess spawn refused: the bash tool is not enabled in this session");
+		}
+		await bash.authorize(toolCallId, input, signal, context);
 	}
 
 	/** Canonical and unambiguous wire names accepted by the eval bridge. */

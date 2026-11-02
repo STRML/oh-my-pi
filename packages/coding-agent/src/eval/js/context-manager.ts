@@ -21,6 +21,7 @@ import {
 	type SessionOwners,
 } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
+import { ensurePyToolBridge, type PyToolBridgeEntry, registerPyToolBridge } from "../py/tool-bridge";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
@@ -28,6 +29,7 @@ import type { ShadowPlan } from "../speculation/types";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
+import type { SpawnGateEndpoint } from "./spawn-gate";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -117,6 +119,8 @@ interface JsSession {
 	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
+	/** Where this kernel's spawn gate asks for verdicts; absent, every spawn is refused. */
+	spawnGate?: SpawnGateEndpoint;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -269,6 +273,7 @@ export async function invokeJsTool(
 	};
 	if (options.signal?.aborted) onAbort();
 	else options.signal?.addEventListener("abort", onAbort, { once: true });
+	const unregisterSpawnGate = registerSpawnJudge(session, pending);
 
 	try {
 		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
@@ -276,6 +281,7 @@ export async function invokeJsTool(
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	} finally {
+		unregisterSpawnGate();
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
 	}
@@ -564,6 +570,7 @@ async function runOnce(
 	} else {
 		options.runState.signal?.addEventListener("abort", onAbort, { once: true });
 	}
+	const unregisterSpawnGate = registerSpawnJudge(session, pending);
 
 	try {
 		if (options.packageRoot !== undefined) session.packageRoot = options.packageRoot;
@@ -575,6 +582,7 @@ async function runOnce(
 			preludes: javascriptPreludeSources(options.session),
 			packageRoot: session.packageRoot,
 			packageEnvironment: session.packageEnvironment,
+			spawnGate: session.spawnGate,
 		};
 		if (options.expectedRevision !== undefined && options.expectedDigest !== undefined) {
 			const id = `shadow-run-${Snowflake.next()}`;
@@ -605,6 +613,7 @@ async function runOnce(
 		}
 		return await promise;
 	} finally {
+		unregisterSpawnGate();
 		options.runState.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
 	}
@@ -656,6 +665,7 @@ async function acquireSession(
 			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			spawnGate: await resolveSpawnGate(),
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -711,6 +721,40 @@ async function acquireSession(
 	}
 }
 
+/**
+ * The loopback endpoint the kernel's spawn gate posts to. Spawn verdicts must be
+ * synchronous inside the kernel, which the IPC channel cannot give, so they use
+ * the HTTP tool bridge the Python kernel already uses. A failure leaves the
+ * kernel without an endpoint, and its gate then refuses every spawn.
+ */
+async function resolveSpawnGate(): Promise<SpawnGateEndpoint | undefined> {
+	try {
+		const bridge = await ensurePyToolBridge();
+		return { url: bridge.url, token: bridge.token, session: `js-bridge:${crypto.randomUUID()}` };
+	} catch (error) {
+		logger.warn("JS eval spawn gate has no host bridge; kernel spawns will be refused", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
+}
+
+/** Lets the bridge judge spawns made while `pending` runs, with that run's session, signal and status sink. */
+function registerSpawnJudge(session: JsSession, pending: PendingRun): () => void {
+	if (!session.spawnGate) return () => {};
+	const signal = pending.runState.signal;
+	const entry: PyToolBridgeEntry = {
+		toolSession: pending.toolSession,
+		...(signal ? { signal } : {}),
+		emitStatus: (event: JsStatusEvent) => {
+			trackDeferPhase(pending, event);
+			pending.runState.onDisplay?.({ type: "status", event });
+		},
+		abortRequested: () => pending.aborted,
+	};
+	return registerPyToolBridge(session.spawnGate.session, pending.runId, entry);
+}
+
 async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeoutMs: number): Promise<void> {
 	const worker = session.worker;
 	const { promise: readyPromise, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers<void>();
@@ -742,7 +786,7 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 	try {
 		// Attach listeners and send init before awaiting ready. The worker now
 		// emits ready only in response to init, so this ordering is race-free.
-		worker.send({ type: "init", snapshot });
+		worker.send({ type: "init", snapshot: { ...snapshot, spawnGate: session.spawnGate } });
 		await raceWithTimeout(readyPromise, timeoutMs, "Timed out initializing JS eval worker");
 	} catch (error) {
 		// Handshake failed (timeout, init-failed, or worker error): drop both listeners

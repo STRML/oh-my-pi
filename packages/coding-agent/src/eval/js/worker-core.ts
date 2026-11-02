@@ -1,6 +1,7 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
+import type { SpawnGateContext, SpawnGateEndpoint } from "./spawn-gate";
 import type {
 	RunErrorPayload,
 	SessionSnapshot,
@@ -124,12 +125,26 @@ export class WorkerCore {
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
 	#options: WorkerCoreOptions;
+	#spawnGate: SpawnGateEndpoint | undefined;
 
 	constructor(transport: Transport, options: WorkerCoreOptions) {
 		this.#transport = transport;
 		this.#options = options;
 		this.#unsubscribe = transport.onMessage(msg => this.#handle(msg));
 		this.#uninstallRejectionGuard = this.#installRejectionGuard();
+	}
+
+	/**
+	 * What the spawn gate of a dedicated eval realm judges a spawn under: the
+	 * host endpoint from the latest snapshot and the latest run still active.
+	 * Concurrent runs of one kernel share its owning session, so any live run is
+	 * judged by the same host policy; with none live (a timer firing after its
+	 * cell ended) the gate refuses.
+	 */
+	spawnGateContext(): SpawnGateContext {
+		let runId: string | undefined;
+		for (const id of this.#runs.keys()) runId = id;
+		return { endpoint: this.#spawnGate, runId };
 	}
 
 	/**
@@ -313,6 +328,7 @@ export class WorkerCore {
 	}
 
 	#ensureRuntime(snapshot: SessionSnapshot, currentRunId?: string): JsRuntime {
+		if (snapshot.spawnGate) this.#spawnGate = snapshot.spawnGate;
 		this.#syncProcessCwd(snapshot.cwd, currentRunId);
 		if (this.#runtime) {
 			this.#runtime.setCwd(snapshot.cwd);

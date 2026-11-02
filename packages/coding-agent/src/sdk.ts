@@ -2670,6 +2670,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getAdvertisedEvalToolNames: () => session?.getAdvertisedEvalToolNames() ?? [],
+			authorizeEvalSpawn: (input, toolCallId, signal, context) => {
+				if (!session) return Promise.reject(new Error("eval subprocess spawn refused: session is not ready"));
+				return session.authorizeEvalSpawn(input, toolCallId, signal, context);
+			},
+			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an

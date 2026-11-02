@@ -336,6 +336,8 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		for (const [key, value] of Object.entries(options.env ?? {})) {
 			if (typeof value === "string") spawnEnv[key] = value;
 		}
+		// The spawn gate refuses native extensions changed after the omp session began.
+		spawnEnv.PI_EVAL_GATE_EPOCH = String(performance.timeOrigin / 1000);
 		spawnEnv.PYTHONUNBUFFERED = "1";
 		spawnEnv.PYTHONIOENCODING = "utf-8";
 
