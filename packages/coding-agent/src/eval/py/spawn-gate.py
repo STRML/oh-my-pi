@@ -172,6 +172,19 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
         native_epoch = float(environ.get("PI_EVAL_GATE_EPOCH") or "")
     except ValueError:
         native_epoch = time.time()
+
+    # Each root as it was when the gate installed: (st_dev, st_ino, st_ctime),
+    # or None when it did not exist. A root created, replaced or changed since
+    # (a directory renamed into place carries its old contents' ctimes) is no
+    # longer trusted.
+    def root_identity(root):
+        try:
+            info = os.lstat(root.rstrip("/"))
+        except OSError:
+            return None
+        return (info.st_dev, info.st_ino, info.st_ctime)
+
+    root_identities = {root: root_identity(root) for root in extension_roots}
     refused_prefix = "eval subprocess spawn refused"
 
     class SpawnRefused(PermissionError):
@@ -590,10 +603,27 @@ def install(environ, run_id_getter, timeout=600.0, run_id_functions=()):
             return SpawnRefused(
                 f"{refused_prefix} (native extension): {path} is outside the interpreter's install and site directories"
             )
-        root_length = 0
+        # Every matching root must be the same directory it was at install, and
+        # the epoch check starts at the outermost one, the root itself included.
+        root_length = len(path)
         for root in extension_roots:
-            if path.startswith(root) and len(root) > root_length:
-                root_length = len(root)
+            if not path.startswith(root):
+                continue
+            recorded = root_identities[root]
+            if recorded is None:
+                return SpawnRefused(
+                    f"{refused_prefix} (native extension): {root} did not exist when the spawn gate installed"
+                )
+            try:
+                info = lstat(root.rstrip("/"))
+            except (OSError, ValueError):
+                return SpawnRefused(f"{refused_prefix} (native extension): cannot stat {root}")
+            if (info.st_dev, info.st_ino, info.st_ctime) != recorded:
+                return SpawnRefused(
+                    f"{refused_prefix} (native extension): {root} changed after the spawn gate installed; "
+                    "restart omp to load extensions from it"
+                )
+            root_length = min(root_length, len(root) - 1)
         prefix = ""
         for part in path.split("/")[1:]:
             prefix += "/" + part
