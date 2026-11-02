@@ -22,7 +22,8 @@ if "__omp_spawn_gate__" not in globals():
             rid = current() if callable(current) else None
             return rid if rid is not None else user_ns.get("__omp_run_id__")
 
-        return scope["install"](os.environ, run_id)
+        functions = (run_id, current) if callable(current) else (run_id,)
+        return scope["install"](os.environ, run_id, run_id_functions=functions)
     __omp_spawn_gate__ = __omp_install_spawn_gate(${JSON.stringify(spawnGateSource)})
     del __omp_install_spawn_gate
 `;
