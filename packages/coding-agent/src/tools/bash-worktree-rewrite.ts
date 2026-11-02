@@ -3,7 +3,8 @@ import { extractFlatShellCommandSegments, tokenizeShellSegments } from "./shell-
 const SHELL_EXPANSION = /[$`~*?[\]{}<>]/;
 const BARE_SAFE = /^[A-Za-z0-9_./:@%+=,-]+$/;
 
-function shellQuote(value: string): string {
+/** POSIX-quotes one shell word, leaving words with no special characters bare. */
+export function shellQuote(value: string): string {
 	return BARE_SAFE.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
