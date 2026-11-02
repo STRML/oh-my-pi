@@ -129,6 +129,24 @@ async function runPython(code: string, toolSession: ToolSession | null = session
 	});
 }
 
+/** Run the real prelude, then `code`, in a plain interpreter with a chosen native-code epoch. */
+async function runPreludeIn(interpreter: string, code: string, epoch: number): Promise<string> {
+	const script = path.join(tempDir.path(), `prelude-${markerSeq++}.py`);
+	const prelude = PYTHON_PRELUDE.replace(
+		"from __future__ import annotations",
+		"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
+	);
+	await Bun.write(script, `${prelude}\n${code}\n`);
+	const proc = Bun.spawn([interpreter, script], {
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, PI_EVAL_GATE_EPOCH: String(epoch) },
+	});
+	const output = await new Response(proc.stdout).text();
+	await proc.exited;
+	return output;
+}
+
 async function runJs(code: string) {
 	return await executeJs(code, { cwd: tempDir.path(), sessionId: "spawn-gate-js", session, sessionFile });
 }
@@ -649,17 +667,20 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				.stdout.toString()
 				.trim();
 			fs.symlinkSync(path.dirname(foreignExtension!), path.join(site, "linked"));
-			const loaded = path.join(site, "linked", path.basename(foreignExtension!));
-			const result = await executePython(
+			// The venv and the link are new; an epoch after them isolates the symlink check.
+			await Bun.sleep(1_100);
+			const loaded = path.join(fs.realpathSync(site), "linked", path.basename(foreignExtension!));
+			const output = await runPreludeIn(
+				venvPython,
 				[
 					"import importlib.machinery, importlib.util",
 					`loader = importlib.machinery.ExtensionFileLoader("_json", ${JSON.stringify(loaded)})`,
 					`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("_json", ${JSON.stringify(loaded)}, loader=loader)); print("RAN")`,
 					"except BaseException as e: print(type(e).__name__, e)",
 				].join("\n"),
-				{ cwd: tempDir.path(), sessionId: "spawn-gate-py-venv", toolSession: session, interpreter: venvPython },
+				Date.now() / 1000,
 			);
-			expect(result.output).toContain("is a symlink");
+			expect(output).toContain("is a symlink");
 		},
 	);
 
@@ -714,7 +735,61 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		});
 		const output = await new Response(proc.stdout).text();
 		await proc.exited;
-		expect(output).toContain(`${path.join(fs.realpathSync(site), "moved_pkg")} changed during this omp session`);
+		// Moving the directory in changed site-packages too; the walk refuses there.
+		expect(output).toContain("changed during this omp session");
+		expect(output).not.toContain("RAN");
+	});
+
+	it("refuses an old extension under a trusted root that a cell moved into place after the gate installed", async () => {
+		// The root itself is the renamed directory: nothing below it changed, so
+		// only a record of the roots taken at install time can tell.
+		const venv = path.join(tempDir.path(), "venv-root");
+		expect(Bun.spawnSync([python!, "-m", "venv", "--without-pip", venv]).exitCode).toBe(0);
+		const venvPython = path.join(venv, "bin", "python");
+		const site = Bun.spawnSync([venvPython, "-c", "import site; print(site.getsitepackages()[0])"], {
+			stdout: "pipe",
+		})
+			.stdout.toString()
+			.trim();
+		const suffix = Bun.spawnSync(
+			[venvPython, "-c", "import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])"],
+			{
+				stdout: "pipe",
+			},
+		)
+			.stdout.toString()
+			.trim();
+		fs.renameSync(site, `${site}.away`);
+		const staged = path.join(tempDir.path(), "staged-root");
+		fs.mkdirSync(staged);
+		fs.writeFileSync(path.join(staged, `root_mod${suffix}`), "not really a shared object");
+		await Bun.sleep(1_100);
+		const epoch = Date.now() / 1000;
+		const loaded = path.join(site, `root_mod${suffix}`);
+		const script = path.join(tempDir.path(), "moved-root.py");
+		const prelude = PYTHON_PRELUDE.replace(
+			"from __future__ import annotations",
+			"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
+		);
+		await Bun.write(
+			script,
+			[
+				prelude,
+				"import importlib.machinery, importlib.util, os",
+				`os.rename(${JSON.stringify(staged)}, ${JSON.stringify(site)})`,
+				`loader = importlib.machinery.ExtensionFileLoader("root_mod", ${JSON.stringify(loaded)})`,
+				`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("root_mod", ${JSON.stringify(loaded)}, loader=loader)); print("RAN")`,
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		const proc = Bun.spawn([venvPython, script], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, PI_EVAL_GATE_EPOCH: String(epoch) },
+		});
+		const output = await new Response(proc.stdout).text();
+		await proc.exited;
+		expect(output).toContain("did not exist when the spawn gate installed");
 	});
 
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
