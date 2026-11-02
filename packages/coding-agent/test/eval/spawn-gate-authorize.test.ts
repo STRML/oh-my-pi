@@ -101,4 +101,21 @@ describe("evalSpawnCommand", () => {
 		expect(evalSpawnCommand({ argv: ["touch", "a b", "it's", "$HOME"] })).toBe(`touch 'a b' 'it'\\''s' '$HOME'`);
 		expect(evalSpawnCommand({ argv: ["sh", "-c", "echo $0", "arg0"] })).toBe(`sh -c 'echo $0' arg0`);
 	});
+
+	it("collapses -c only for a system shell; any other program is judged with its whole argv", () => {
+		expect(evalSpawnCommand({ argv: ["/tmp/not-a-shell/sh", "-c", "rm -rf ~"] })).toBe(
+			"/tmp/not-a-shell/sh -c 'rm -rf ~'",
+		);
+	});
+
+	it("leads with changed variables, spelling a script as the sh -c it runs as", () => {
+		const env = { PATH: "/tmp/x:/usr/bin", LD_PRELOAD: "/tmp/e.so" };
+		expect(evalSpawnCommand({ argv: ["touch", "f"], env })).toBe("LD_PRELOAD=/tmp/e.so PATH=/tmp/x:/usr/bin touch f");
+		expect(evalSpawnCommand({ argv: ["/bin/sh", "-c", "a; b"], env })).toBe(
+			"LD_PRELOAD=/tmp/e.so PATH=/tmp/x:/usr/bin /bin/sh -c 'a; b'",
+		);
+		expect(evalSpawnCommand({ command: "a; b", env })).toBe(
+			"LD_PRELOAD=/tmp/e.so PATH=/tmp/x:/usr/bin /bin/sh -c 'a; b'",
+		);
+	});
 });

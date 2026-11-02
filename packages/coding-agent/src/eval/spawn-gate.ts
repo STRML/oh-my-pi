@@ -14,6 +14,7 @@
  * without executing anything here. The kernel spawns only after this resolves;
  * any error — blocked, denied, no bash tool, bridge failure — refuses it.
  */
+import * as fs from "node:fs";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ToolSession } from "../tools";
@@ -39,6 +40,11 @@ export interface EvalSpawnRequest {
 	/** Shell command line, when the API takes one (`os.system`, `Bun.$`). */
 	command?: string;
 	cwd: string;
+	/**
+	 * Execution-affecting variables (`PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, ...)
+	 * whose value for this spawn differs from the kernel's startup environment.
+	 */
+	env?: Record<string, string>;
 }
 
 export interface EvalSpawnBridgeOptions {
@@ -52,7 +58,11 @@ export interface EvalSpawnVerdict {
 	command: string;
 }
 
-const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash"]);
+/** Shells whose `-c <script>` argv is judged as the script itself. */
+const SYSTEM_SHELLS = new Set(
+	["/bin", "/usr/bin"].flatMap(dir => ["sh", "bash", "zsh", "dash"].map(name => `${dir}/${name}`)),
+);
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function refused(message: string): ToolError {
 	return new ToolError(`eval subprocess spawn refused: ${message}`);
@@ -63,25 +73,54 @@ function parseSpawnRequest(args: unknown): EvalSpawnRequest {
 	const { api, argv, command, cwd } = args;
 	if (typeof api !== "string" || api.length === 0) throw refused("spawn request names no API");
 	if (typeof cwd !== "string" || cwd.length === 0) throw refused(`${api}: spawn request has no cwd`);
-	if (typeof command === "string" && command.length > 0) return { api, command, cwd };
+	let env: Record<string, string> | undefined;
+	if (args.env !== undefined) {
+		if (!isRecord(args.env)) throw refused(`${api}: malformed spawn env`);
+		env = {};
+		for (const [name, value] of Object.entries(args.env)) {
+			if (!ENV_NAME.test(name) || typeof value !== "string") throw refused(`${api}: malformed spawn env`);
+			env[name] = value;
+		}
+	}
+	const withEnv = env && Object.keys(env).length > 0 ? { env } : {};
+	if (typeof command === "string" && command.length > 0) return { api, command, cwd, ...withEnv };
 	if (!Array.isArray(argv) || argv.length === 0 || !argv.every(arg => typeof arg === "string")) {
 		throw refused(`${api}: spawn request has no argv`);
 	}
-	return { api, argv, cwd };
+	return { api, argv, cwd, ...withEnv };
+}
+
+/** Whether `program` is one of the system shells, after PATH lookup and symlinks. */
+function isSystemShell(program: string): boolean {
+	const found = program.includes("/") ? program : Bun.which(program);
+	if (!found) return false;
+	try {
+		return SYSTEM_SHELLS.has(fs.realpathSync(found)) || SYSTEM_SHELLS.has(found);
+	} catch {
+		return false;
+	}
 }
 
 /**
- * The bash command a spawn amounts to. A `sh -c <script>` argv is the script
- * itself, which is how a bash tool call carries it; any other argv is joined
- * with POSIX quoting so the judged text runs the same program with the same
- * arguments.
+ * The bash command a spawn amounts to, written so that running it in bash does
+ * what the spawn does:
+ *
+ * - A `[shell, -c, script]` argv whose shell is a system shell is the script
+ *   itself, which is how a bash tool call carries it. Any other argv, including
+ *   a `-c` form run by some other program, is joined with POSIX quoting.
+ * - Changed execution-affecting variables lead as `VAR=value` assignments. A
+ *   prefix assignment only reaches the first command of a script, so a shell
+ *   command with an env change is spelled as the `/bin/sh -c` it runs as.
  */
-export function evalSpawnCommand(request: Pick<EvalSpawnRequest, "argv" | "command">): string {
-	if (request.command !== undefined) return request.command;
+export function evalSpawnCommand(request: Pick<EvalSpawnRequest, "argv" | "command" | "env">): string {
+	const env = Object.entries(request.env ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	const prefix = env.map(([name, value]) => `${name}=${shellQuote(value)} `).join("");
+	if (request.command !== undefined) {
+		return prefix ? `${prefix}/bin/sh -c ${shellQuote(request.command)}` : request.command;
+	}
 	const argv = request.argv ?? [];
-	const shell = argv[0]?.split("/").pop();
-	if (argv.length === 3 && shell !== undefined && SHELL_NAMES.has(shell) && argv[1] === "-c") return argv[2];
-	return argv.map(shellQuote).join(" ");
+	if (!prefix && argv.length === 3 && argv[1] === "-c" && isSystemShell(argv[0])) return argv[2];
+	return prefix + argv.map(shellQuote).join(" ");
 }
 
 /** Judge one kernel spawn. Resolves only when it may run. */

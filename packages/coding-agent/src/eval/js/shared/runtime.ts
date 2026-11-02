@@ -15,7 +15,6 @@ import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
-import { isRefusedImport, refuseImport } from "../spawn-gate";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -663,7 +662,6 @@ export class JsRuntime {
 				return surfaceBridgedToolImages(await hooks.callTool("__prelude__", payload), hooks);
 			},
 			__omp_import__: async (source: string, options?: ImportCallOptions) => {
-				if (isRefusedImport(source)) refuseImport(source);
 				const filename = this.#activeFilename();
 				const baseDir = filename ? path.dirname(filename) : this.#activeCwd();
 				const resolved = await this.#moduleLoader.resolveForRun(baseDir, source);
@@ -672,7 +670,6 @@ export class JsRuntime {
 				return options !== undefined ? await import(target, options) : await import(target);
 			},
 			__omp_import_from__: async (moduleUrl: string, source: string, options?: ImportCallOptions) => {
-				if (isRefusedImport(source)) refuseImport(source);
 				const resolved = await this.#moduleLoader.resolveForModule(moduleUrl, source, this.#activeCwd());
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
