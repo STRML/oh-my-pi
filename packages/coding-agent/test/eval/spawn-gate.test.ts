@@ -5,7 +5,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
+import { PYTHON_PRELUDE } from "@oh-my-pi/pi-coding-agent/eval/py/prelude";
+import {
+	disposePyToolBridge,
+	ensurePyToolBridge,
+	registerPyToolBridge,
+} from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalSpawnBashInput } from "@oh-my-pi/pi-coding-agent/eval/spawn-gate";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { shellQuote } from "@oh-my-pi/pi-coding-agent/tools/bash-worktree-rewrite";
@@ -26,6 +31,11 @@ import { $which, TempDir } from "@oh-my-pi/pi-utils";
 setDefaultTimeout(60_000);
 
 const python = $which("python3") ?? $which("python");
+// A login environment can export a bash function; the kernels start with it.
+// It must not be judged as a change, or refuse every spawn.
+const STARTUP_BASH_FUNC = "BASH_FUNC_omp_spawn_gate_test%%";
+const previousBashFunc = process.env[STARTUP_BASH_FUNC];
+process.env[STARTUP_BASH_FUNC] = "() {  :\n}";
 const posix = process.platform !== "win32";
 // Sandboxed hosts can lack pty devices; pty.spawn then fails before any spawn.
 const ptyAvailable =
@@ -89,6 +99,8 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+	if (previousBashFunc === undefined) delete process.env[STARTUP_BASH_FUNC];
+	else process.env[STARTUP_BASH_FUNC] = previousBashFunc;
 	await disposeAllKernelSessions();
 	await disposeAllVmContexts();
 	await disposePyToolBridge();
@@ -304,12 +316,14 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 			[
 				"import sys, _posixsubprocess",
 				"print(_posixsubprocess.fork_exec.__closure__, _posixsubprocess.fork_exec.__defaults__)",
-				'del sys.modules["_posixsubprocess"]',
-				"import _posixsubprocess",
+				'loaded = sys.modules.pop("_posixsubprocess")',
+				"try: import _posixsubprocess",
+				"except PermissionError as e: print(e)",
+				'finally: sys.modules["_posixsubprocess"] = loaded',
 			].join("\n"),
 		);
 		expect(result.output).toContain("None None");
-		expect(result.output).toContain("re-importing it would bypass the gate");
+		expect(result.output).toContain("a fresh copy would carry the unwrapped C fork_exec");
 	});
 
 	it("refuses a str subclass or argv list subclass, which could read one way to the gate and another to C", async () => {
@@ -331,15 +345,17 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				"    except PermissionError as e: print(e)",
 			].join("\n"),
 		);
-		expect(result.output).not.toContain("RAN");
-		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(3);
-		expect(judged).toEqual([]);
+		// The str subclasses are refused. The list subclass is copied once, through
+		// its own __iter__, and that copy is both judged and run: `touch` with no
+		// file argument, so the marker never appears.
+		expect(result.output.match(/eval subprocess spawn refused/g)?.length).toBe(2);
+		expect(judged.map(input => input.command)).toEqual(["/usr/bin/touch"]);
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
-	it("refuses an argv list another thread edits while the host is judging", async () => {
+	it("runs the argv it judged even when another thread edits the list while the host is judging", async () => {
 		const file = marker();
-		const result = await runPython(
+		await runPython(
 			[
 				"import os, threading, time",
 				`a = ["touch", "slow-" + ${JSON.stringify(file)}]`,
@@ -348,10 +364,10 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 				`    a[1] = ${JSON.stringify(file)}`,
 				"threading.Thread(target=flip).start()",
 				"try: os.waitpid(os.posix_spawn('/usr/bin/touch', a, dict(os.environ)), 0)",
-				"except PermissionError as e: print(e)",
+				"except OSError as e: print(e)",
 			].join("\n"),
 		);
-		expect(result.output).toContain("the arguments changed while the spawn was being judged");
+		expect(judged.map(input => input.command)).toEqual([`touch slow-${file}`]);
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
@@ -375,7 +391,7 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 		);
 		expect(result.output).not.toContain("RAN");
 		expect(result.output.match(/eval subprocess spawn refused \(native extension\)/g)?.length).toBe(2);
-		expect(result.output).toContain("eval subprocess spawn refused (_imp.create_builtin)");
+		expect(result.output).toContain("eval subprocess spawn refused (posix): a fresh copy would bypass the gate");
 		expect(judged).toEqual([]);
 	});
 
@@ -431,6 +447,162 @@ describe.skipIf(!python || !posix)("python kernel spawn gate", () => {
 			"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0='touch x #' git status",
 		]);
 		expect(result.output).toContain("exported shell function BASH_FUNC_ls%%");
+	});
+
+	it("treats any file a native load names as an extension, whatever its suffix", async () => {
+		const library = path.join(tempDir.path(), "native_payload.data");
+		fs.writeFileSync(library, "not really a shared object");
+		const result = await runPython(
+			[
+				"import importlib.machinery, importlib.util",
+				`loader = importlib.machinery.ExtensionFileLoader("native_payload", ${JSON.stringify(library)})`,
+				`try: importlib.util.module_from_spec(importlib.util.spec_from_file_location("native_payload", ${JSON.stringify(library)}, loader=loader))`,
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		expect(result.output).toContain("eval subprocess spawn refused (native extension)");
+	});
+
+	it("refuses a fresh copy of a blocked C module under a dotted name", async () => {
+		const result = await runPython(
+			[
+				"import importlib.machinery, _imp",
+				'spec = importlib.machinery.PathFinder.find_spec("_ctypes")',
+				'try: _imp.create_dynamic(importlib.machinery.ModuleSpec("pkg._ctypes", None, origin=spec.origin)); print("RAN")',
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output).toContain("eval subprocess spawn refused (pkg._ctypes)");
+	});
+
+	it("runs no cell code inside the gate: no spec getter, and __fspath__ sees no gate frame", async () => {
+		const file = marker();
+		const result = await runPython(
+			[
+				"import _imp, os, subprocess, sys",
+				"class Spec:",
+				"    @property",
+				"    def name(self):",
+				"        print('GETTER RAN')",
+				"        return 'math'",
+				"try: _imp.create_builtin(Spec())",
+				"except BaseException as e: print(type(e).__name__, e)",
+				"class P:",
+				"    def __fspath__(self):",
+				"        f, seen = sys._getframe(), []",
+				"        while f is not None:",
+				"            seen.append(f.f_code.co_filename)",
+				"            f = f.f_back",
+				"        print('GATE FRAME' if '<omp-spawn-gate>' in seen else 'no gate frame')",
+				`        return ${JSON.stringify(file)}`,
+				'subprocess.run(["touch", P()])',
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("GETTER RAN");
+		expect(result.output).toContain("the spec must be an importlib ModuleSpec");
+		expect(result.output).toContain("no gate frame");
+		expect(result.output).not.toContain("GATE FRAME");
+		expect(judged.map(input => input.command)).toEqual([`touch ${file}`]);
+	});
+
+	it("refuses a fork_exec env that lists a name twice", async () => {
+		const result = await runPython(
+			[
+				"import subprocess",
+				"try: subprocess._fork_exec([b'/usr/bin/true'], [b'/usr/bin/true'], True, (), None, [b'GIT_DIR=/a', b'GIT_DIR=/b'], *([None] * 16))",
+				"except BaseException as e: print(type(e).__name__, e)",
+			].join("\n"),
+		);
+		expect(result.output).toContain("env lists GIT_DIR twice");
+		expect(judged).toEqual([]);
+	});
+
+	it("refuses os.environ whose methods a cell replaced, which C would read instead of its data", async () => {
+		const result = await runPython(
+			[
+				"import os",
+				"names = list(os.environ._data)",
+				"real = [os.environ._data[n] for n in names]",
+				"faked = [b'/tmp/elsewhere' if n == b'HOME' else v for n, v in zip(names, real)]",
+				"os.environ.keys = lambda: [os.fsdecode(n) for n in names]",
+				"os.environ.values = lambda: [os.fsdecode(v) for v in faked]",
+				"try:",
+				"    r, w = os.pipe()",
+				"    os.waitpid(os.posix_spawn('/usr/bin/env', ['env'], os.environ, file_actions=[(os.POSIX_SPAWN_DUP2, w, 1)]), 0)",
+				"    os.close(w)",
+				"    print('child HOME', [l for l in os.read(r, 1 << 16).split(b'\\n') if l.startswith(b'HOME=')])",
+				"except BaseException as e: print(type(e).__name__, e)",
+				"finally:",
+				"    del os.environ.keys, os.environ.values",
+			].join("\n"),
+		);
+		// The child got the HOME the cell's values() handed C; the host must have been asked about that HOME.
+		const ranWithFakedHome = result.output.includes("child HOME [b'HOME=/tmp/elsewhere']");
+		const judgedFakedHome = judged.some(input => input.command.includes("HOME=/tmp/elsewhere"));
+		expect(ranWithFakedHome && !judgedFakedHome).toBe(false);
+	});
+
+	it("judges what ran even while another thread flips the argv as fast as it can", async () => {
+		const [a, b] = [marker(), marker()];
+		await runPython(
+			[
+				"import os, threading",
+				`A, B = ${JSON.stringify(a)}, ${JSON.stringify(b)}`,
+				'argv = ["touch", A]',
+				"stop = False",
+				"def flip():",
+				"    while not stop:",
+				"        argv[1] = B",
+				"        argv[1] = A",
+				"t = threading.Thread(target=flip)",
+				"t.start()",
+				"for _ in range(40):",
+				"    try: os.waitpid(os.posix_spawn('/usr/bin/touch', argv, dict(os.environ)), 0)",
+				"    except PermissionError: pass",
+				"stop = True",
+				"t.join()",
+			].join("\n"),
+		);
+		const commands = judged.map(input => input.command);
+		for (const file of [a, b]) {
+			if (await Bun.file(file).exists()) expect(commands).toContain(`touch ${file}`);
+		}
+	});
+
+	it("leaves an exported bash function the kernel started with out of every spawn", async () => {
+		// The managed Python kernel filters its environment, so the prelude runs
+		// in a plain interpreter started with one, against the real host bridge.
+		verdict = "deny";
+		const bridge = await ensurePyToolBridge();
+		const unregister = registerPyToolBridge("bash-func-session", "bash-func-run", { toolSession: session });
+		try {
+			const script = path.join(tempDir.path(), "bash-func.py");
+			const prelude = PYTHON_PRELUDE.replace(
+				"from __future__ import annotations",
+				"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None\n__omp_run_id__ = 'bash-func-run'",
+			);
+			await Bun.write(
+				script,
+				`${prelude}\nimport subprocess\ntry: subprocess.run(["true"])\nexcept PermissionError as e: print(e)\n`,
+			);
+			const proc = Bun.spawn([python!, script], {
+				stdout: "pipe",
+				stderr: "pipe",
+				env: {
+					...process.env,
+					PI_TOOL_BRIDGE_URL: bridge.url,
+					PI_TOOL_BRIDGE_TOKEN: bridge.token,
+					PI_TOOL_BRIDGE_SESSION: "bash-func-session",
+				},
+			});
+			const output = await new Response(proc.stdout).text();
+			await proc.exited;
+			expect(output).toContain("stub host denies this spawn");
+			expect(judged.map(input => input.command)).toEqual(["true"]);
+		} finally {
+			unregister();
+		}
 	});
 
 	it("a kernel without a host bridge refuses spawns without running them", async () => {
@@ -597,7 +769,7 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 			"Bun.FFI.ptr(new Uint8Array(8))",
 			[
 				'Bun.plugin({ name: "cell", setup(b) { b.onResolve({ filter: /ffi/, namespace: "bun" }, a => ({ path: a.path, namespace: "bun" })); } });',
-				'await import("bun:ffi")',
+				'(await import("bun:ffi")).dlopen("/usr/lib/libSystem.B.dylib", { getpid: { args: [], returns: "int" } })',
 			].join(" "),
 		];
 		const code = attempts
@@ -636,6 +808,76 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 		expect(result.output).toContain("exported shell function BASH_FUNC_ls%%");
 	});
 
+	it("judges an env added on a polluted Object.prototype as a change", async () => {
+		verdict = "deny";
+		await runJs(
+			[
+				'Object.prototype.GIT_CONFIG_COUNT = "1";',
+				'const env = { ...process.env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.fsmonitor" };',
+				'try { Bun.spawnSync(["git", "status"], { env }); } catch {} finally { delete Object.prototype.GIT_CONFIG_COUNT; }',
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([
+			"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor git status",
+		]);
+	});
+
+	it("builds the judged argv without prototype methods a cell replaced", async () => {
+		verdict = "deny";
+		const file = marker();
+		await runJs(
+			[
+				"const slice = Array.prototype.slice;",
+				'Array.prototype.slice = function () { return ["--version"]; };',
+				`try { process.execve("/usr/bin/touch", ["touch", ${JSON.stringify(file)}]); } catch {} finally { Array.prototype.slice = slice; }`,
+			].join("\n"),
+		);
+		expect(judged.map(input => input.command)).toEqual([`/usr/bin/touch ${file}`]);
+	});
+
+	it("runs Bun.$ in the cwd it was judged in, even if the kernel cwd moves before it runs", async () => {
+		const name = `moved-${markerSeq++}`;
+		await runJs(
+			[
+				`const p = Bun.$\`touch ${name}\`;`,
+				"const start = process.cwd();",
+				`process.chdir(${JSON.stringify(otherDir)});`,
+				"try { await p; } finally { process.chdir(start); }",
+			].join("\n"),
+		);
+		expect(judged).toHaveLength(1);
+		expect(await Bun.file(path.join(judged[0]!.cwd, name)).exists()).toBe(true);
+		expect(await Bun.file(path.join(otherDir, name)).exists()).toBe(false);
+	});
+
+	it("refuses bun:ffi and Workers reached through a cell resolver plugin's redirect", async () => {
+		const result = await runJs(
+			[
+				"Bun.plugin({ name: 'cell-redirect', setup(b) {",
+				"  b.onResolve({ filter: /.*/, namespace: 'cellffi' }, () => ({ path: 'ffi', namespace: 'bun' }));",
+				"  b.onResolve({ filter: /.*/, namespace: 'cellworker' }, () => ({ path: 'worker_threads', namespace: 'node' }));",
+				"} });",
+				'try { (await import("cellffi:x")).dlopen("/usr/lib/libSystem.B.dylib", { getpid: { args: [], returns: "int" } }); console.log("RAN"); } catch (e) { console.log(e.message); }',
+				'try { new (await import("cellworker:x")).Worker("0", { eval: true }); console.log("RAN"); } catch (e) { console.log(e.message); }',
+			].join("\n"),
+		);
+		expect(result.output).not.toContain("RAN");
+		expect(result.output).toContain("eval subprocess spawn refused (bun:ffi)");
+		expect(result.output).toContain("eval subprocess spawn refused (Worker)");
+	});
+
+	it("leaves an exported bash function the kernel started with out of every spawn", async () => {
+		verdict = "deny";
+		const result = await runJs(
+			[
+				`console.log(${JSON.stringify(STARTUP_BASH_FUNC)} in process.env);`,
+				'try { Bun.spawnSync(["true"]); } catch {}',
+			].join("\n"),
+		);
+		expect(result.output).toContain("true");
+		expect(judged.map(input => input.command)).toEqual(["true"]);
+	});
+
 	it('refuses process.binding("spawn_sync") with the gate error, not Bun\'s', async () => {
 		const result = await runJs('process.binding("spawn_sync");');
 		expect(result.output).toContain('eval subprocess spawn refused (process.binding("spawn_sync"))');
@@ -643,9 +885,9 @@ describe.skipIf(!posix)("javascript kernel spawn gate", () => {
 
 	it("refuses native code loading and new realms without asking the host", async () => {
 		const attempts = [
-			'await import("bun:" + "ffi")',
-			"await (0, eval)(\"import('bun:ffi')\")",
-			"await new Function(\"return import('bun:' + 'ffi')\")()",
+			'(await import("bun:" + "ffi")).dlopen("libc.dylib", {})',
+			'(await (0, eval)("import(\'bun:ffi\')")).dlopen("libc.dylib", {})',
+			"(await new Function(\"return import('bun:' + 'ffi')\")()).dlopen(\"libc.dylib\", {})",
 			'require("bun:ffi").dlopen("libc.dylib", {})',
 			'process.dlopen({ exports: {} }, "x.node")',
 			'new Worker("data:text/javascript,0")',

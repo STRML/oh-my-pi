@@ -113,9 +113,12 @@ describe("evalSpawnCommand", () => {
 		expect(evalSpawnCommand({ ...script, program: "/bin/sh" })).toBe("rm -rf ~");
 	});
 
-	it("spells removed variables as env -u ahead of the assignments", () => {
+	it("spells removed variables as env -u ahead of the assignments, quoting names a shell would read", () => {
 		expect(evalSpawnCommand({ argv: ["git", "status"], env: { GIT_DIR: "/x" }, unset: ["HOME"] })).toBe(
 			"env -u HOME GIT_DIR=/x git status",
+		);
+		expect(evalSpawnCommand({ argv: ["true"], unset: ["BASH_FUNC_x%%", "A B"] })).toBe(
+			"env -u 'A B' -u BASH_FUNC_x%% true",
 		);
 	});
 

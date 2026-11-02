@@ -98,7 +98,14 @@ function parseSpawnRequest(args: unknown): EvalSpawnRequest {
 		if (!Array.isArray(args.unset) || !args.unset.every(name => typeof name === "string")) {
 			throw refused(`${api}: malformed spawn env`);
 		}
-		const unset = args.unset.map(name => envName(api, name));
+		// Removals are spelled quoted (`env -u 'BASH_FUNC_x%%'`), so any name works
+		// except one env(1) could not take.
+		const unset = args.unset.map(name => {
+			if (name.length === 0 || name.includes("=") || name.includes("\0")) {
+				throw refused(`${api}: environment variable ${JSON.stringify(name)} cannot be judged`);
+			}
+			return name;
+		});
 		if (unset.length > 0) request.unset = unset;
 	}
 	if (typeof command === "string" && command.length > 0) return { ...request, command };
@@ -142,7 +149,7 @@ export function evalSpawnCommand(
 		.join("");
 	const removals = [...(request.unset ?? [])]
 		.sort()
-		.map(name => `-u ${name} `)
+		.map(name => `-u ${shellQuote(name)} `)
 		.join("");
 	const prefix = removals ? `env ${removals}${assignments}` : assignments;
 	if (request.command !== undefined) {

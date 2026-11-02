@@ -18,15 +18,21 @@
  * What cannot be judged as a command is refused: native code loading
  * (`process.dlopen`, so `require("*.node")`; `process._linkedBinding`; every
  * export of `bun:ffi` and `Bun.FFI`, raw-pointer reads and writes included),
- * spawn-capable `process.binding` modules, `Bun.openInEditor`, and new Workers,
- * whose fresh realm would start with an ungated `Bun`.
+ * spawn-capable `process.binding` modules, `Bun.openInEditor`, new Workers,
+ * whose fresh realm would start with an ungated `Bun`, and the test runner's
+ * mock API (`Bun.jest`, `bun:test`), which could restore what the gate replaced.
  *
  * Built-in modules are patched through their CommonJS objects. A `node:*` ESM
  * namespace copies those exports when it is first imported, so the kernel's
- * own graph must not import `node:worker_threads` as ESM before the gate
- * installs; the first cell import then sees the locked `Worker`. `bun:ffi` is
- * imported as ESM by the kernel's graph, so a resolver plugin refuses it for
- * every loader path instead.
+ * own graph never imports `node:worker_threads` as ESM; the first import a cell
+ * makes, by any specifier or resolver plugin, copies the locked `Worker`. The
+ * `bun:ffi` ESM namespace already exists (the kernel's graph imports it), so its
+ * exports are replaced in place, which every import of it then sees.
+ *
+ * Cell code can replace prototype methods and globals, so the gate calls none:
+ * every helper it uses (string, array, typed-array, WeakMap and JSON methods)
+ * is captured at load, copies are built with indexed loops and
+ * `defineProperty`, and environments are null-prototype objects.
  *
  * The verdict must arrive synchronously (`spawnSync`, `execSync`), but the
  * host channel is asynchronous, so a helper thread created at install posts
@@ -34,11 +40,9 @@
  * SharedArrayBuffer. Each gated binding is redefined read-only and
  * non-configurable, so cell code cannot put the original back.
  */
+import * as ffiNamespace from "bun:ffi";
 import * as path from "node:path";
 import type { Worker as ThreadWorker } from "node:worker_threads";
-// The CLI host imports this lazily after startup, and it imports `bun:ffi`,
-// which the gate's resolver refuses once installed; load it before that.
-import "@oh-my-pi/pi-utils/process-name";
 
 export interface SpawnGateEndpoint {
 	url: string;
@@ -97,12 +101,47 @@ parentPort.on("message", ({ state, data, url, token, body, timeoutMs }) => {
 });
 `;
 
+// Captured before any cell runs: cell code can replace these globals and
+// prototype methods, but not the references held here.
+const uncurry = Function.prototype.bind.bind(Function.prototype.call) as <A extends unknown[], R>(
+	fn: (...args: A) => R,
+) => (self: unknown, ...args: A) => R;
+const startsWith = uncurry(String.prototype.startsWith) as (self: string, prefix: string) => boolean;
+const includes = uncurry(String.prototype.includes) as (self: string, part: string) => boolean;
+const split = uncurry(String.prototype.split) as unknown as (self: string, separator: string) => string[];
+const sliceText = uncurry(String.prototype.slice) as (self: string, start: number, end?: number) => string;
+const sliceBytes = uncurry(Uint8Array.prototype.slice) as (self: Uint8Array, start: number, end: number) => Uint8Array;
+const decode = uncurry(TextDecoder.prototype.decode) as (self: TextDecoder, input: Uint8Array) => string;
+const weakGet = uncurry(WeakMap.prototype.get) as (self: WeakMap<object, unknown>, key: object) => unknown;
+const weakSet = uncurry(WeakMap.prototype.set) as (self: WeakMap<object, unknown>, key: object, value: unknown) => void;
+const stringify = JSON.stringify;
+const parseJson = JSON.parse;
+const isArray = Array.isArray;
+const isView = ArrayBuffer.isView;
+const entriesOf = Object.entries;
+const keysOf = Object.keys;
+const ownNames = Object.getOwnPropertyNames;
+const hasOwn = Object.hasOwn;
+const createObject = Object.create;
+const freeze = Object.freeze;
+const defineProperty = Object.defineProperty;
+const setPrototypeOf = Object.setPrototypeOf;
+const preventExtensions = Object.preventExtensions;
+const functionPrototype = Function.prototype;
+const decoder = new TextDecoder();
+const atomicsWait = Atomics.wait;
+const atomicsStore = Atomics.store;
+const atomicsLoad = Atomics.load;
+const cwdOf = process.cwd.bind(process);
+const resolvePath = path.resolve;
+const which = Bun.which;
+
 const REFUSED_PREFIX = "eval subprocess spawn refused";
 
 class SpawnRefusedError extends Error {
 	constructor(api: string, reason: string) {
 		// A host refusal already names itself; don't stack a second prefix on it.
-		super(reason.startsWith(REFUSED_PREFIX) ? reason : `${REFUSED_PREFIX} (${api}): ${reason}`);
+		super(startsWith(reason, REFUSED_PREFIX) ? reason : `${REFUSED_PREFIX} (${api}): ${reason}`);
 		this.name = "SpawnRefusedError";
 	}
 }
@@ -111,22 +150,6 @@ type BuiltinModule = Record<string, unknown>;
 const getBuiltinModule = (process as unknown as { getBuiltinModule(id: string): BuiltinModule }).getBuiltinModule.bind(
 	process,
 );
-
-// Captured before any cell runs: cell code can replace these globals, but not
-// the references held here.
-const stringify = JSON.stringify;
-const parseJson = JSON.parse;
-const isArray = Array.isArray;
-const isView = ArrayBuffer.isView;
-const entriesOf = Object.entries;
-const decoder = new TextDecoder();
-const atomicsWait = Atomics.wait;
-const atomicsStore = Atomics.store;
-const atomicsLoad = Atomics.load;
-const defineProperty = Object.defineProperty;
-const cwdOf = process.cwd.bind(process);
-const resolvePath = path.resolve;
-const which = Bun.which;
 // Read from the CommonJS object before the gate locks its `Worker`.
 const HelperWorker = getBuiltinModule("node:worker_threads").Worker as typeof ThreadWorker;
 
@@ -137,22 +160,48 @@ function asText(value: unknown): string {
 	return typeof value === "string" ? value : `${value}`;
 }
 
-/** Copy an argv into a fresh array of primitives; the copy is what both the judge and the spawn see. */
-function snapshotArgv(value: unknown): string[] {
-	if (!isArray(value)) return [asText(value)];
-	const out: string[] = [];
-	const length = value.length;
-	for (let i = 0; i < length; i++) out[i] = asText(value[i]);
+/** Set an index without consulting setters a cell may have put on Array.prototype. */
+function put<T>(target: T[], index: number, value: T): void {
+	defineProperty(target, index, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/** A copy of `source` built by index. */
+function copyArray<T>(source: readonly T[]): T[] {
+	const out: T[] = [];
+	for (let i = 0; i < source.length; i++) put(out, i, source[i] as T);
 	return out;
 }
 
-/** Copy an environment into fresh string values; the copy is what both the judge and the spawn see. */
-function snapshotEnv(value: object): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const [name, entry] of entriesOf(value)) {
-		if (entry !== undefined && entry !== null) out[name] = asText(entry);
+/** Copy an argv into a fresh frozen array of primitives: what is judged is what runs. */
+function snapshotArgv(value: unknown): readonly string[] {
+	const out: string[] = [];
+	if (!isArray(value)) put(out, 0, asText(value));
+	else for (let i = 0; i < value.length; i++) put(out, i, asText(value[i]));
+	return freeze(out);
+}
+
+type Env = Record<string, string>;
+
+/** Copy an environment into a null-prototype object of strings. */
+function snapshotEnv(value: object): Env {
+	const out = createObject(null) as Env;
+	const entries = entriesOf(value);
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i] as [string, unknown];
+		if (entry[1] !== undefined && entry[1] !== null) out[entry[0]] = asText(entry[1]);
 	}
 	return out;
+}
+
+/** A plain, frozen copy for the spawn APIs, which expect an ordinary object. */
+function plainEnv(env: Env): Env {
+	const out: Env = {};
+	const names = keysOf(env);
+	for (let i = 0; i < names.length; i++) {
+		const name = names[i] as string;
+		defineProperty(out, name, { value: env[name], writable: true, enumerable: true, configurable: true });
+	}
+	return freeze(out);
 }
 
 /** A cwd made absolute against the kernel's cwd, as the spawn will run it. */
@@ -167,7 +216,8 @@ function jsonArray(values: readonly string[]): string {
 }
 
 function lock(target: object, key: string, value: unknown): void {
-	defineProperty(target, key, { value, writable: false, configurable: false, enumerable: true });
+	// `enumerable` is left as it was: a non-configurable property cannot change it.
+	defineProperty(target, key, { value, writable: false, configurable: false });
 }
 
 function refuser(api: string, reason: string): () => never {
@@ -179,12 +229,12 @@ function refuser(api: string, reason: string): () => never {
 const NATIVE_CODE = "loading native code can call any libc function, so the eval kernel refuses it";
 
 interface JudgeRequest {
-	argv?: string[];
+	argv?: readonly string[];
 	command?: string;
 	/** Absolute. */
 	cwd: string;
-	/** The full environment the spawn runs with, as strings. */
-	env: Record<string, string>;
+	/** The full environment the spawn runs with (null-prototype). */
+	env: Env;
 	/** Absolute path of the file that runs, when resolved. */
 	program?: string;
 }
@@ -225,25 +275,31 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 			helper = undefined;
 			return stringify({ ok: false, error: "no verdict before the timeout" });
 		}
-		return decoder.decode(bytes.slice(0, atomicsLoad(flags, 1)));
+		return decode(decoder, sliceBytes(bytes, 0, atomicsLoad(flags, 1)));
 	};
 
 	/**
 	 * Every variable that differs from the startup environment travels with the
-	 * request; exported bash functions are refused outright.
+	 * request. An exported bash function is refused when it was added or
+	 * changed; one present at startup is left alone.
 	 */
-	const envChange = (api: string, env: Record<string, string>): string => {
+	const envChange = (api: string, env: Env): string => {
 		let changed = "";
-		for (const [name, value] of entriesOf(env)) {
-			if (name.startsWith("BASH_FUNC_")) {
+		const names = keysOf(env);
+		for (let i = 0; i < names.length; i++) {
+			const name = names[i] as string;
+			const value = env[name] as string;
+			if (hasOwn(startupEnv, name) && startupEnv[name] === value) continue;
+			if (startsWith(name, "BASH_FUNC_")) {
 				throw new SpawnRefusedError(api, `exported shell function ${name} would run inside any bash it starts`);
 			}
-			if (startupEnv[name] === value) continue;
 			changed += `${changed ? "," : ""}${stringify(name)}:${stringify(value)}`;
 		}
 		let removed = "";
-		for (const name of Object.keys(startupEnv)) {
-			if (!(name in env)) removed += `${removed ? "," : ""}${stringify(name)}`;
+		const startupNames = keysOf(startupEnv);
+		for (let i = 0; i < startupNames.length; i++) {
+			const name = startupNames[i] as string;
+			if (!hasOwn(env, name)) removed += `${removed ? "," : ""}${stringify(name)}`;
 		}
 		return `${changed ? `,"env":{${changed}}` : ""}${removed ? `,"unset":[${removed}]` : ""}`;
 	};
@@ -260,13 +316,20 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 		// Built from primitives: JSON.stringify of an object or array would consult a cell-defined `toJSON`.
 		const body = `{"session":${stringify(endpoint.session)},"run":${stringify(runId)},"name":"__spawn__","args":{"api":${stringify(api)},"cwd":${stringify(request.cwd)},${what}${program}${envChange(api, request.env)}}}`;
 		const response = ask(endpoint, body);
-		if (response.startsWith(ALLOWED_PREFIX)) return;
+		if (startsWith(response, ALLOWED_PREFIX)) return;
 		let reason = "denied";
 		try {
 			const parsed = parseJson(response) as { error?: unknown };
-			if (typeof parsed?.error === "string") reason = parsed.error;
+			if (
+				parsed !== null &&
+				typeof parsed === "object" &&
+				hasOwn(parsed, "error") &&
+				typeof parsed.error === "string"
+			) {
+				reason = parsed.error;
+			}
 		} catch {
-			reason = response.slice(0, 500) || "malformed host verdict";
+			reason = sliceText(response, 0, 500) || "malformed host verdict";
 		}
 		throw new SpawnRefusedError(api, reason);
 	};
@@ -285,28 +348,31 @@ export function installJsSpawnGate(context: () => SpawnGateContext): void {
 }
 
 /**
- * The file a bare `program` resolves to, and the argv to judge. argv[0] stays
- * as written when it names a path (resolved against the spawn's cwd), when PATH
- * has relative entries or the lookup fails (a changed PATH is judged as a
- * `PATH=` prefix instead), or when the startup PATH resolves it to the same
- * file. Otherwise it becomes the file that runs.
+ * The file a bare `program` resolves to, and the argv to judge (a frozen copy).
+ * argv[0] stays as written when it names a path (resolved against the spawn's
+ * cwd), when PATH has relative entries or the lookup fails (a changed PATH is
+ * judged as a `PATH=` prefix instead), or when the startup PATH resolves it to
+ * the same file. Otherwise it becomes the file that runs.
  */
 function resolveArgv(
-	argv: string[],
+	argv: readonly string[],
 	spawnPath: string,
 	startupPath: string,
 	cwd: string,
-): { argv: string[]; program?: string } {
+): { argv: readonly string[]; program?: string } {
 	const name = argv[0];
 	if (name === undefined) return { argv };
-	if (name.includes("/")) return { argv, program: resolvePath(cwd, name) };
-	if (spawnPath.split(":").some(entry => !entry.startsWith("/"))) return { argv };
+	if (includes(name, "/")) return { argv, program: resolvePath(cwd, name) };
+	const entries = split(spawnPath, ":");
+	for (let i = 0; i < entries.length; i++) {
+		if (!startsWith(entries[i] as string, "/")) return { argv };
+	}
 	const executed = which(name, { PATH: spawnPath, cwd });
 	if (executed === null) return { argv };
 	if (executed === which(name, { PATH: startupPath, cwd })) return { argv, program: executed };
-	const shown = argv.slice();
-	shown[0] = executed;
-	return { argv: shown, program: executed };
+	const shown = copyArray(argv);
+	put(shown, 0, executed);
+	return { argv: freeze(shown), program: executed };
 }
 
 /** `Bun.spawn(cmd, options?)` and `Bun.spawn({ cmd, ...options })`, sync or not. */
@@ -315,16 +381,26 @@ function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge, startupPath: str
 	const api = `Bun.${key}`;
 	const gated = function (this: unknown, first: unknown, second?: unknown): unknown {
 		// One read of each option, then only the copies are judged and spawned:
-		// the spawn always gets an absolute cwd and an env of plain strings.
+		// the spawn gets the same frozen argv the judge saw, an absolute cwd and
+		// an env of plain strings. A null prototype keeps polluted
+		// Object.prototype properties out of the options Bun reads.
 		const fromArgv = isArray(first);
 		const source = fromArgv ? second : first;
-		const options: Record<string, unknown> = source && typeof source === "object" ? { ...source } : {};
+		const options = createObject(null) as Record<string, unknown>;
+		if (source && typeof source === "object") {
+			const entries = entriesOf(source);
+			for (let i = 0; i < entries.length; i++) {
+				const entry = entries[i] as [string, unknown];
+				options[entry[0]] = entry[1];
+			}
+		}
 		const argv = snapshotArgv(fromArgv ? first : options.cmd);
 		const cwd = absoluteCwd(options.cwd);
 		const env = snapshotEnv(options.env && typeof options.env === "object" ? options.env : process.env);
 		options.cwd = cwd;
-		options.env = env;
-		judge(api, { ...resolveArgv(argv, env.PATH ?? "", startupPath, cwd), cwd, env });
+		options.env = plainEnv(env);
+		const resolved = resolveArgv(argv, env.PATH ?? "", startupPath, cwd);
+		judge(api, { argv: resolved.argv, program: resolved.program, cwd, env });
 		if (fromArgv) return original.call(Bun, argv, options);
 		options.cmd = argv;
 		return original.call(Bun, options);
@@ -335,7 +411,7 @@ function gateBunSpawn(key: "spawn" | "spawnSync", judge: Judge, startupPath: str
 interface ShellState {
 	command: string;
 	cwd: string;
-	env: Record<string, string>;
+	env: Env;
 }
 
 /**
@@ -343,8 +419,9 @@ interface ShellState {
  * interpolated string escaped the way the shell escapes it, a `{ raw }` value
  * verbatim, a Buffer (a redirect source) as `<buffer>`. Any other object is
  * refused: a file or Response redirect target would be judged as text that
- * does not say what it writes. Every builder that would hand back the ungated
- * shell returns the gated one instead.
+ * does not say what it writes. The promise is then bound to exactly the cwd and
+ * env that were judged. Every builder that would hand back the ungated shell
+ * returns the gated one instead.
  */
 function gateBunShell(judge: Judge): void {
 	const original = Bun.$;
@@ -352,7 +429,10 @@ function gateBunShell(judge: Judge): void {
 	const states = new WeakMap<object, ShellState>();
 	// `$.cwd()` / `$.env()` set defaults for later commands; the gate keeps its
 	// own copy so each command is judged with the values it will run with.
-	const defaults: { cwd?: string; env?: Record<string, string> } = {};
+	const defaults: { cwd?: string; env?: Env } = createObject(null);
+	const proto = original.ShellPromise.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+	const setCwd = uncurry(proto.cwd as (dir: string) => unknown);
+	const setEnv = uncurry(proto.env as (vars: Env) => unknown);
 
 	const word = (value: unknown): { judged: string; passed: Bun.ShellExpression } => {
 		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
@@ -360,9 +440,9 @@ function gateBunShell(judge: Judge): void {
 			return { judged: escape(text), passed: text };
 		}
 		if (isView(value)) return { judged: "<buffer>", passed: value as Bun.ShellExpression };
-		if (value !== null && typeof value === "object" && !isArray(value) && "raw" in value) {
+		if (value !== null && typeof value === "object" && !isArray(value) && hasOwn(value, "raw")) {
 			const raw = asText((value as { raw: unknown }).raw);
-			return { judged: raw, passed: { raw } };
+			return { judged: raw, passed: freeze({ raw }) };
 		}
 		throw new SpawnRefusedError("Bun.$", "only strings, numbers, arrays of them, { raw } and Buffers can be judged");
 	};
@@ -380,14 +460,14 @@ function gateBunShell(judge: Judge): void {
 				const list: Bun.ShellExpression[] = [];
 				for (let j = 0; j < value.length; j++) {
 					const item = word(value[j]);
-					list.push(item.passed);
+					put(list, j, item.passed);
 					command += (j === 0 ? "" : " ") + item.judged;
 				}
-				words.push(list);
+				put(words, words.length, freeze(list) as Bun.ShellExpression);
 				continue;
 			}
 			const item = word(value);
-			words.push(item.passed);
+			put(words, words.length, item.passed);
 			command += item.judged;
 		}
 		const shell: ShellState = {
@@ -396,37 +476,41 @@ function gateBunShell(judge: Judge): void {
 			env: defaults.env ?? snapshotEnv(process.env),
 		};
 		judge("Bun.$", shell);
-		const template = Object.assign([...parts], { raw: [...parts] }) as unknown as TemplateStringsArray;
-		const promise = original(template, ...words) as Bun.$.ShellPromise;
-		states.set(promise, shell);
+		const template = copyArray(parts);
+		defineProperty(template, "raw", { value: freeze(copyArray(parts)) });
+		const promise = original(freeze(template) as unknown as TemplateStringsArray, ...words) as Bun.$.ShellPromise;
+		// Run with exactly what was judged, whatever the shell's own defaults are.
+		setCwd(promise, shell.cwd);
+		setEnv(promise, plainEnv(shell.env));
+		weakSet(states, promise, shell);
 		return promise;
 	} as typeof Bun.$;
 
 	// `.cwd()` / `.env()` change what runs after the judgment above. They are
 	// replaced on the prototype (so `Object.getPrototypeOf(p).cwd.call(p)` meets
 	// them too) and judge again with the new value before it takes effect.
-	const proto = original.ShellPromise.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
-	const setCwd = proto.cwd;
-	const setEnv = proto.env;
 	const stateOf = (promise: unknown): ShellState => {
-		const shell = typeof promise === "object" && promise !== null ? states.get(promise) : undefined;
+		const shell =
+			typeof promise === "object" && promise !== null
+				? (weakGet(states, promise) as ShellState | undefined)
+				: undefined;
 		if (!shell) throw new SpawnRefusedError("Bun.$", "this shell command was not judged");
 		return shell;
 	};
 	lock(proto, "cwd", function (this: unknown, dir: unknown) {
 		const shell = stateOf(this);
 		const cwd = absoluteCwd(dir);
-		judge("Bun.$", { ...shell, cwd });
+		judge("Bun.$", { command: shell.command, cwd, env: shell.env });
 		shell.cwd = cwd;
-		setCwd.call(this, cwd);
+		setCwd(this, cwd);
 		return this;
 	});
 	lock(proto, "env", function (this: unknown, vars: unknown) {
 		const shell = stateOf(this);
 		const env = snapshotEnv(vars && typeof vars === "object" ? vars : process.env);
-		judge("Bun.$", { ...shell, env });
+		judge("Bun.$", { command: shell.command, cwd: shell.cwd, env });
 		shell.env = env;
-		setEnv.call(this, env);
+		setEnv(this, plainEnv(env));
 		return this;
 	});
 
@@ -442,7 +526,7 @@ function gateBunShell(judge: Judge): void {
 	};
 	const setDefaultEnv = function (vars?: unknown) {
 		defaults.env = vars && typeof vars === "object" ? snapshotEnv(vars) : undefined;
-		original.env(defaults.env);
+		original.env(defaults.env ? plainEnv(defaults.env) : undefined);
 		return gated;
 	};
 	defineProperty(gated, "escape", { value: escape });
@@ -454,25 +538,24 @@ function gateBunShell(judge: Judge): void {
 	defineProperty(gated, "ShellError", { value: original.ShellError });
 	defineProperty(gated, "ShellPromise", { value: original.ShellPromise });
 	defineProperty(gated, "Shell", { value: refuser("Bun.$.Shell", "a new shell instance would bypass the gate") });
-	Object.freeze(gated);
+	freeze(gated);
 	lock(Bun, "$", gated);
 }
 
 function gateProcess(judge: Judge): void {
 	const proc = process as unknown as Record<string, unknown>;
-	const execve = proc.execve as ((file: string, args?: string[], env?: unknown) => never) | undefined;
+	const execve = proc.execve as ((file: string, args?: readonly string[], env?: unknown) => never) | undefined;
 	if (typeof execve === "function") {
 		lock(proc, "execve", (file: unknown, args?: unknown, env?: unknown) => {
-			const file_ = resolvePath(cwdOf(), asText(file));
-			const argv = args === undefined ? [file_] : snapshotArgv(args);
+			const program = resolvePath(cwdOf(), asText(file));
+			const given = args === undefined ? snapshotArgv([program]) : snapshotArgv(args);
+			// argv[0] is what the process sees; judge the file that actually runs.
+			const argv: string[] = [];
+			put(argv, 0, program);
+			for (let i = 1; i < given.length; i++) put(argv, i, given[i] as string);
 			const vars = snapshotEnv(env && typeof env === "object" ? env : process.env);
-			judge("process.execve", {
-				argv: argv.length === 0 ? [file_] : [file_, ...argv.slice(1)],
-				cwd: cwdOf(),
-				env: vars,
-				program: file_,
-			});
-			return execve.call(process, file_, argv, vars);
+			judge("process.execve", { argv: freeze(argv), cwd: cwdOf(), env: vars, program });
+			return execve.call(process, program, given, plainEnv(vars));
 		});
 	}
 	const binding = proc.binding as ((name: string) => unknown) | undefined;
@@ -492,39 +575,58 @@ function gateProcess(judge: Judge): void {
 	lock(proc, "dlopen", refuser("process.dlopen", NATIVE_CODE));
 }
 
-/** Replace every function or class export with a refuser and freeze the nested `read` table. */
+/** Replace every function or class export with a refuser and empty every nested table. */
 function lockAllExports(target: BuiltinModule, refused: () => never): void {
-	for (const key of Object.getOwnPropertyNames(target)) {
+	const names = ownNames(target);
+	for (let i = 0; i < names.length; i++) {
+		const key = names[i] as string;
 		const value = target[key];
 		if (typeof value === "function") lock(target, key, refused);
-		else if (value !== null && typeof value === "object") lock(target, key, Object.freeze({}));
+		else if (value !== null && typeof value === "object") lock(target, key, freeze({}));
 	}
+}
+
+interface JestApi {
+	spyOn(target: object, key: string): { mockImplementation(fn: () => never): unknown };
 }
 
 function refuseNativeCode(): void {
 	const refused = refuser("bun:ffi", NATIVE_CODE);
-	// The ESM namespace of `bun:ffi` was fixed when the kernel's own module graph
-	// imported it, so it cannot be patched in place. A resolver plugin refuses the
-	// specifier for every loader path: static and dynamic imports, `require`,
-	// indirect eval and `new Function`. `Bun.plugin` itself is a non-writable,
-	// non-configurable property, so later registrations cannot be refused, but
-	// the first resolver to throw wins over any a cell adds, and `clearAll` is
-	// locked so ours cannot be removed.
-	Bun.plugin({
-		name: "omp-eval-spawn-gate",
-		setup(build) {
-			build.onResolve({ filter: /ffi/, namespace: "bun" }, () => {
-				throw new SpawnRefusedError('import "bun:ffi"', NATIVE_CODE);
-			});
-		},
-	});
-	lock(Bun.plugin, "clearAll", refuser("Bun.plugin.clearAll", "it would remove the spawn gate's resolver"));
-	// What `process.getBuiltinModule("bun:ffi")` and `Bun.FFI` hand out: every
-	// export, so no raw-pointer read/write (`ptr`, `read`, `toArrayBuffer`) or
-	// callback (`JSCallback`) survives either.
+	// The CommonJS object behind `process.getBuiltinModule("bun:ffi")`/`require`.
 	lockAllExports(getBuiltinModule("bun:ffi"), refused);
 	const bun = Bun as unknown as BuiltinModule;
 	const ffi: BuiltinModule = {};
-	for (const key of Object.getOwnPropertyNames(bun.FFI as object)) ffi[key] = refused;
-	lock(bun, "FFI", Object.freeze(ffi));
+	const ffiNames = ownNames(bun.FFI as object);
+	for (let i = 0; i < ffiNames.length; i++) ffi[ffiNames[i] as string] = refused;
+	lock(bun, "FFI", freeze(ffi));
+
+	// The ESM namespace was created by the kernel's own module graph before the
+	// gate ran, so it still holds the real functions, and a cell resolver plugin
+	// can redirect any specifier to it. Its bindings are replaced in place with
+	// the test runner's spyOn (the one API that can rebind a module namespace).
+	// Each mock is detached from the mock prototype and made non-extensible, so
+	// `mockRestore()` cannot be reached; `Bun.jest` and `bun:test` are then
+	// locked, so no `restoreAllMocks` can undo them.
+	const jest = (bun.jest as (path: string) => JestApi)("omp-eval-spawn-gate");
+	const namespace = ffiNamespace as unknown as BuiltinModule;
+	const names = ownNames(namespace);
+	for (let i = 0; i < names.length; i++) {
+		const key = names[i] as string;
+		const value = namespace[key];
+		if (typeof value === "function") {
+			const mock = jest.spyOn(namespace, key).mockImplementation(refused) as object;
+			setPrototypeOf(mock, functionPrototype);
+			preventExtensions(mock);
+		} else if (value !== null && typeof value === "object") {
+			// `read` holds raw memory readers.
+			const table = value as BuiltinModule;
+			const tableNames = ownNames(table);
+			for (let j = 0; j < tableNames.length; j++) {
+				if (typeof table[tableNames[j] as string] === "function") lock(table, tableNames[j] as string, refused);
+			}
+		}
+	}
+	const refusedMocks = refuser("Bun.jest", "the test runner's mock API could restore what the spawn gate replaced");
+	lock(bun, "jest", refusedMocks);
+	lockAllExports(getBuiltinModule("bun:test"), refusedMocks);
 }
