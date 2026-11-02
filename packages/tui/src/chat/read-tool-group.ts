@@ -14,11 +14,18 @@ import {
 	splitPathAndSel,
 	splitReadQuery,
 } from "../tools/read";
-import { FILE_NAME_COLOR, formatStyledPath, PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
+import {
+	FILE_NAME_COLOR,
+	formatStatusIcon,
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	shortenPath,
+} from "../render/render-utils";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
@@ -381,6 +388,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#usageBatchByToolCallId = new Map<string, string>();
 	#text: Text;
 	#expanded = false;
+	// Title mode the display was last built under; a live settings change rebuilds once.
+	#builtTitleMode = chatTranscriptDisplayPreferences.collapsedToolTitles;
 	#toolActivityVisible = true;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
@@ -412,6 +421,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
+		if (this.#builtTitleMode !== chatTranscriptDisplayPreferences.collapsedToolTitles) this.#updateDisplay();
 		return super.render(width);
 	}
 	isTranscriptBlockFinalized(): boolean {
@@ -911,6 +921,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#updateDisplay(): void {
 		this.#displayVersion++;
+		this.#builtTitleMode = chatTranscriptDisplayPreferences.collapsedToolTitles;
 		const entries = [...this.#entries.values()];
 		const displayTargets = this.#displayTargetsForEntries(entries);
 		const displayRows = this.#buildSummaryRows(displayTargets);
@@ -930,9 +941,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
-				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
-				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
-				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
+				const lines = [
+					this.#titleHead(this.#statusForTargets(row.targets), this.#formatRowPath(row, HEADER_PATH_PAINT)),
+				];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
 				this.#text.setText(lines.join("\n"));
@@ -946,8 +957,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		}
 
 		const header = `${theme.fg("toolTitle", theme.bold("Read"))}${theme.fg("dim", ` (${displayRows.length})`)}`;
-		const lines = [` ${theme.format.bullet} ${header}`];
-		const entriesWithoutPreview = entries.filter(entry => !this.#shouldRenderPreview(entry));
+		const lines = [
+			chatTranscriptDisplayPreferences.collapsedToolTitles
+				? this.#titleHead(
+						this.#statusForTargets(displayRows.flatMap(r => r.targets)),
+						theme.fg("dim", `(${displayRows.length})`),
+					)
+				: ` ${theme.format.bullet} ${header}`,
+		];
+		const entriesWithoutPreview = entries.filter(entry => !this.#shouldRenderTuiPreview(entry));
 		const summaryTargets = this.#displayTargetsForEntries(entriesWithoutPreview);
 		const rows = this.#buildSummaryRows(summaryTargets);
 		const usageRowsBySummaryRow = this.#usageRowsBySummaryRow(rows);
@@ -959,7 +977,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.addChild(this.#text);
 
 		for (const entry of entries) {
-			if (this.#shouldRenderPreview(entry)) {
+			if (this.#shouldRenderTuiPreview(entry)) {
 				this.#addContentPreview(entry);
 				this.#addPreviewUsage(entry);
 			}
@@ -1141,7 +1159,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const entries: ReadEntry[] = [];
 		const seen = new Set<string>();
 		for (const target of row.targets) {
-			if (seen.has(target.entry.toolCallId) || !this.#shouldRenderPreview(target.entry)) continue;
+			if (seen.has(target.entry.toolCallId) || !this.#shouldRenderTuiPreview(target.entry)) continue;
 			entries.push(target.entry);
 			seen.add(target.entry.toolCallId);
 		}
@@ -1280,6 +1298,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this.#showContentPreview && entry.contentText !== undefined;
 	}
 
+	/** Terminal transcript rows: title mode shows file bodies only once expanded. */
+	#shouldRenderTuiPreview(entry: ReadEntry): boolean {
+		if (!chatTranscriptDisplayPreferences.collapsedToolTitles) return this.#shouldRenderPreview(entry);
+		return this.#expanded && entry.contentText !== undefined;
+	}
+
 	#formatStatus(status: ReadEntry["status"]): string {
 		if (status === "success") {
 			return theme.fg("text", theme.status.enabled);
@@ -1291,5 +1315,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			return theme.fg("error", theme.status.error);
 		}
 		return theme.fg("dim", theme.status.pending);
+	}
+
+	/** Title mode matches the shared tool title row: status glyph, label, ` · ` target. */
+	#titleHead(status: ReadEntry["status"], target: string): string {
+		const label = theme.fg("toolTitle", theme.bold("Read"));
+		if (!chatTranscriptDisplayPreferences.collapsedToolTitles) {
+			return ` ${this.#formatStatus(status)} ${label} ${target}`.trimEnd();
+		}
+		return `${formatStatusIcon(status, theme)} ${label}${theme.fg("muted", " · ")}${target}`;
 	}
 }
