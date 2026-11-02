@@ -18,11 +18,16 @@
 #   scripts/sync-fork-main.sh --no-push   # same, leave the pushes to you
 #   scripts/sync-fork-main.sh --no-check  # skip bun check
 #   scripts/sync-fork-main.sh --resume    # continue after resolving a layer conflict by hand
-#   scripts/sync-fork-main.sh --no-install  # skip rebuilding and installing omp
+#   scripts/sync-fork-main.sh --no-install  # skip rebuilding and installing omp (here and Studio)
+#   scripts/sync-fork-main.sh --no-studio   # install here, leave the Studio alone
+#   scripts/sync-fork-main.sh --install-only  # build origin/main and install it here; no layering
 #
 # Every run that is not --check or --no-push ends by rebuilding the native addon and the omp
 # binary from the result and installing it over the omp on PATH, even when nothing was pushed.
-# A stale native addon or a too-old Bun has broken the installed omp before.
+# A stale native addon or a too-old Bun has broken the installed omp before. It then does the
+# same on the Studio through studio-sh (LAN as studio-local, else the personal tailnet as
+# studio), running origin/main's copy of this script there with --install-only. An unreachable
+# Studio prints "STUDIO NOT UPDATED" and the run exits 3 after everything else is done.
 #
 # A conflict between two PRs stops the build in the worktree it prints. Resolve the files,
 # `git add` them, commit as "layer #N: <title>", then rerun with --resume. Keep rerere on
@@ -36,7 +41,7 @@ AUTHOR="STRML"
 # Other people's open PRs we also layer onto fork main. Drop a number once it merges.
 EXTRA_PRS=(16726)
 
-CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0; NO_INSTALL=0
+CHECK_ONLY=0; RESUME=0; NO_PUSH=0; NO_CHECK=0; NO_INSTALL=0; NO_STUDIO=0; INSTALL_ONLY=0
 for arg in "$@"; do
 	case "$arg" in
 		--check) CHECK_ONLY=1;;
@@ -44,6 +49,8 @@ for arg in "$@"; do
 		--no-push) NO_PUSH=1;;
 		--no-check) NO_CHECK=1;;
 		--no-install) NO_INSTALL=1;;
+		--no-studio) NO_STUDIO=1;;
+		--install-only) INSTALL_ONLY=1;;
 		*) printf 'unknown option: %s\n' "$arg" >&2; exit 1;;
 	esac
 done
@@ -243,8 +250,48 @@ install_omp() {
 	say "installed $dest = $want"
 }
 
+# Runs --install-only on the Studio from origin/main's copy of this script (the Studio checkout
+# may hold an older one). Tailscale SSH always exits 0, so success is the "installed" line.
+install_studio() {
+	(( NO_INSTALL || NO_STUDIO )) && return 0
+	say "== rebuild and install omp on the Studio =="
+	local log url
+	url="$(git -C "$ROOT" remote get-url origin)"
+	log="$(mktemp)"
+	studio-sh <<-EOF 2>&1 | tee "$log" || true
+		set -euo pipefail
+		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
+		dir="\$HOME/git/forks/omp"
+		[[ -d "\$dir/.git" ]] || git clone -q "$url" "\$dir"
+		cd "\$dir"
+		git fetch -q origin main
+		mkdir -p .watch
+		git show origin/main:scripts/sync-fork-main.sh > .watch/sync-fork-main.sh
+		bash .watch/sync-fork-main.sh --install-only
+	EOF
+	if ! grep -q '^installed .* = omp/' "$log"; then
+		STUDIO_FAILED=1
+		say "STUDIO NOT UPDATED (see output above); rerun: scripts/sync-fork-main.sh --install-only on the Studio"
+	fi
+}
+
+# Last step of every installing run: the Studio, then the exit code that reports it.
+finish() {
+	STUDIO_FAILED=0
+	install_studio
+	(( STUDIO_FAILED )) && exit 3
+	exit 0
+}
+
 say "== fetch =="
 git -C "$ROOT" fetch -q origin main
+if (( INSTALL_ONLY )); then
+	[[ -d "$WT" ]] || git -C "$ROOT" worktree add -q --detach "$WT" origin/main
+	cd "$WT"
+	git checkout -q --detach origin/main
+	install_omp
+	exit 0
+fi
 git -C "$ROOT" fetch -q upstream main
 # A stale checkout runs a stale script: say so before it rebuilds main with old rules.
 if ! cmp -s "${BASH_SOURCE[0]}" <(git -C "$ROOT" show origin/main:scripts/sync-fork-main.sh); then
@@ -308,7 +355,7 @@ git log --oneline "$UPSTREAM..HEAD" | cat
 if [[ "$(git merge-base "$ORIGIN" "$UPSTREAM")" == "$UPSTREAM" && "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "$ORIGIN^{tree}")" && ! -s "$REBASED" ]]; then
 	say "fork main already matches this rebuild; nothing to push"
 	install_omp
-	exit 0
+	finish
 fi
 
 if (( ! NO_CHECK )); then
@@ -345,3 +392,4 @@ else
 fi
 
 install_omp
+finish
