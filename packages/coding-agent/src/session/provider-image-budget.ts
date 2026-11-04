@@ -222,6 +222,15 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
 }
 
 /**
+ * Images to drop for `excess` over the cap, rounded up to a multiple of `batch` (never past `total`). The set of
+ * dropped images is a pure function of the count, so the prompt prefix changes once per `batch` new images.
+ */
+export function batchedImageDrops(excess: number, total: number, batch: number | undefined): number {
+	if (!batch || batch <= 1) return excess;
+	return Math.min(total, Math.ceil(excess / batch) * batch);
+}
+
+/**
  * Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap.
  *
  * {@link countImages} counts exactly the roles {@link clampImages} can drop, so the
@@ -232,10 +241,10 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 	if (!model.input.includes("image")) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	const totalImages = countImages(context, metadataWire);
-	const remainingDrops = totalImages - providerImageBudget(model);
-	if (remainingDrops <= 0) return context;
+	const excess = totalImages - providerImageBudget(model);
+	if (excess <= 0) return context;
 	return clampImages(context, {
-		remainingDrops,
+		remainingDrops: batchedImageDrops(excess, totalImages, model.imageDropBatch),
 		inlineBytes: 0,
 		byteBudget: Number.POSITIVE_INFINITY,
 		model,

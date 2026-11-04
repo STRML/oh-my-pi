@@ -1660,6 +1660,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	imageCountBudget?: number;
 	/**
+	 * Images dropped at once when a request goes over its image budget, from user configuration.
+	 * Dropping one at a time rewrites early history on every new image, which defeats a server's
+	 * prefix cache; a batch rewrites it once per this many images. Unset drops one at a time.
+	 */
+	imageDropBatch?: number;
+	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and
 	 * discovery sources should set this sparsely when an upstream explicitly

@@ -239,6 +239,31 @@ async function anthropicRequestBody(model: Model<"anthropic-messages">, context:
 }
 
 describe("provider context image budgets", () => {
+	it("drops oldest images in batches when imageDropBatch is set, so history changes once per batch", () => {
+		const model = { ...UMANS_MODEL, imageCountBudget: 4, imageDropBatch: 3 };
+		const kept = (count: number) =>
+			imageData(
+				clampProviderContextImages(
+					{
+						systemPrompt: ["system"],
+						tools: [],
+						messages: Array.from({ length: count }, (_, index) => ({
+							role: "user",
+							content: [text(`text-${index}`), image(`image-${index}`)],
+							timestamp: index,
+						})),
+					},
+					model,
+				),
+			);
+		expect(kept(4)).toEqual(["image-0", "image-1", "image-2", "image-3"]);
+		// Five, six and seven images all drop the same three, so the prompt prefix stays put.
+		expect(kept(5)).toEqual(["image-3", "image-4"]);
+		expect(kept(6)).toEqual(["image-3", "image-4", "image-5"]);
+		expect(kept(7)).toEqual(["image-3", "image-4", "image-5", "image-6"]);
+		expect(kept(8)).toEqual(["image-6", "image-7"]);
+	});
+
 	it("drops oldest images above the active provider cap while preserving text", () => {
 		const context: Context = {
 			systemPrompt: ["system"],
