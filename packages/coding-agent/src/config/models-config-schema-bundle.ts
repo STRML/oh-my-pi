@@ -17,7 +17,10 @@ function validateMaxContextWindow(
 	return true;
 }
 
-function validateImageCountBudget(value: { imageCountBudget?: number; imageDropBatch?: number }, ctx: NarrowContext): boolean {
+function validateImageCountBudget(
+	value: { imageCountBudget?: number; imageDropBatch?: number },
+	ctx: NarrowContext,
+): boolean {
 	if (
 		value.imageCountBudget !== undefined &&
 		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
