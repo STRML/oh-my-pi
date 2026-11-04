@@ -4,6 +4,7 @@
  * Uses the embedded bash engine (pi-shell) through native bindings for shell
  * execution.
  */
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -699,6 +700,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			commandPrefix: prefix,
 		}),
 	]);
+	// A reviewed run executes exactly the text and environment the review saw.
+	// A configured shell prefix or a direnv load rewrites both after the gate
+	// judged them, and a relative file in the token resolves against a cwd the
+	// shell sets later, so none of them can carry a token.
+	if (options?.expect) {
+		if (prefix || preflight.command !== command || preflight.env !== options.env) {
+			throw new ToolError("a reviewed command cannot run under a shell prefix or a direnv environment");
+		}
+		if (options.expect.files.some(file => !path.isAbsolute(file.path))) {
+			throw new ToolError("Invalid shellState");
+		}
+	}
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
