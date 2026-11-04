@@ -1691,6 +1691,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	imageCountBudget?: number;
 	/**
+	 * Images dropped at once when a request goes over its image budget, from user configuration.
+	 * Dropping one at a time rewrites early history on every new image, which defeats a server's
+	 * prefix cache; a batch rewrites it once per this many images. Unset drops one at a time.
+	 */
+	imageDropBatch?: number;
+	/**
 	 * Snapcompact frame shape for this model, from user or extension
 	 * configuration. Replaces the model line's eval default (a gateway may
 	 * serve a model whose readers or network path favor another shape); an

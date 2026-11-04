@@ -43,12 +43,18 @@ function validateMaxContextWindow(
 	return true;
 }
 
-function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: NarrowContext): boolean {
+function validateImageCountBudget(value: { imageCountBudget?: number; imageDropBatch?: number }, ctx: NarrowContext): boolean {
 	if (
 		value.imageCountBudget !== undefined &&
 		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
 	) {
 		return ctx.mustBe("imageCountBudget a positive integer");
+	}
+	if (
+		value.imageDropBatch !== undefined &&
+		(!Number.isSafeInteger(value.imageDropBatch) || value.imageDropBatch <= 0)
+	) {
+		return ctx.mustBe("imageDropBatch a positive integer");
 	}
 	return true;
 }
@@ -261,6 +267,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"imageDropBatch?": "number",
 		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
@@ -322,6 +329,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"imageDropBatch?": "number",
 		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
