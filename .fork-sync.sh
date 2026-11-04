@@ -21,7 +21,10 @@ fork_check() {
 		bun install >/dev/null
 		git checkout -- bun.lock
 	fi
-	bun check
+	# TypeScript only: upstream's own crates can fail clippy on this toolchain (pi-shell's
+	# many_single_char_names, 2026-11-04) while compiling fine. No layer touches crates/, and
+	# fork_install's native build still stops on a real Rust error.
+	bun run check:ts
 }
 
 # Builds the native addon and the binary in the current checkout and swaps it onto PATH through a
