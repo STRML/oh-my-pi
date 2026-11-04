@@ -14,7 +14,13 @@ fork_rebase_fixup() {
 }
 
 fork_check() {
-	bun install --frozen-lockfile >/dev/null
+	# Upstream's bun.lock can trail its package catalog for a while (2026-11-04), and a frozen
+	# install refuses then. Fall back to a normal install and put the lockfile back, so the tree
+	# the sync pushes is exactly the layered one.
+	if ! bun install --frozen-lockfile >/dev/null 2>&1; then
+		bun install >/dev/null
+		git checkout -- bun.lock
+	fi
 	bun check
 }
 
