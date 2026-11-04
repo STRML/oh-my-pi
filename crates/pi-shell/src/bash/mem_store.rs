@@ -20,7 +20,8 @@ use hashbrown::{HashMap, hash_map::EntryRef};
 use serde::{Deserialize, Serialize};
 
 use crate::bash::store::{
-	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, Var, VarValue,
+	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, Table, Var,
+	VarValue,
 };
 
 /// One root scope: its [`Record::Scope`] and its locals by name.
@@ -121,6 +122,34 @@ impl MemStore {
 		blobs.sort_unstable_by_key(|(s, _)| *s);
 		postcard::to_stdvec(&Image { records, blobs, epoch: self.epoch })
 			.expect("MemStore serialization is infallible")
+	}
+
+	/// Fingerprint of persistent command semantics, excluding job bookkeeping.
+	pub fn state_digest(&self) -> [u8; 32] {
+		let mut records = Vec::with_capacity(self.len());
+		self.each(&mut |key, record| {
+			if matches!(key.table(), Table::Job | Table::Proc)
+				|| matches!(
+					key,
+					Key::Misc(
+						MiscKey::ChldOwed
+							| MiscKey::JobCurrent
+							| MiscKey::JobPrevious
+							| MiscKey::NextJob
+							| MiscKey::NextVpid
+							| MiscKey::Cwd
+					)
+				) {
+				return;
+			}
+			let mut record = record.clone();
+			if let Record::CmdHash { hits, .. } = &mut record {
+				*hits = 0;
+			}
+			records.push((key.to_buf(), record));
+		});
+		records.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+		*blake3::hash(&postcard::to_stdvec(&records).expect("store records serialize")).as_bytes()
 	}
 
 	/// Store from an image produced by [`MemStore::to_bytes`].

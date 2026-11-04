@@ -569,3 +569,5 @@ fn process_test_sleeper() {
 		.expect("valid process test sleep duration");
 	std::thread::sleep(Duration::from_millis(duration_ms));
 }
+
+mod inspection;

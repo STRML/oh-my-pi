@@ -4,6 +4,7 @@ pub mod vfs;
 
 use std::{
 	collections::HashMap,
+	path::PathBuf,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -18,9 +19,10 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::{
-	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
-	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
-	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
+	MinimizerResult as CoreMinimizerResult, PipeTaps, Resolution, RunExpect, Shell as CoreShell,
+	ShellExecuteOptions as CoreShellExecuteOptions, ShellInspectReport as CoreShellInspectReport,
+	ShellOptions as CoreShellOptions, ShellRunOptions as CoreShellRunOptions,
+	ShellRunResult as CoreShellRunResult,
 	bash::trace::viz::{self, model},
 	execute_shell as core_execute_shell, minimizer,
 };
@@ -246,6 +248,117 @@ pub struct ShellRunOptions<'env> {
 	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
 	/// Folds the run's engine events into a live model of the command.
 	pub trace:      Option<ClassInstance<'env, RunTrace>>,
+	/// Bind execution to the state and files reviewed by the caller.
+	pub expect:     Option<ShellRunExpect>,
+}
+
+/// A file whose bytes were reviewed by the caller.
+#[napi(object)]
+pub struct ShellExpectedFile {
+	pub path:   String,
+	pub sha256: String,
+}
+
+/// State and file hashes which must still match when execution starts.
+#[napi(object)]
+pub struct ShellRunExpect {
+	pub state: String,
+	pub files: Vec<ShellExpectedFile>,
+}
+
+fn digest_hex(value: &str) -> Result<[u8; 32]> {
+	let mut digest = [0; 32];
+	if value.len() != 64 {
+		return Err(Error::from_reason("hash must contain 64 hexadecimal characters"));
+	}
+	for (byte, pair) in digest.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+		let digit = |c: u8| match c {
+			b'0'..=b'9' => Some(c - b'0'),
+			b'a'..=b'f' => Some(c - b'a' + 10),
+			b'A'..=b'F' => Some(c - b'A' + 10),
+			_ => None,
+		};
+		*byte = digit(pair[0])
+			.zip(digit(pair[1]))
+			.map(|(a, b)| a * 16 + b)
+			.ok_or_else(|| Error::from_reason("hash must contain 64 hexadecimal characters"))?;
+	}
+	Ok(digest)
+}
+
+impl TryFrom<ShellRunExpect> for RunExpect {
+	type Error = Error;
+
+	fn try_from(value: ShellRunExpect) -> Result<Self> {
+		Ok(Self {
+			state: digest_hex(&value.state)?,
+			files: value
+				.files
+				.into_iter()
+				.map(|file| Ok((PathBuf::from(file.path), digest_hex(&file.sha256)?)))
+				.collect::<Result<_>>()?,
+		})
+	}
+}
+
+/// How a command word resolves in the live shell.
+#[napi(object)]
+pub struct ShellResolution {
+	pub name:   String,
+	#[napi(ts_type = "'alias' | 'keyword' | 'special' | 'function' | 'builtin' | 'hashed' | \
+	                  'file' | 'missing'")]
+	pub kind:   String,
+	pub text:   Option<String>,
+	pub path:   Option<String>,
+	pub usable: Option<bool>,
+}
+
+/// Non-executing inspection of an existing, idle persistent shell.
+#[napi(object)]
+pub struct ShellInspectReport {
+	pub fingerprint:      String,
+	pub resolution:       Vec<ShellResolution>,
+	pub hooks:            Vec<String>,
+	pub options_changed:  Vec<String>,
+	pub exports_changed:  Vec<String>,
+	pub snapshot_changed: bool,
+	pub home:             Option<String>,
+	pub path:             Option<String>,
+}
+
+impl From<CoreShellInspectReport> for ShellInspectReport {
+	fn from(value: CoreShellInspectReport) -> Self {
+		Self {
+			fingerprint:      value
+				.fingerprint
+				.iter()
+				.map(|byte| format!("{byte:02x}"))
+				.collect(),
+			resolution:       value
+				.resolution
+				.into_iter()
+				.map(|(name, resolution)| {
+					let (kind, text, path, usable) = match resolution {
+						Resolution::Alias(text) => ("alias", Some(text.to_string()), None, None),
+						Resolution::Keyword => ("keyword", None, None, None),
+						Resolution::Special => ("special", None, None, None),
+						Resolution::Function => ("function", None, None, None),
+						Resolution::Builtin { usable } => ("builtin", None, None, Some(usable)),
+						Resolution::Hashed(path) => ("hashed", None, Some(path.to_string()), None),
+						Resolution::File(path) => ("file", None, Some(path.to_string()), None),
+						Resolution::Missing => ("missing", None, None, None),
+					};
+					ShellResolution { name: name.to_string(), kind: kind.to_owned(), text, path, usable }
+				})
+				.collect(),
+			hooks:            value.hooks,
+			options_changed:  value.options_changed,
+			exports_changed:  value.exports_changed,
+			snapshot_changed: value.snapshot_changed,
+			home:             value.home,
+			path:             value.path,
+		}
+	}
 }
 
 /// Actual command state, source units and bounded history for one shell run,
@@ -447,6 +560,8 @@ impl From<CoreMinimizerResult> for MinimizerResult {
 /// Result of running a shell command.
 #[napi(object)]
 pub struct ShellRunResult {
+	/// Why a reviewed command was refused before submission.
+	pub refused:   Option<String>,
 	/// Exit code when the command completes normally.
 	pub exit_code: Option<i32>,
 	/// Whether the command was cancelled via abort.
@@ -466,6 +581,7 @@ pub struct ShellRunResult {
 impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
+			refused:     value.refused,
 			exit_code:   value.exit_code,
 			cancelled:   value.cancelled,
 			timed_out:   value.timed_out,
@@ -504,16 +620,18 @@ impl Shell {
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
 		on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	) -> Result<PromiseRaw<'env, ShellRunResult>> {
+		let expect = options.expect.map(TryInto::try_into).transpose()?;
 		let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 		let inner = Arc::clone(&self.inner);
 		let run_options = CoreShellRunOptions {
-			command:    options.command,
-			cwd:        options.cwd,
-			env:        options.env,
+			expect,
+			command: options.command,
+			cwd: options.cwd,
+			env: options.env,
 			timeout_ms: options.timeout_ms,
 			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
-			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
-			trace:      options.trace.map(|trace| Arc::clone(&trace.inner)),
+			pipe_taps: options.streams.map(|streams| Arc::clone(&streams.taps)),
+			trace: options.trace.map(|trace| Arc::clone(&trace.inner)),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -525,6 +643,16 @@ impl Shell {
 			await_drain(drain_handle, &result).await;
 			result
 		})
+	}
+
+	/// Inspect the live shell without building or waiting for a busy core.
+	#[napi]
+	pub async fn inspect(&self, names: Vec<String>) -> Option<ShellInspectReport> {
+		self
+			.inner
+			.inspect(names.into_iter().map(Into::into).collect())
+			.await
+			.map(Into::into)
 	}
 
 	/// Abort all running commands for this shell session.
@@ -889,6 +1017,7 @@ mod tests {
 			.expect("pump should be connected");
 		drop(tx);
 		let result = Ok(ShellRunResult {
+			refused:     None,
 			exit_code:   Some(0),
 			cancelled:   false,
 			timed_out:   false,
@@ -925,6 +1054,7 @@ mod tests {
 		));
 		drop(tx);
 		let result = Ok(ShellRunResult {
+			refused:     None,
 			exit_code:   None,
 			cancelled:   false,
 			timed_out:   true,
@@ -1033,6 +1163,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
+						expect:     None,
 						command:    "sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
 						cwd:        None,
 						env:        None,
@@ -1083,6 +1214,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
+						expect:     None,
 						command:    "sh -c 'sleep 30 & wait'".to_string(),
 						cwd:        None,
 						env:        None,
@@ -1121,6 +1253,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
+						expect:     None,
 						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 3 4 \
 						             5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; printf \
 						             'READY\\n' >&2; read -r; }"

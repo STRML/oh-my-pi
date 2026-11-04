@@ -12,6 +12,8 @@ import {
 	RunTrace,
 	Shell,
 	type ShellFilesystem,
+	type ShellInspectReport,
+	type ShellRunExpect,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
@@ -19,9 +21,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
+import { ovnfsCommand } from "../task/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -34,6 +38,7 @@ import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
 import {
+	cfgBashGitGuard,
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
 	cfgShellMinimizer,
@@ -42,6 +47,8 @@ import {
 } from "./settings";
 
 export interface BashExecutorOptions {
+	/** The shell state and file contents reviewed before this command. */
+	expect?: ShellRunExpect;
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
 	timeout?: number;
@@ -267,6 +274,15 @@ export async function applyDirenvPreflight(
 }
 
 const shellSessions = new Map<string, Shell>();
+interface ShellSessionLookup {
+	agentSessionKey: string;
+	snapshotPath: string | null;
+	minimize: boolean | undefined;
+}
+/** Captured run settings let inspection select existing shells without executing setup. */
+const shellSessionLookups = new Map<string, ShellSessionLookup>();
+/** Losing a Shell loses its pinned baseline, so its agent stays unreviewable until release. */
+const uninspectableAgentSessions = new Set<string>();
 const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
@@ -323,9 +339,9 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
  * Used to bound quarantine cleanup; the timer is unref'd so it never keeps the
  * process alive on its own.
  */
-function quarantineCleanupDeadline(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const timer = setTimeout(resolve, QUARANTINE_CLEANUP_TIMEOUT_MS);
+function quarantineCleanupDeadline(): Promise<"deadline"> {
+	const { promise, resolve } = Promise.withResolvers<"deadline">();
+	const timer = setTimeout(() => resolve("deadline"), QUARANTINE_CLEANUP_TIMEOUT_MS);
 	timer.unref?.();
 	return promise;
 }
@@ -341,11 +357,20 @@ function quarantineShellSession(
 		: Promise.allSettled([runPromise]);
 	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
 	// record for the life of the process (#10308).
-	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
+	const cleanup = Promise.race([
+		settled.then(results => (results.every(result => result.status === "fulfilled") ? "settled" : "failed")),
+		quarantineCleanupDeadline(),
+	]);
 	shellSessionQuarantines.set(sessionKey, cleanup);
 	void cleanup
-		.finally(() => {
+		.then(outcome => {
 			if (shellSessionQuarantines.get(sessionKey) === cleanup) {
+				if (outcome !== "settled") {
+					const lookup = shellSessionLookups.get(sessionKey);
+					if (lookup) uninspectableAgentSessions.add(lookup.agentSessionKey);
+					shellSessions.delete(sessionKey);
+				}
+				if (!shellSessions.has(sessionKey)) shellSessionLookups.delete(sessionKey);
 				shellSessionQuarantines.delete(sessionKey);
 				brokenShellSessions.delete(sessionKey);
 			}
@@ -363,6 +388,13 @@ function quarantineShellSession(
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
+	uninspectableAgentSessions.delete(agentSessionKey);
+	for (const [key, lookup] of shellSessionLookups) {
+		if (lookup.agentSessionKey !== agentSessionKey) continue;
+		shellSessionLookups.delete(key);
+		brokenShellSessions.delete(key);
+		shellSessionQuarantines.delete(key);
+	}
 	const prefix = `${agentSessionKey}\n`;
 	for (const [key, shell] of shellSessions) {
 		if (!key.startsWith(prefix)) continue;
@@ -606,6 +638,12 @@ async function executeUserShellPty(run: {
 }
 
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
+	if (options?.expect && (options.useUserShell || options.pty)) {
+		throw new ToolError("shellState requires a persistent foreground shell");
+	}
+	if (options?.expect && uninspectableAgentSessions.has(options.sessionKey ?? "")) {
+		throw new ToolError("the shell changed after this command was reviewed (shell state unavailable); run it again");
+	}
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
 	const shellConfig =
@@ -625,6 +663,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		$env.PI_NO_PTY !== "1" &&
 		!isPersistentShellCdCommand(command);
 	const minimizer = options?.minimize === false ? undefined : buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const sessionEnv = gitGuardEnv(shellEnv, options?.gitGuard === true, options?.ovnfs);
+	const reviewedKey = options?.expect
+		? findExistingShellSessionKey(shell, prefix, sessionEnv, options.sessionKey ?? "", minimizer, "requested")
+		: undefined;
+	if (options?.expect && reviewedKey === undefined) {
+		throw new ToolError("the shell changed after this command was reviewed (shell is missing); run it again");
+	}
+	const reviewedLookup = reviewedKey === undefined ? undefined : shellSessionLookups.get(reviewedKey);
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
@@ -639,7 +685,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// has no `.envrc` on the host. The rc snapshot is independent, so both load
 	// concurrently.
 	const [snapshotPath, preflight] = await Promise.all([
-		bashShell ? getOrCreateSnapshot(shell, shellEnv) : null,
+		options?.expect
+			? (reviewedLookup?.snapshotPath ?? null)
+			: bashShell
+				? getOrCreateSnapshot(shell, shellEnv)
+				: null,
 		applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
 			callerEnv: options?.env,
 			signal: options?.signal,
@@ -733,19 +783,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard
-		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
-		: shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
+	const sessionKey =
+		reviewedKey ?? buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
-	if (persistentSessionBroken) {
-		shellSessions.delete(sessionKey);
-	}
 
 	// A persistent Shell runs one command at a time (the native session is a
 	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
@@ -754,9 +799,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// same path quarantined sessions take.
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
+	if (options?.expect && (!shellSession || uninspectableAgentSessions.has(options.sessionKey ?? ""))) {
+		await sink.dispose();
+		const reason = uninspectableAgentSessions.has(options.sessionKey ?? "")
+			? "shell state unavailable"
+			: sessionBusy
+				? "shell is busy"
+				: persistentSessionBroken
+					? "shell is broken"
+					: "shell is missing";
+		throw new ToolError(`the shell changed after this command was reviewed (${reason}); run it again`);
+	}
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
+		shellSessionLookups.set(sessionKey, {
+			agentSessionKey: options?.sessionKey ?? "",
+			snapshotPath,
+			minimize: options?.minimize,
+		});
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
@@ -830,6 +891,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				filesystem: options?.filesystem,
 				streams: options?.streams,
 				trace: runTrace,
+				expect: options?.expect,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -851,7 +913,6 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			acceptingChunks = false;
 			const cleanupPromise = abortShell();
 			if (shellSession) {
-				resetSession = true;
 				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
@@ -880,12 +941,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			timeoutTimer = undefined;
 		}
 
+		if (winner.result.refused !== undefined) {
+			throw new ToolError(
+				`the shell changed after this command was reviewed (${winner.result.refused}); run it again`,
+			);
+		}
+
 		// Handle timeout
 		if (winner.result.timedOut) {
 			const annotation = options?.timeout
 				? `Command timed out after ${Math.round(options.timeout / 1000)} seconds`
 				: "Command timed out";
-			resetSession = true;
 			if (shellSession) {
 				quarantineShellSession(sessionKey, runPromise, abortCleanupPromise);
 			}
@@ -900,7 +966,6 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		// Handle cancellation
 		if (winner.result.cancelled) {
-			resetSession = true;
 			if (shellSession) {
 				quarantineShellSession(sessionKey, runPromise, abortCleanupPromise);
 			}
@@ -953,7 +1018,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			...(await dump()),
 		};
 	} catch (err) {
-		resetSession = true;
+		resetSession = !(err instanceof ToolError);
+		if (resetSession && ownsPersistentSession && shellSessions.get(sessionKey) === executionShell) {
+			uninspectableAgentSessions.add(options?.sessionKey ?? "");
+		}
 		throw err;
 	} finally {
 		settleTrace();
@@ -971,6 +1039,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// never asked for again, so the Shell would otherwise stay in the
 				// process-global map forever after completion.
 				shellSessions.delete(sessionKey);
+				if (!brokenShellSessions.has(sessionKey)) shellSessionLookups.delete(sessionKey);
 				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
 				// any `nohup`/`&` children (kill-on-drop). If the command left a live
 				// background job, retain the Shell so the process survives across
@@ -982,6 +1051,53 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 	}
+}
+
+/** The session env a persistent shell is keyed by; every lookup of a session must build it the same way. */
+function gitGuardEnv(env: Record<string, string>, gitGuard: boolean, ovnfs: string | undefined): Record<string, string> {
+	return gitGuard ? { ...env, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: ovnfs ?? "" } : env;
+}
+
+/** Inspect the persistent shell selected for the session's next foreground call. */
+export async function inspectShellSession(
+	agentSessionKey: string,
+	names: string[],
+): Promise<ShellInspectReport | undefined> {
+	if (shellSessions.size === 0 || uninspectableAgentSessions.has(agentSessionKey)) return undefined;
+	const settings = await Settings.init();
+	const { shell, env, prefix } = settings.getShellConfig();
+	const sessionEnv = gitGuardEnv(env, cfgBashGitGuard.get(settings), ovnfsCommand(settings));
+	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const key = findExistingShellSessionKey(shell, prefix, sessionEnv, agentSessionKey, minimizer, "stored");
+	if (key === undefined) return undefined;
+	if (brokenShellSessions.has(key) || shellSessionsInUse.has(key)) return undefined;
+	return (await shellSessions.get(key)?.inspect(names)) ?? undefined;
+}
+
+function findExistingShellSessionKey(
+	shell: string,
+	prefix: string | undefined,
+	sessionEnv: Record<string, string>,
+	agentSessionKey: string,
+	minimizer: MinimizerOptions | undefined,
+	shaping: "requested" | "stored",
+): string | undefined {
+	let key: string | undefined;
+	for (const [candidate, lookup] of shellSessionLookups) {
+		if (lookup.agentSessionKey !== agentSessionKey || !shellSessions.has(candidate)) continue;
+		const expected = buildSessionKey(
+			shell,
+			prefix,
+			lookup.snapshotPath,
+			sessionEnv,
+			agentSessionKey,
+			shaping === "stored" && lookup.minimize === false ? undefined : minimizer,
+		);
+		if (expected !== candidate) continue;
+		if (key !== undefined) return undefined;
+		key = candidate;
+	}
+	return key;
 }
 
 function buildSessionKey(
