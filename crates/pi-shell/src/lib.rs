@@ -68,8 +68,10 @@ pub use paths::{expand_to_long_path, get_short_path};
 pub use pi_builtins::{
 	panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available,
 };
+pub use session::{InspectReport, Resolution, RunExpect};
 pub use shell::{
-	MinimizerResult, Shell, ShellExecuteOptions, ShellExecuteResult, ShellOptions, ShellRunOptions,
-	ShellRunResult, StreamSinks, execute_shell, execute_shell_streams,
+	MinimizerResult, Shell, ShellExecuteOptions, ShellExecuteResult, ShellInspectReport,
+	ShellOptions, ShellRunOptions, ShellRunResult, StreamSinks, execute_shell,
+	execute_shell_streams,
 };
 pub use taps::{PipeStreamInfo, PipeStreamRead, PipeTaps};

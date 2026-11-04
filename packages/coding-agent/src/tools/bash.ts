@@ -16,7 +16,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { PipeStreams } from "@oh-my-pi/pi-natives";
+import { PipeStreams, type ShellRunExpect } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
@@ -481,6 +481,25 @@ export interface BashToolInput {
 	ready?: ServiceReady;
 	async?: boolean;
 	pty?: boolean;
+	/** Internal review token, deliberately absent from every model-facing schema. */
+	shellState?: unknown;
+}
+
+function reviewedShellState(value: unknown): ShellRunExpect | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "object" || value === null || !("state" in value) || !("files" in value)) {
+		throw new ToolError("Invalid shellState");
+	}
+	const hash = (text: unknown): text is string => typeof text === "string" && /^[0-9a-f]{64}$/i.test(text);
+	if (!hash(value.state) || !Array.isArray(value.files)) throw new ToolError("Invalid shellState");
+	const files: ShellRunExpect["files"] = [];
+	for (const file of value.files) {
+		if (typeof file !== "object" || file === null || typeof file.path !== "string" || !hash(file.sha256)) {
+			throw new ToolError("Invalid shellState");
+		}
+		files.push({ path: file.path, sha256: file.sha256 });
+	}
+	return { state: value.state, files };
 }
 
 /**
@@ -1264,12 +1283,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			ready: rawReady,
 			async: rawAsync,
 			pty,
+			shellState: rawShellState,
 		}: BashToolInput,
 		ran: { cwd?: string; cdSeparator?: ";" },
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
+		const shellState = reviewedShellState(rawShellState);
+		if (shellState && (pty === true || rawAsync === true || blankToUndefined(rawName) !== undefined)) {
+			throw new ToolError("shellState requires a persistent foreground shell");
+		}
 		let command = rawCommand;
 		// The session this call belongs to, captured before any await: a session
 		// change while the call waits must not move it into the new session's
@@ -1482,13 +1506,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// auto-background would otherwise silently disable the terminal route).
 		const clientBridge = this.session.getClientBridge?.();
 		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined,
+			!shellState &&
+			clientBridge?.capabilities.terminal &&
+			clientBridge.createTerminal &&
+			!pty &&
+			virtualCwd === undefined,
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every bash call until a slot frees up.
 		if (
+			!shellState &&
 			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
 			!pty &&
 			!bridgeTerminalAvailable &&
@@ -1585,7 +1614,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI) or the cwd is a URL
 		// (only the embedded shell's filesystem can enter it).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined) {
+		if (bridgeTerminalAvailable && clientBridge?.createTerminal) {
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
 			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
@@ -1904,6 +1933,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
 				await executeBash(command, {
+					expect: shellState,
 					cwd: commandCwd,
 					env: sessionEnv,
 					sessionKey: sessionId,

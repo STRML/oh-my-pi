@@ -67,7 +67,7 @@ use crate::bash::{
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
-	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
+	ids::{CallId, CmdTag, IntrinsicId, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
@@ -1519,6 +1519,55 @@ pub fn startup_values(
 }
 
 impl Shell {
+	/// Whether a word is a bash reserved word.
+	pub(crate) fn inspection_keyword(name: &[u8]) -> bool {
+		builtins::names::KEYWORDS.contains(&name)
+	}
+
+	/// Whether an intrinsic has POSIX special-builtin precedence.
+	pub(crate) const fn inspection_special(id: IntrinsicId) -> bool {
+		command::is_special(id)
+	}
+
+	/// Use the same enable/profile/module checks as command lookup.
+	pub(crate) fn inspection_usable(
+		&mut self,
+		store: &mut dyn StateStore,
+		name: &[u8],
+		resolved: Option<IntrinsicId>,
+	) -> bool {
+		builtins::misc::usable(&mut self.k, store, &self.procs[0], name, resolved)
+			.is_ok_and(|id| id.is_some())
+	}
+
+	/// Open persistent root descriptors, in descriptor order. Standard streams
+	/// are replaced for each submission and do not belong to the review token.
+	pub(crate) fn inspection_fds(&self) -> impl Iterator<Item = i32> + '_ {
+		self.procs.first().into_iter().flat_map(|root| {
+			root
+				.fds
+				.iter()
+				.filter_map(|(fd, handle)| (fd >= 3 && handle.is_open()).then_some(fd))
+		})
+	}
+
+	/// Between root runs, includes disowned work and stopped jobs, which can
+	/// resume changing files even without a root job-table entry.
+	pub(crate) fn has_live_background_jobs(&self) -> bool {
+		self
+			.procs
+			.iter()
+			.skip(1)
+			.chain(&self.k.spawned)
+			.any(|p| p.has_work() || !p.out.is_empty())
+			|| self.procs.first().is_some_and(|root| {
+				root
+					.jobs
+					.iter()
+					.any(|job| !matches!(job.state, crate::bash::store::JobState::Done(_)))
+			})
+	}
+
 	/// New shell: writes the initial root state (environment, `$0`,
 	/// positional parameters, options, cwd, `$$`, bash's startup variables,
 	/// imported functions) into `cx.store`.

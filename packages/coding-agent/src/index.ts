@@ -25,6 +25,7 @@ export * from "./extensibility/extensions";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";
+export * from "./exec/bash-executor";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
 export type * from "./lsp";

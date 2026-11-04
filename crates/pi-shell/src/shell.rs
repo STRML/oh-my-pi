@@ -5,7 +5,7 @@
 #[cfg(windows)]
 use std::collections::HashSet;
 use std::{
-	collections::HashMap,
+	collections::{BTreeMap, HashMap},
 	fs,
 	io::{self},
 	path::Path,
@@ -21,6 +21,7 @@ use bstr::{BString, ByteSlice};
 use bytes::Bytes;
 use flume::Sender;
 use pi_vfs::Fs;
+use sha2::{Digest as _, Sha256};
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
@@ -28,13 +29,17 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::git::GIT_REPO_LOCATION_ENV_VARS;
 use crate::{
-	bash::trace::{RunTrace, SegmentSource},
+	bash::{
+		store::OptId,
+		trace::{RunTrace, SegmentSource},
+	},
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::is_git_repo_location_var,
 	minimizer,
 	output_decode::CaptureDecoder,
 	session::{
-		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
+		Children, Image, LatestImage, Resolution, RunExpect, RunOptions, RunOutcome, RunStdio,
+		Session, SessionConfig,
 		SessionError,
 	},
 	taps::PipeTaps,
@@ -105,11 +110,11 @@ fn working_dir_matches(current: &[u8], requested: &str) -> bool {
 /// there already. Like `cd`, the target must be a directory the run's
 /// filesystem knows; a short-spelled Windows path is stored long-form, a URL
 /// path verbatim.
-async fn requested_cwd(core: &ShellSessionCore, cwd: Option<&str>) -> Result<Option<BString>> {
+async fn requested_cwd(slot: &VfsFs, current: &[u8], cwd: Option<&str>) -> Result<Option<BString>> {
 	let Some(cwd) = cwd else {
 		return Ok(None);
 	};
-	if working_dir_matches(&core.cwd, cwd) {
+	if working_dir_matches(current, cwd) {
 		return Ok(None);
 	}
 	let path = Path::new(cwd);
@@ -127,7 +132,7 @@ async fn requested_cwd(core: &ShellSessionCore, cwd: Option<&str>) -> Result<Opt
 	} else {
 		return Err(Error::msg(format!("Failed to set cwd: {cwd} is not an absolute path")));
 	};
-	match core.slot.filesystem().metadata(&target).await {
+	match slot.filesystem().metadata(&target).await {
 		Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(path_bytes(&target))),
 		Ok(_) => Err(Error::msg(format!("Failed to set cwd: {cwd}: Not a directory"))),
 		Err(err) => Err(Error::msg(format!("Failed to set cwd: {cwd}: {err}"))),
@@ -155,6 +160,7 @@ pub struct ShellOptions {
 }
 
 struct ShellRunConfig {
+	expect:     Option<RunExpect>,
 	command:    String,
 	cwd:        Option<String>,
 	env:        Option<HashMap<String, String>>,
@@ -169,6 +175,7 @@ struct ShellRunConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellRunOptions {
+	pub expect:     Option<RunExpect>,
 	pub command:    String,
 	pub cwd:        Option<String>,
 	pub env:        Option<HashMap<String, String>>,
@@ -193,6 +200,7 @@ pub struct MinimizerResult {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
+	pub refused:     Option<String>,
 	pub exit_code:   Option<i32>,
 	pub cancelled:   bool,
 	pub timed_out:   bool,
@@ -233,11 +241,36 @@ impl SessionHandles {
 	}
 }
 
+/// Live shell state for a reviewer. Inspection never creates a session.
+#[derive(Debug, Clone)]
+pub struct ShellInspectReport {
+	pub fingerprint:      [u8; 32],
+	pub resolution:       Vec<(BString, Resolution)>,
+	pub hooks:            Vec<String>,
+	pub options_changed:  Vec<String>,
+	pub exports_changed:  Vec<String>,
+	pub snapshot_changed: bool,
+	pub home:             Option<String>,
+	pub path:             Option<String>,
+}
+
+#[derive(Default)]
+struct ReviewBaseline {
+	snapshot_pinned:  bool,
+	snapshot_sha:     Option<[u8; 32]>,
+	snapshot_changed: bool,
+	exports:          Option<BTreeMap<BString, [u8; 32]>>,
+	options:          Option<BTreeMap<OptId, bool>>,
+}
+
+type SharedReviewBaseline = Arc<parking_lot::Mutex<ReviewBaseline>>;
+
 pub struct Shell {
-	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state: ShellAbortState,
-	config:      ShellConfig,
-	active:      ActiveSession,
+	review_baseline: SharedReviewBaseline,
+	session:         Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:     ShellAbortState,
+	config:          ShellConfig,
+	active:          ActiveSession,
 }
 
 impl Shell {
@@ -271,6 +304,7 @@ impl Shell {
 	fn with_config(config: ShellConfig) -> Self {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
+			review_baseline: SharedReviewBaseline::default(),
 			abort_state: ShellAbortState::default(),
 			config,
 			active: ActiveSession::default(),
@@ -300,6 +334,7 @@ impl Shell {
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
+			expect:     options.expect,
 			command:    options.command,
 			cwd:        options.cwd,
 			env:        options.env,
@@ -313,11 +348,52 @@ impl Shell {
 			self.abort_state.clone(),
 			self.active.clone(),
 			self.config.clone(),
+			self.review_baseline.clone(),
 			run_config,
 			on_chunk,
 			&mut cancel_token,
 		)
 		.await
+	}
+
+	pub async fn inspect(&self, names: Vec<BString>) -> Option<ShellInspectReport> {
+		let guard = self.session.try_lock().ok()?;
+		let core = guard.as_ref()?;
+		let report = core.session.inspect(names).await.ok()?;
+		let exports: BTreeMap<_, _> = report.exports.into_iter().collect();
+		let baseline = self.review_baseline.lock();
+		let original = baseline.exports.as_ref()?;
+		let mut exports_changed: Vec<_> = original
+			.keys()
+			.chain(exports.keys())
+			.filter(|name| original.get(*name) != exports.get(*name))
+			.map(|name| name.to_str_lossy().into_owned())
+			.collect();
+		exports_changed.sort_unstable();
+		exports_changed.dedup();
+		let options_changed = baseline
+			.options
+			.as_ref()
+			.map_or(report.options_changed, |original| {
+				let mut changed: Vec<_> = report
+					.options
+					.iter()
+					.filter(|(option, value)| original.get(option) != Some(value))
+					.map(|(option, _)| option.to_string())
+					.collect();
+				changed.sort();
+				changed
+			});
+		Some(ShellInspectReport {
+			fingerprint: report.fingerprint,
+			resolution: report.resolution,
+			hooks: report.hooks,
+			options_changed,
+			exports_changed,
+			snapshot_changed: baseline.snapshot_changed,
+			home: report.home.map(|value| value.to_str_lossy().into_owned()),
+			path: report.path.map(|value| value.to_str_lossy().into_owned()),
+		})
 	}
 
 	pub async fn abort(&self) {
@@ -375,6 +451,7 @@ pub async fn execute_shell(
 		seed:          None,
 	};
 	let run_config = ShellRunConfig {
+		expect: None,
 		command: options.command,
 		cwd: options.cwd,
 		env: options.env,
@@ -416,6 +493,7 @@ pub async fn execute_shell_streams(
 		seed:          None,
 	};
 	let run_config = ShellRunConfig {
+		expect:     None,
 		command:    options.command,
 		cwd:        options.cwd,
 		env:        options.env,
@@ -455,6 +533,7 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
 /// What a run reports when it ends normally.
 struct CommandResult {
+	refused:     Option<String>,
 	status:      i32,
 	minimized:   Option<MinimizerResult>,
 	working_dir: String,
@@ -463,11 +542,12 @@ struct CommandResult {
 impl CommandResult {
 	fn into_run_result(self) -> ShellRunResult {
 		ShellRunResult {
-			exit_code:   Some(self.status),
+			refused:     self.refused.clone(),
+			exit_code:   self.refused.is_none().then_some(self.status),
 			cancelled:   false,
 			timed_out:   false,
 			minimized:   self.minimized,
-			working_dir: Some(self.working_dir),
+			working_dir: self.refused.is_none().then_some(self.working_dir),
 		}
 	}
 }
@@ -475,6 +555,7 @@ impl CommandResult {
 /// The result of a run cancelled by `reason`.
 const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	ShellRunResult {
+		refused:     None,
 		exit_code:   None,
 		cancelled:   matches!(reason, AbortReason::Signal),
 		timed_out:   matches!(reason, AbortReason::Timeout),
@@ -483,15 +564,55 @@ const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	}
 }
 
+fn refused_command(reason: &str) -> CommandResult {
+	CommandResult {
+		status:      1,
+		refused:     Some(reason.to_owned()),
+		minimized:   None,
+		working_dir: String::new(),
+	}
+}
+
+/// Pin before sourcing, including when setup is later cancelled.
+async fn pin_snapshot(config: &ShellConfig, baseline: &SharedReviewBaseline) {
+	let sha = if let Some(path) = config.snapshot_path.as_ref() {
+		Some(match tokio::fs::read(path).await {
+			Ok(bytes) => Sha256::digest(bytes).into(),
+			Err(_) => [0; 32],
+		})
+	} else {
+		None
+	};
+	let mut baseline = baseline.lock();
+	if baseline.snapshot_pinned {
+		baseline.snapshot_changed |= baseline.snapshot_sha != sha;
+	} else {
+		baseline.snapshot_pinned = true;
+		baseline.snapshot_sha = sha;
+	}
+}
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
 	active: ActiveSession,
 	config: ShellConfig,
+	review_baseline: SharedReviewBaseline,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
+	// A token cannot wait for or create another shell. Keep this guard until
+	// submission so refusal cannot interfere with an existing run's abort state.
+	let prelocked = if run_config.expect.is_some() {
+		match session.clone().try_lock_owned() {
+			Ok(guard) if guard.is_some() => Some(guard),
+			Ok(_) => return Ok(refused_command("shell session unavailable").into_run_result()),
+			Err(_) => return Ok(refused_command("shell session busy").into_run_result()),
+		}
+	} else {
+		None
+	};
 	let tokio_cancel = CancellationToken::new();
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
@@ -500,11 +621,30 @@ async fn run_shell_session(
 		let tokio_cancel = tokio_cancel.clone();
 		let at = ct.emplace_abort_token();
 		async move {
-			let mut session_guard = session.lock().await;
+			let mut session_guard = match prelocked {
+				Some(guard) => guard,
+				None => session.clone().lock_owned().await,
+			};
 			let core = if let Some(core) = &mut *session_guard {
 				core
 			} else {
-				let core = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+				let core = create_session_for_run(
+					&config,
+					Some(&tokio_cancel),
+					run_config.cwd.as_deref(),
+					Some(&review_baseline),
+				)
+				.await?;
+				let report = core.session.inspect(Vec::new()).await?;
+				{
+					let mut baseline = review_baseline.lock();
+					baseline
+						.exports
+						.get_or_insert_with(|| report.exports.into_iter().collect());
+					baseline
+						.options
+						.get_or_insert_with(|| report.options.into_iter().collect());
+				}
 				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
@@ -559,7 +699,7 @@ async fn run_shell_oneshot(
 		let tokio_cancel = tokio_cancel.clone();
 		async move {
 			// The session ends with this task: its background jobs end with it.
-			let mut session = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+			let mut session = create_session_for_run(&config, Some(&tokio_cancel), None, None).await?;
 			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel).await
 		}
 	});
@@ -592,7 +732,7 @@ async fn run_shell_oneshot_streams(
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		async move {
-			let mut session = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+			let mut session = create_session_for_run(&config, Some(&tokio_cancel), None, None).await?;
 			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel).await
 		}
 	});
@@ -748,7 +888,7 @@ fn merge_path_values(_existing: &str, incoming: &str) -> String {
 
 #[cfg(test)]
 async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
-	create_session_for_run(config, None).await
+	create_session_for_run(config, None, None, None).await
 }
 
 /// Copies the host environment into `vars` (the shell's starting
@@ -848,6 +988,8 @@ fn initial_cwd() -> BString {
 async fn create_session_for_run(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
+	startup_cwd: Option<&str>,
+	baseline: Option<&SharedReviewBaseline>,
 ) -> Result<ShellSessionCore> {
 	let cancel = cancel_token.cloned().unwrap_or_default();
 	let runtime = tokio::runtime::Handle::current();
@@ -858,7 +1000,10 @@ async fn create_session_for_run(
 		.into_iter()
 		.map(|(key, value)| (BString::from(key), BString::from(value)))
 		.collect();
-	let cwd = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
+	let initial = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
+	let cwd = requested_cwd(&slot, &initial, startup_cwd)
+		.await?
+		.unwrap_or(initial);
 	// The pi utilities (and their `PI_DISABLE_*` gates), the process
 	// builtins, `nohup`, `timeout` and the `git` layers are the session's
 	// commands (`crate::tools`), configured from this environment; `exec`
@@ -878,6 +1023,11 @@ async fn create_session_for_run(
 	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
 	let mut core = ShellSessionCore { session, slot, filesystem: config.filesystem.clone(), cwd };
 
+	// Hash immediately before sourcing. Missing/unreadable snapshots retain
+	// run_setup's optional-source behavior and get a distinct absent sentinel.
+	if let Some(baseline) = baseline {
+		pin_snapshot(config, baseline).await;
+	}
 	// A seed already holds both.
 	if config.seed.is_none() {
 		if !has_env_var {
@@ -1031,6 +1181,7 @@ impl CommandScope<'_> {
 		reported_error: Option<Arc<AtomicBool>>,
 	) -> RunOptions {
 		RunOptions {
+			expect: self.options.expect.clone(),
 			command,
 			env: self.env.clone(),
 			cwd,
@@ -1142,26 +1293,40 @@ async fn run_shell_command_in_filesystem(
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 ) -> Result<CommandResult> {
-	let cwd = requested_cwd(session, options.cwd.as_deref()).await?;
+	let cwd = requested_cwd(&session.slot, &session.cwd, options.cwd.as_deref()).await?;
 	let scope =
 		CommandScope { options, env: command_env(options.env.as_ref()), cancel: cancel_token };
 
-	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
+	let mut minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
 		minimizer::engine::mode_for(&options.command, config)
 	} else {
 		minimizer::engine::MinimizerMode::None
 	};
 
-	let (status, minimized) = match minimizer_mode {
+	// A reviewed command must have one atomic check and one submission. Keep
+	// output filtering, but never split its source into separate submissions.
+	if options.expect.is_some()
+		&& matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain)
+	{
+		minimizer_mode = minimizer::engine::MinimizerMode::WholeCommand;
+	}
+	let (status, minimized, refused) = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
-			run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?
+			let (status, minimized) =
+				run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?;
+			(status, minimized, None)
 		},
 		minimizer::engine::MinimizerMode::WholeCommand | minimizer::engine::MinimizerMode::None => {
 			run_shell_command_single(session, &scope, cwd, on_chunk, minimizer_mode).await?
 		},
 	};
 
-	Ok(CommandResult { status, minimized, working_dir: session.cwd.to_str_lossy().into_owned() })
+	Ok(CommandResult {
+		status,
+		minimized,
+		refused,
+		working_dir: session.cwd.to_str_lossy().into_owned(),
+	})
 }
 
 async fn run_shell_command_single(
@@ -1170,7 +1335,7 @@ async fn run_shell_command_single(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>, Option<String>)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 	let options = scope.options;
 
@@ -1239,7 +1404,7 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((status, minimized_out))
+	Ok((status, minimized_out, command_run.outcome.refused))
 }
 
 /// The source of a chain segment whose failure must not trip `set -e`: the
@@ -1259,19 +1424,25 @@ async fn run_shell_command_segmented_chain(
 	let options = scope.options;
 	let unsegmented = minimizer::engine::MinimizerMode::None;
 	let Some(config) = options.minimizer.as_ref() else {
-		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented)
+			.await
+			.map(|(status, minimized, _)| (status, minimized));
 	};
 
 	// When minimizer is disabled, don't segment — stream the original single
 	// path.
 	if !config.enabled {
-		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented)
+			.await
+			.map(|(status, minimized, _)| (status, minimized));
 	}
 
 	let minimizer::plan::CommandPlan::Chain { segments } =
 		minimizer::plan::analyze(&options.command)
 	else {
-		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented)
+			.await
+			.map(|(status, minimized, _)| (status, minimized));
 	};
 
 	let mut cwd = cwd;
@@ -1549,7 +1720,7 @@ async fn run_shell_command_streams_in_filesystem(
 	streams: StreamSinks,
 	cancel_token: CancellationToken,
 ) -> Result<CommandResult> {
-	let cwd = requested_cwd(session, options.cwd.as_deref()).await?;
+	let cwd = requested_cwd(&session.slot, &session.cwd, options.cwd.as_deref()).await?;
 	let scope = CommandScope {
 		options,
 		env: command_env(options.env.as_ref()),
@@ -1671,6 +1842,7 @@ async fn run_shell_command_streams_in_filesystem(
 
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 	Ok(CommandResult {
+		refused:     None,
 		status:      outcome.status,
 		minimized:   None,
 		working_dir: session.cwd.to_str_lossy().into_owned(),

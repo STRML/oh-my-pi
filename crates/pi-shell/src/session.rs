@@ -59,24 +59,29 @@
 
 use std::{
 	future::poll_fn,
+	path::PathBuf,
 	sync::{
-		Arc,
+		Arc, OnceLock,
 		atomic::{AtomicBool, AtomicU8, Ordering},
 	},
 	task::{Wake, Waker},
 	time::Duration,
 };
 
-use bstr::{BString, ByteSlice};
+use bstr::{BStr, BString, ByteSlice};
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, MemStore, PipeTap,
-		Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit, Signal,
-		Step, ToolCall, VprocSel,
-		store::{Key, MiscKey, Record},
+		Attrs, Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, FsPoll, Host,
+		IntrinsicId, MemStore, ModeId, PipeTap, Profile, ResolveCtx, Resolved, RestoreError,
+		RestoreOpts, RunId, Script, Shell, ShellError, ShellInit, Signal, StateStore, Step, ToolCall,
+		VarValue, Via, VprocSel,
+		fs::Access,
+		store::{Key, MiscKey, OptId, Record, Table, TrapKey},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
 	sys::OutputDecoding,
@@ -123,6 +128,8 @@ pub struct SessionConfig {
 /// One command of a [`Session`].
 #[derive(Clone, Default)]
 pub struct RunOptions {
+	/// State and file contents approved by the caller.
+	pub expect:         Option<RunExpect>,
 	/// The command string (`bash -c` semantics).
 	pub command:        String,
 	/// Variables exported to this command only (pi's per-run env). They are
@@ -160,6 +167,7 @@ impl RunOptions {
 	pub fn new(command: impl Into<String>) -> Self {
 		Self {
 			command:        command.into(),
+			expect:         None,
 			env:            Vec::new(),
 			cwd:            None,
 			pipe_tap:       None,
@@ -183,6 +191,60 @@ impl std::fmt::Debug for RunOptions {
 	}
 }
 
+/// A review token binding shell state and reviewed file contents.
+#[derive(Clone, Debug)]
+pub struct RunExpect {
+	/// blake3 digest returned by inspection.
+	pub state: [u8; 32],
+	/// Files and their SHA-256 digests.
+	pub files: Vec<(PathBuf, [u8; 32])>,
+}
+
+/// First command meaning in the live shell's lookup order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+	/// Expanded alias text.
+	Alias(BString),
+	/// Shell reserved word.
+	Keyword,
+	/// POSIX special builtin.
+	Special,
+	/// User-defined function.
+	Function,
+	/// Intrinsic or host-provided builtin, including disabled intrinsics.
+	Builtin {
+		/// Whether the shell permits this builtin.
+		usable: bool,
+	},
+	/// Shell's cached executable path.
+	Hashed(BString),
+	/// Executable found on the filesystem.
+	File(BString),
+	/// No matching command.
+	Missing,
+}
+
+/// Read-only description of persistent command semantics.
+#[derive(Clone, Debug)]
+pub struct InspectReport {
+	/// blake3 fingerprint of persistent store records and open root descriptors.
+	pub fingerprint:     [u8; 32],
+	/// Requested names and their first resolution.
+	pub resolution:      Vec<(BString, Resolution)>,
+	/// Installed traps and variables that may run code.
+	pub hooks:           Vec<String>,
+	/// Options differing from a newly created session.
+	pub options_changed: Vec<String>,
+	/// Current option values for the host's first-build baseline.
+	pub options:         Vec<(OptId, bool)>,
+	/// Exported scalar variables and blake3 digests of their values.
+	pub exports:         Vec<(BString, [u8; 32])>,
+	/// Current HOME scalar.
+	pub home:            Option<BString>,
+	/// Current PATH scalar.
+	pub path:            Option<BString>,
+}
+
 /// The standard streams of one command, as OS handles.
 ///
 /// `None` behaves like `/dev/null`. The session closes its copies when the
@@ -201,6 +263,8 @@ pub struct RunStdio {
 /// How a command ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOutcome {
+	/// The command was not submitted because its review token no longer matches.
+	pub refused:   Option<String>,
 	/// Exit status, bash semantics (127 not found, 128 + n for a signal).
 	pub status:    i32,
 	/// The run was stopped by its cancellation token.
@@ -471,6 +535,20 @@ impl Session {
 			.map_err(|_| SessionError::Closed)
 	}
 
+	/// Read the live shell state without executing shell code.
+	///
+	/// # Errors
+	/// Returns [`SessionError::Closed`] when the driver is gone.
+	pub async fn inspect(&self, names: Vec<BString>) -> Result<InspectReport, SessionError> {
+		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
+		let (reply, receive) = flume::bounded(1);
+		jobs
+			.send(Request::Inspect { names, reply })
+			.map_err(|_| SessionError::Closed)?;
+		self.waker.wake_by_ref();
+		receive.recv_async().await.map_err(|_| SessionError::Closed)
+	}
+
 	/// Run `command` with `stdio`; see [`Session::run_with`].
 	///
 	/// # Errors
@@ -613,6 +691,8 @@ impl Drop for CancelOnDrop<'_> {
 
 /// What the driver is asked to do.
 enum Request {
+	/// Inspect command semantics without stepping the engine.
+	Inspect { names: Vec<BString>, reply: flume::Sender<InspectReport> },
 	/// Run a command.
 	Run(Job),
 	/// Count the background jobs running an external.
@@ -642,12 +722,284 @@ struct Driver {
 }
 
 impl Driver {
+	fn cwd(&self) -> BString {
+		match self.store.record(Key::Misc(MiscKey::Cwd)) {
+			Some(Record::Misc(cwd)) => cwd.clone(),
+			_ => BString::default(),
+		}
+	}
+
+	fn scalar(&self, name: &[u8]) -> Option<BString> {
+		match self.store.record(Key::Var(BStr::new(name))) {
+			Some(Record::Var(var)) if !var.attrs.contains(Attrs::INVISIBLE) => {
+				var.as_scalar().map(BString::from)
+			},
+			_ => None,
+		}
+	}
+
+	fn option(&self, option: OptId) -> bool {
+		match self.store.record(Key::Opt(option)) {
+			Some(Record::Opt(value)) => *value,
+			_ => option.default_on(),
+		}
+	}
+
+	fn fingerprint(&self) -> [u8; 32] {
+		let mut hash = blake3::Hasher::new();
+		hash.update(&self.store.state_digest());
+		for fd in self.shell.inspection_fds() {
+			hash.update(&fd.to_le_bytes());
+		}
+		*hash.finalize().as_bytes()
+	}
+
+	fn refusal(&self, expect: &RunExpect) -> Option<String> {
+		if self.shell.has_live_background_jobs() {
+			return Some("background jobs are running".into());
+		}
+		if self.fingerprint() != expect.state {
+			return Some("shell state changed".into());
+		}
+		for (path, expected) in &expect.files {
+			let actual = (|| {
+				use std::io::Read;
+				let path = if path.is_absolute() {
+					path.clone()
+				} else {
+					self.cwd().to_path().ok()?.join(path)
+				};
+				let path = std::fs::canonicalize(path).ok()?;
+				let mut file = std::fs::File::open(path).ok()?;
+				let mut hash = Sha256::new();
+				let mut bytes = vec![0; 65536];
+				loop {
+					let count = file.read(&mut bytes).ok()?;
+					if count == 0 {
+						break;
+					}
+					hash.update(&bytes[..count]);
+				}
+				Some(<[u8; 32]>::from(hash.finalize()))
+			})();
+			if actual.as_ref() != Some(expected) {
+				return Some(format!("file changed: {}", path.display()));
+			}
+		}
+		None
+	}
+
+	fn resolution(&mut self, name: &BStr) -> Resolution {
+		if self.option(OptId::ExpandAliases)
+			&& let Some(Record::Alias(text)) = self.store.record(Key::Alias(name))
+		{
+			return Resolution::Alias(text.clone());
+		}
+		if Shell::inspection_keyword(name) {
+			return Resolution::Keyword;
+		}
+		if self.option(OptId::Posix)
+			&& IntrinsicId::from_name(name).is_some_and(Shell::inspection_special)
+		{
+			return Resolution::Special;
+		}
+		if matches!(self.store.record(Key::Func(name)), Some(Record::Func { .. })) {
+			return Resolution::Function;
+		}
+		let mode = match self.store.record(Key::Misc(MiscKey::Mode)) {
+			Some(Record::Misc(mode)) => mode
+				.to_str()
+				.ok()
+				.and_then(|mode| mode.parse().ok())
+				.unwrap_or_default(),
+			_ => ModeId::default(),
+		};
+		let resolved = self
+			.host
+			.resolve(name, mode, ResolveCtx { has_slash: name.contains(&b'/'), via: Via::Type });
+		match resolved {
+			Resolved::Intrinsic(id) => {
+				return Resolution::Builtin {
+					usable: self
+						.shell
+						.inspection_usable(&mut self.store, name, Some(id)),
+				};
+			},
+			Resolved::Tool(_) | Resolved::Native(_) | Resolved::Device(_) | Resolved::SelfShell => {
+				return Resolution::Builtin { usable: true };
+			},
+			Resolved::NotFound if self.shell.inspection_usable(&mut self.store, name, None) => {
+				return Resolution::Builtin { usable: true };
+			},
+			Resolved::External(path) => {
+				return match self.store.record(Key::CmdHash(name)) {
+					Some(Record::CmdHash { path, .. }) => Resolution::Hashed(path.clone()),
+					_ => Resolution::File(path),
+				};
+			},
+			Resolved::NotFound => {},
+		}
+		if let Some(Record::CmdHash { path, .. }) = self.store.record(Key::CmdHash(name)) {
+			return Resolution::Hashed(path.clone());
+		}
+		let cwd = self.cwd();
+		let Ok(cwd) = cwd.to_path() else {
+			return Resolution::Missing;
+		};
+		let executable = |path: PathBuf| -> Option<Resolution> {
+			let metadata = std::fs::metadata(&path).ok()?;
+			if !metadata.is_file() {
+				return None;
+			}
+			let bytes = BStr::new(path.as_os_str().as_encoded_bytes());
+			// Native PATH entries use the engine's own access(X_OK) check.
+			if !matches!(
+				crate::sys::StdFs::default().access(bytes, Access::EXEC),
+				FsPoll::Ready(Ok(()))
+			) {
+				return None;
+			}
+			Some(Resolution::File(BString::from(path.into_os_string().as_encoded_bytes())))
+		};
+		if name.contains(&b'/') {
+			return name
+				.to_path()
+				.ok()
+				.and_then(|path| executable(cwd.join(path)))
+				.unwrap_or(Resolution::Missing);
+		}
+		let path = self.scalar(b"PATH").unwrap_or_default();
+		if path.windows(3).any(|window| window == b"://") {
+			return Resolution::Missing;
+		}
+		for directory in path.split(|&byte| byte == b':') {
+			let Ok(directory) = directory.to_path() else {
+				continue;
+			};
+			let Ok(name) = name.to_path() else {
+				return Resolution::Missing;
+			};
+			if let Some(file) = executable(cwd.join(directory).join(name)) {
+				return file;
+			}
+		}
+		Resolution::Missing
+	}
+
+	fn inspect(&mut self, names: Vec<BString>) -> InspectReport {
+		static DEFAULT_OPTIONS: OnceLock<Vec<(OptId, bool)>> = OnceLock::new();
+		let defaults = DEFAULT_OPTIONS.get_or_init(|| {
+			let engine = Engine::new(EngineConfig::default());
+			let mut store = MemStore::new();
+			let _shell = Shell::create(
+				&engine,
+				&mut Cx { host: &mut self.host, store: &mut store },
+				ShellInit { profile: Profile::Tool, ..ShellInit::default() },
+			)
+			.expect("fresh shell defaults");
+			OptId::VARIANTS
+				.iter()
+				.map(|&option| {
+					let value = match store.record(Key::Opt(option)) {
+						Some(Record::Opt(value)) => *value,
+						_ => option.default_on(),
+					};
+					(option, value)
+				})
+				.collect()
+		});
+		let resolution = names
+			.into_iter()
+			.map(|name| {
+				let resolution = self.resolution(name.as_bstr());
+				(name, resolution)
+			})
+			.collect();
+		let mut hooks = Vec::new();
+		let _ = self.store.scan(Table::Trap, &mut |key, _| {
+			if let Key::Trap(trap) = key {
+				let name = match trap {
+					TrapKey::Signal(signal) => signal.to_string(),
+					TrapKey::Exit => "EXIT".into(),
+					TrapKey::Err => "ERR".into(),
+					TrapKey::Debug => "DEBUG".into(),
+					TrapKey::Return => "RETURN".into(),
+				};
+				hooks.push(format!("trap:{name}"));
+			}
+		});
+		if self.option(OptId::Xtrace) && self.scalar(b"PS4").is_some() {
+			hooks.push("ps4".into());
+		}
+		for name in ["BASH_ENV", "ENV", "CDPATH", "PROMPT_COMMAND"] {
+			if self
+				.scalar(name.as_bytes())
+				.is_some_and(|value| !value.is_empty())
+			{
+				hooks.push(format!("var:{name}"));
+			}
+		}
+		if self.scalar(b"IFS").is_some_and(|value| value != b" \t\n") {
+			hooks.push("var:IFS".into());
+		}
+		let _ = self.store.scan(Table::Func, &mut |key, record| {
+			if let (Key::Func(name), Record::Func { attrs, .. }) = (key, record)
+				&& attrs.contains(Attrs::EXPORT)
+			{
+				hooks.push(format!("func-export:{}", name.to_str_lossy()));
+			}
+		});
+		hooks.extend(self.shell.inspection_fds().map(|fd| format!("fd:{fd}")));
+		// A token run refuses while background work lives (it could swap a
+		// reviewed file between the re-hash and the exec), so report it here
+		// and let the gate skip the review instead of paying for an allow the
+		// host will refuse.
+		if self.shell.has_live_background_jobs() {
+			hooks.push("jobs:live".into());
+		}
+		hooks.sort();
+		let mut options_changed: Vec<_> = defaults
+			.iter()
+			.filter(|(option, value)| self.option(*option) != *value)
+			.map(|(option, _)| option.to_string())
+			.collect();
+		options_changed.sort();
+		let mut exports = Vec::new();
+		let _ = self.store.scan(Table::Var, &mut |key, record| {
+			if let (Key::Var(name), Record::Var(var)) = (key, record)
+				&& var.attrs.contains(Attrs::EXPORT)
+				&& !var.attrs.contains(Attrs::INVISIBLE)
+				&& let VarValue::Str(value) = &var.value
+			{
+				exports.push((name.to_owned(), *blake3::hash(value).as_bytes()));
+			}
+		});
+		exports.sort_by(|a, b| a.0.cmp(&b.0));
+		InspectReport {
+			fingerprint: self.fingerprint(),
+			resolution,
+			hooks,
+			options_changed,
+			options: OptId::VARIANTS
+				.iter()
+				.map(|&option| (option, self.option(option)))
+				.collect(),
+			exports,
+			home: self.scalar(b"HOME"),
+			path: self.scalar(b"PATH"),
+		}
+	}
+
 	/// Run jobs until the session is closed; step background work between
 	/// them.
 	async fn serve(mut self) {
 		loop {
 			match self.jobs.try_recv() {
 				Ok(Request::Run(job)) => self.run(job).await,
+				Ok(Request::Inspect { names, reply }) => {
+					let report = self.inspect(names);
+					let _ = reply.send(report);
+				},
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs());
 				},
@@ -674,8 +1026,23 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, events } =
+		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, events, expect } =
 			options;
+		// The values the overlay hides, restored after the run.
+		let saved: Vec<(BString, Option<Record>)> = env
+			.iter()
+			.map(|(name, _)| (name.clone(), self.store.record(Key::Var(name.as_bstr())).cloned()))
+			.collect();
+		if let Some(reason) = expect.as_ref().and_then(|expect| self.refusal(expect)) {
+			let _ = reply.send(RunOutcome {
+				status:    1,
+				cancelled: false,
+				exited:    false,
+				cwd:       self.cwd(),
+				refused:   Some(reason),
+			});
+			return;
+		}
 		self.host.set_pipe_tap(pipe_tap);
 		// A command owns its observer generation, even when successive
 		// observers request identical event masks.
@@ -683,11 +1050,6 @@ impl Driver {
 			.shell
 			.set_event_mask(events.as_ref().map_or(EventMask::NONE, |sink| sink.mask()));
 		self.host.set_reported_error(reported_error);
-		// The values the overlay hides, restored after the run.
-		let saved: Vec<(BString, Option<Record>)> = env
-			.iter()
-			.map(|(name, _)| (name.clone(), self.store.record(Key::Var(name.as_bstr())).cloned()))
-			.collect();
 		// Submission only queues the script. Bind its exact identity before
 		// any scheduler turn can announce an older background tool child.
 		let run = self.shell.submit(Script {
@@ -753,7 +1115,7 @@ impl Driver {
 		self.image.publish(&self.store);
 		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
+		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd, refused: None });
 	}
 
 	/// Let the background work a command started reach its first wait (an
@@ -911,6 +1273,160 @@ mod tests {
 
 	async fn sh(session: &mut Session, command: &str) -> Captured {
 		capture(session, RunOptions::new(command)).await
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn inspection_fingerprint_tracks_persistent_changes_but_not_noop_runs() {
+		let mut shell = session();
+		sh(&mut shell, ":").await;
+		let before = shell.inspect(Vec::new()).await.unwrap().fingerprint;
+		sh(&mut shell, ":").await;
+		assert_eq!(before, shell.inspect(Vec::new()).await.unwrap().fingerprint);
+		sh(&mut shell, "").await;
+		assert_eq!(before, shell.inspect(Vec::new()).await.unwrap().fingerprint);
+		for command in [
+			"export X=1",
+			"alias a=b",
+			"f(){ :; }",
+			"trap : DEBUG",
+			"set -x",
+			"enable -n echo",
+			"hash -p /bin/ls ls",
+			"pushd /tmp",
+			"umask 077",
+			"w=1",
+		] {
+			let before = shell.inspect(Vec::new()).await.unwrap().fingerprint;
+			assert_eq!(sh(&mut shell, command).await.outcome.status, 0, "{command}");
+			sh(&mut shell, ":").await;
+			assert_ne!(before, shell.inspect(Vec::new()).await.unwrap().fingerprint, "{command}");
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stale_review_tokens_refuse_before_marker_command_runs() {
+		let mut shell = session();
+		sh(&mut shell, ":").await;
+		let state = shell.inspect(Vec::new()).await.unwrap().fingerprint;
+		sh(&mut shell, "export REVIEW_CHANGED=1").await;
+		let dir = tempfile::tempdir().unwrap();
+		let marker = dir.path().join("marker");
+		let result = capture(&mut shell, RunOptions {
+			expect: Some(RunExpect { state, files: Vec::new() }),
+			..RunOptions::new(format!("echo ran > '{}'", marker.display()))
+		})
+		.await;
+		assert_eq!(result.outcome.refused.as_deref(), Some("shell state changed"));
+		assert!(!marker.exists());
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn edited_reviewed_files_refuse_before_marker_command_runs() {
+		let mut shell = session();
+		sh(&mut shell, ":").await;
+		let state = shell.inspect(Vec::new()).await.unwrap().fingerprint;
+		let dir = tempfile::tempdir().unwrap();
+		let reviewed = dir.path().join("reviewed");
+		let marker = dir.path().join("marker");
+		std::fs::write(&reviewed, "first").unwrap();
+		let digest: [u8; 32] = Sha256::digest(b"first").into();
+		std::fs::write(&reviewed, "changed").unwrap();
+		let result = capture(&mut shell, RunOptions {
+			expect: Some(RunExpect { state, files: vec![(reviewed.clone(), digest)] }),
+			..RunOptions::new(format!("echo ran > '{}'", marker.display()))
+		})
+		.await;
+		assert_eq!(result.outcome.refused, Some(format!("file changed: {}", reviewed.display())));
+		assert!(!marker.exists());
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn inspection_reports_lookup_order_and_live_code_hooks() {
+		let mut shell = session();
+		sh(
+			&mut shell,
+			"shopt -s expand_aliases; alias review_alias='echo hi'; review_function(){ :; }; enable \
+			 -n echo; hash -p /bin/ls review_hash; trap : DEBUG; CDPATH=/tmp; PS4=trace; set -x",
+		)
+		.await;
+		let names = [
+			"review_alias",
+			"review_function",
+			"echo",
+			":",
+			"review_hash",
+			"/bin/ls",
+			"__missing_review_name",
+			"if",
+		];
+		let report = shell
+			.inspect(names.map(BString::from).to_vec())
+			.await
+			.unwrap();
+		assert_eq!(
+			report
+				.resolution
+				.into_iter()
+				.map(|(_, kind)| kind)
+				.collect::<Vec<_>>(),
+			vec![
+				Resolution::Alias("echo hi".into()),
+				Resolution::Function,
+				Resolution::Builtin { usable: false },
+				Resolution::Builtin { usable: true },
+				Resolution::Hashed("/bin/ls".into()),
+				Resolution::File("/bin/ls".into()),
+				Resolution::Missing,
+				Resolution::Keyword,
+			]
+		);
+		assert!(report.hooks.contains(&"trap:DEBUG".to_owned()));
+		assert!(report.hooks.contains(&"var:CDPATH".to_owned()));
+		assert!(report.hooks.contains(&"ps4".to_owned()));
+		assert!(report.options_changed.contains(&"xtrace".to_owned()));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn inspection_resolves_path_files_and_rejects_virtual_search_paths() {
+		use std::os::unix::fs::PermissionsExt;
+		let mut shell = session();
+		let dir = tempfile::tempdir().unwrap();
+		let executable = dir.path().join("review_executable");
+		std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+		std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+		sh(&mut shell, &format!("PATH='{}'", dir.path().display())).await;
+		let report = shell
+			.inspect(vec!["review_executable".into()])
+			.await
+			.unwrap();
+		assert_eq!(
+			report.resolution[0].1,
+			Resolution::File(BString::from(executable.as_os_str().as_bytes()))
+		);
+		sh(&mut shell, &format!("PATH='{}:scheme://unsafe'", dir.path().display())).await;
+		let report = shell
+			.inspect(vec!["review_executable".into()])
+			.await
+			.unwrap();
+		assert_eq!(report.resolution[0].1, Resolution::Missing);
+		sh(&mut shell, "function ./review_executable { :; }").await;
+		let report = shell
+			.inspect(vec!["./review_executable".into()])
+			.await
+			.unwrap();
+		assert_eq!(report.resolution[0].1, Resolution::Function);
+	}
+
+	/// Array-backed hook variables use element zero during shell expansion.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn inspection_reports_array_backed_code_hooks() {
+		let mut shell = session();
+		let setup = sh(&mut shell, "CDPATH=(/tmp); PS4=(trace); IFS=(x); set -x").await;
+		assert_eq!(setup.outcome.status, 0);
+		let report = shell.inspect(Vec::new()).await.unwrap();
+		for hook in ["var:CDPATH", "ps4", "var:IFS"] {
+			assert!(report.hooks.iter().any(|entry| entry == hook), "missing hook {hook}");
+		}
 	}
 
 	fn alive(pid: i32) -> bool {

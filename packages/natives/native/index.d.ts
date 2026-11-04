@@ -637,6 +637,8 @@ export declare class Shell {
    * timed out.
    */
   run(options: ShellRunOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
+  /** Inspect the live shell without building or waiting for a busy core. */
+  inspect(names: Array<string>): Promise<ShellInspectReport | null>
   /**
    * Abort all running commands for this shell session.
    *
@@ -3535,6 +3537,12 @@ export interface ShellExecuteOptions {
   filesystem?: ShellFilesystem
 }
 
+/** A file whose bytes were reviewed by the caller. */
+export interface ShellExpectedFile {
+  path: string
+  sha256: string
+}
+
 /** Host filesystem injected into shell sessions. */
 export interface ShellFilesystem {
   /**
@@ -3852,6 +3860,18 @@ export interface ShellFsStatFs {
   nameMax?: number | bigint
 }
 
+/** Non-executing inspection of an existing, idle persistent shell. */
+export interface ShellInspectReport {
+  fingerprint: string
+  resolution: Array<ShellResolution>
+  hooks: Array<string>
+  optionsChanged: Array<string>
+  exportsChanged: Array<string>
+  snapshotChanged: boolean
+  home?: string
+  path?: string
+}
+
 /** Options for configuring a persistent shell session. */
 export interface ShellOptions {
   /** Environment variables to apply once per session. */
@@ -3862,6 +3882,21 @@ export interface ShellOptions {
   minimizer?: MinimizerOptions
   /** Filesystem backing every run of this session (native when absent). */
   filesystem?: ShellFilesystem
+}
+
+/** How a command word resolves in the live shell. */
+export interface ShellResolution {
+  name: string
+  kind: 'alias' | 'keyword' | 'special' | 'function' | 'builtin' | 'hashed' | 'file' | 'missing'
+  text?: string
+  path?: string
+  usable?: boolean
+}
+
+/** State and file hashes which must still match when execution starts. */
+export interface ShellRunExpect {
+  state: string
+  files: Array<ShellExpectedFile>
 }
 
 /** Options for running a shell command. */
@@ -3885,10 +3920,14 @@ export interface ShellRunOptions {
   streams?: PipeStreams
   /** Folds the run's engine events into a live model of the command. */
   trace?: RunTrace
+  /** Bind execution to the state and files reviewed by the caller. */
+  expect?: ShellRunExpect
 }
 
 /** Result of running a shell command. */
 export interface ShellRunResult {
+  /** Why a reviewed command was refused before submission. */
+  refused?: string
   /** Exit code when the command completes normally. */
   exitCode?: number
   /** Whether the command was cancelled via abort. */
