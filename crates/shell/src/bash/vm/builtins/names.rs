@@ -249,7 +249,7 @@ pub fn unalias(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 }
 
 /// bash's reserved words.
-const KEYWORDS: [&[u8]; 22] = [
+pub(crate) const KEYWORDS: [&[u8]; 22] = [
 	b"if",
 	b"then",
 	b"else",

@@ -23,7 +23,7 @@ mod jobs;
 mod kill;
 mod mapfile;
 pub mod misc;
-mod names;
+pub(super) mod names;
 mod options;
 mod printf;
 pub mod strftime;
