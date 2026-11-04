@@ -103,6 +103,20 @@ it("runs a reviewed command with matching state and file bytes", async () => {
 	expect(await Bun.file(path.join(cwd, "marker")).text()).toBe("allowed");
 });
 
+it("rejects a review token that names a relative file", async () => {
+	const bash = tool();
+	await bash.execute("prime", { command: ":" });
+	const report = await executor.inspectShellSession(cwd, []);
+	if (!report) throw new Error("Expected an inspectable shell");
+	await expect(
+		bash.execute("review", {
+			command: "printf ran > marker",
+			shellState: { state: report.fingerprint, files: [{ path: "reviewed", sha256: "0".repeat(64) }] },
+		}),
+	).rejects.toThrow("Invalid shellState");
+	expect(await Bun.file(path.join(cwd, "marker")).exists()).toBe(false);
+});
+
 it("rejects changed reviewed file bytes even with matching shell state", async () => {
 	const bash = tool();
 	await bash.execute("prime", { command: ":" });
