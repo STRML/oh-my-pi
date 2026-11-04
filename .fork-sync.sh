@@ -38,7 +38,11 @@ omp_build_install() {
 		echo "bun $have < $need: upgrading"
 		bun upgrade >/dev/null
 	fi
-	bun install --frozen-lockfile >/dev/null
+	# Same fallback as fork_check: upstream's bun.lock can trail its catalog.
+	if ! bun install --frozen-lockfile >/dev/null 2>&1; then
+		bun install >/dev/null
+		git checkout -- bun.lock
+	fi
 	bun run build:native
 	bun --cwd=packages/coding-agent run build
 	dest="$(command -v omp || printf '%s' "$HOME/.local/bin/omp")"
