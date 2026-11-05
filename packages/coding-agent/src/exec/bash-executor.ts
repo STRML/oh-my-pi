@@ -1143,7 +1143,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 }
 
 /** The session env a persistent shell is keyed by; every lookup of a session must build it the same way. */
-function gitGuardEnv(env: Record<string, string>, gitGuard: boolean, ovnfs: string | undefined): Record<string, string> {
+function gitGuardEnv(
+	env: Record<string, string>,
+	gitGuard: boolean,
+	ovnfs: string | undefined,
+): Record<string, string> {
 	return gitGuard ? { ...env, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: ovnfs ?? "" } : env;
 }
 
