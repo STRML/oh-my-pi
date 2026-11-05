@@ -632,6 +632,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly name = "bash";
 	/** Bash reads `skill://` paths through its shell filesystem, including as a working directory. */
 	readonly readsSkillUris = true;
+	/** The reviewed-run token comes from a `tool_call` hook; the model never needs to read it. */
+	readonly hookOnlyArgs = ["shellState"] as const;
 	/**
 	 * The interceptor message for a call, checking the raw command and the one after a leading
 	 * `cd … &&` so the wrapper hides neither shell-navigation rules nor the dedicated-tool command.

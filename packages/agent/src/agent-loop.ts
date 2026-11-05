@@ -3230,11 +3230,21 @@ async function prepareToolCallDispatch(
 			// Bake the revision into the message itself. On the streamed path this
 			// precedes every consumer snapshot, so there is exactly one version of
 			// the call anywhere downstream.
-			toolCall.arguments = beforeResult.args;
+			toolCall.arguments = withoutHookOnlyArgs(beforeResult.args, tool.hookOnlyArgs);
 			entry.args = revised;
 		}
 	}
 	return prepared;
+}
+
+function withoutHookOnlyArgs(
+	args: Record<string, unknown>,
+	hookOnly: readonly string[] | undefined,
+): Record<string, unknown> {
+	if (!hookOnly?.some(name => name in args)) return args;
+	const visible = { ...args };
+	for (const name of hookOnly) delete visible[name];
+	return visible;
 }
 
 /**

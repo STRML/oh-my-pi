@@ -6092,6 +6092,47 @@ describe("agentLoopContinue with AgentMessage", () => {
 			assistant?.role === "assistant" ? assistant.content.find(c => c.type === "toolCall") : undefined;
 		expect(toolCallBlock?.type === "toolCall" && toolCallBlock.arguments).toEqual({ value: "revised" });
 	});
+
+	it("keeps a hook-only arg out of the assistant message and still executes with it", async () => {
+		const toolSchema = type({ value: "string", "token?": "string" });
+		const executed: Array<{ value: string; token?: string }> = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			hookOnlyArgs: ["token"],
+			async execute(_toolCallId, params) {
+				executed.push({ value: params.value, token: params.token });
+				return { content: [{ type: "text", text: "ok" }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "original" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => ({ args: { value: "revised", token: "from-the-hook" } }),
+		};
+
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+
+		// The hook's token reaches execute; the model never reads it back.
+		expect(executed).toEqual([{ value: "revised", token: "from-the-hook" }]);
+		const messages = await stream.result();
+		const assistant = messages.find(m => m.role === "assistant");
+		const toolCallBlock =
+			assistant?.role === "assistant" ? assistant.content.find(c => c.type === "toolCall") : undefined;
+		expect(toolCallBlock?.type === "toolCall" && toolCallBlock.arguments).toEqual({ value: "revised" });
+	});
 });
 
 // Pass-through converter that also preserves developer messages, so tests can
