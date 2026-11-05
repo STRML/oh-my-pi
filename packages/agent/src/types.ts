@@ -1217,6 +1217,13 @@ export interface AgentTool<
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**
+	 * Argument names only a `beforeToolCall` hook sets. A hook revision keeps them
+	 * in the args the tool executes with, but the loop leaves them out of the
+	 * assistant message, so the model never reads the value back and copies it
+	 * into a later call.
+	 */
+	hookOnlyArgs?: readonly string[];
+	/**
 	 * An interruptible tool can execute with an already-aborted
 	 * `TOOL_INTERRUPT_ABORT_REASON` signal to drain caller-owned wake events.
 	 * It must not block when that signal is aborted. External/user cancellation

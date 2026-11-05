@@ -1730,6 +1730,7 @@ const CAPTURE_DROPPED_KEYS = [
 	"speculation",
 	"interruptible",
 	"handlesToolInterrupt",
+	"hookOnlyArgs",
 	"matcherDigest",
 	"matcherPaths",
 	"matcherEntries",
