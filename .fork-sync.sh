@@ -77,7 +77,9 @@ studio_run() {
 }
 
 latch_studio_native_build() {
-	local slot
+	local slot tree
+	# The tree being installed (usually the sync worktree), never the primary checkout.
+	tree="$(pwd)"
 	slot="$(studio_run 'export PATH="$HOME/.local/bin:$PATH"; latch view --json' 2>/dev/null)" || return 1
 	printf '%s' "$slot" | python3 -c '
 import json, sys
@@ -94,7 +96,7 @@ sys.exit(0 if ok else 1)' || {
 		set -euo pipefail
 		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
 		dir="\$HOME/git/forks/omp"
-		[[ -d "\$dir/.git" ]] || git clone -q "$(git -C "$ROOT" remote get-url origin)" "\$dir"
+		[[ -d "\$dir/.git" ]] || git clone -q "$(git -C "$tree" remote get-url origin)" "\$dir"
 		# A worktree of its own: the install worktree may hold a build's generated declarations.
 		wt="\$dir/.claude/worktrees/latch-native-build"
 		git -C "\$dir" fetch -q origin main
@@ -112,12 +114,12 @@ sys.exit(0 if ok else 1)' || {
 	# The addon and its napi declarations are this commit's; gen-enums here rewrites the ESM
 	# loader from them, so no rustc runs on this Mac.
 	studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/latch-native-build" && tar -cf - packages/natives/native/pi_natives.darwin-arm64.node packages/natives/native/index.d.ts' \
-		| tar -xf - -C "$ROOT" || return 1
-	bun "$ROOT/packages/natives/scripts/gen-enums.ts" >/dev/null || return 1
+		| tar -xf - -C "$tree" || return 1
+	bun "$tree/packages/natives/scripts/gen-enums.ts" >/dev/null || return 1
 	# Same source, same napi: the tracked declarations and loader must come out identical.
-	if ! git -C "$ROOT" diff --quiet -- packages/natives/native/index.d.ts packages/natives/native/index.js; then
+	if ! git -C "$tree" diff --quiet -- packages/natives/native/index.d.ts packages/natives/native/index.js; then
 		echo "STUDIO NATIVE BUILD generated different declarations: restoring them and building here"
-		git -C "$ROOT" checkout -- packages/natives/native/index.d.ts packages/natives/native/index.js
+		git -C "$tree" checkout -- packages/natives/native/index.d.ts packages/natives/native/index.js
 		return 1
 	fi
 	echo "native addon built on the Studio"
@@ -165,7 +167,7 @@ fork_install() {
 	has_arg --no-studio && return 0
 	echo "== rebuild and install omp on the Studio =="
 	local log url shipped=0
-	url="$(git -C "$ROOT" remote get-url origin)"
+	url="$(git remote get-url origin)"
 	log="$(mktemp)"
 	studio_run <<-EOF 2>&1 | tee "$log" || true
 		set -euo pipefail
@@ -182,7 +184,7 @@ fork_install() {
 	EOF
 	# Same commit, same darwin-arm64 target: the Studio installs this Mac's addon instead of
 	# running an unscheduled rustc build that could land inside another session's window.
-	if tar -cf - -C "$ROOT" packages/natives/native | studio_put \
+	if tar -cf - packages/natives/native | studio_put \
 		&& studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/sync-fork-main" && tar -xf "$HOME/.cache/fork-sync-payload" && ls packages/natives/native/pi_natives.darwin-arm64.node >/dev/null'; then
 		shipped=1
 	else
