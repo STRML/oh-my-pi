@@ -57,6 +57,14 @@ studio_host() {
 	return 1
 }
 
+# Copies stdin to a file on the Studio: the only payload path, because a remote `bash -s` has
+# already spent stdin on the script and a command pipeline hands its last stage the pipe.
+studio_put() {
+	local h
+	h="$(studio_host)" || return 1
+	ssh -o ConnectTimeout=10 -o BatchMode=yes "$h" 'mkdir -p "$HOME/.cache" && cat > "$HOME/.cache/fork-sync-payload"'
+}
+
 # Runs the script on stdin, or the command in "$@", on the Studio.
 studio_run() {
 	local h
@@ -174,9 +182,11 @@ fork_install() {
 	EOF
 	# Same commit, same darwin-arm64 target: the Studio installs this Mac's addon instead of
 	# running an unscheduled rustc build that could land inside another session's window.
-	if tar -cf - -C "$ROOT" packages/natives/native \
-		| studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/sync-fork-main" && tar -xf -'; then
+	if tar -cf - -C "$ROOT" packages/natives/native | studio_put \
+		&& studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/sync-fork-main" && tar -xf "$HOME/.cache/fork-sync-payload" && ls packages/natives/native/pi_natives.darwin-arm64.node >/dev/null'; then
 		shipped=1
+	else
+		echo "could not ship this Mac's addon to the Studio: building one there"
 	fi
 	studio_run <<-EOF 2>&1 | tee -a "$log" || true
 		set -euo pipefail
