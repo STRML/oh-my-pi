@@ -429,3 +429,41 @@ async fn run_cwd_moves_the_shell_and_rejects_missing_directories() {
 		.expect_err("a missing cwd fails the run");
 	assert!(err.to_string().contains("Failed to set cwd"), "{err}");
 }
+
+/// A fork's session is restored from its source's image, whose working
+/// directory is the source's last one. `Session::restore` ignores
+/// `SessionConfig::cwd`, so the first command's requested directory has to be
+/// applied by the run itself: a core that already claimed it would skip the
+/// `cd` and execute in the image's directory.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn forked_shell_runs_a_first_command_in_its_requested_cwd() {
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("cwd");
+	let target = dir.path().canonicalize().expect("canonical cwd");
+	let shell = Shell::new(None);
+	shell
+		.run(
+			ShellRunOptions { command: "cd /".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("prime the source session");
+	let forked = shell.fork();
+	let (tx, rx) = flume::unbounded::<String>();
+	let result = forked
+		.run(
+			ShellRunOptions {
+				command: "pwd".into(),
+				cwd: Some(target.to_string_lossy().into_owned()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("run in requested cwd");
+	assert_eq!(rx.into_iter().collect::<String>().trim(), target.to_string_lossy());
+	assert_eq!(result.working_dir.as_deref(), Some(target.to_string_lossy().as_ref()));
+}
