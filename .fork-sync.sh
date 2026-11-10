@@ -47,7 +47,8 @@ studio_host() {
 	if [[ -n "${STUDIO_SSH_HOST:-}" ]]; then printf '%s\n' "$STUDIO_SSH_HOST"; return 0; fi
 	local h
 	for h in studio1.local studio studio1; do
-		if ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" true >/dev/null 2>&1; then
+		# -n: a probe must not eat the heredoc its caller is about to send.
+		if ssh -n -o ConnectTimeout=5 -o BatchMode=yes "$h" true >/dev/null 2>&1; then
 			STUDIO_SSH_HOST="$h"
 			printf '%s\n' "$h"
 			return 0
