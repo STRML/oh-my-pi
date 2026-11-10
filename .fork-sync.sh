@@ -156,7 +156,7 @@ fork_install() {
 	OMP_NATIVE_FROM_STUDIO=$native_from_studio omp_build_install || return 3
 	has_arg --no-studio && return 0
 	echo "== rebuild and install omp on the Studio =="
-	local log url
+	local log url shipped=0
 	url="$(git -C "$ROOT" remote get-url origin)"
 	log="$(mktemp)"
 	studio_run <<-EOF 2>&1 | tee "$log" || true
@@ -170,8 +170,20 @@ fork_install() {
 		[[ -d "\$wt" ]] || git worktree add -q --detach "\$wt" origin/main
 		cd "\$wt"
 		git checkout -q -f --detach origin/main
+		if ! bun install --frozen-lockfile >/dev/null 2>&1; then bun install >/dev/null; git checkout -- bun.lock; fi
+	EOF
+	# Same commit, same darwin-arm64 target: the Studio installs this Mac's addon instead of
+	# running an unscheduled rustc build that could land inside another session's window.
+	if tar -cf - -C "$ROOT" packages/natives/native \
+		| studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/sync-fork-main" && tar -xf -'; then
+		shipped=1
+	fi
+	studio_run <<-EOF 2>&1 | tee -a "$log" || true
+		set -euo pipefail
+		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
+		cd "\$HOME/git/forks/omp/.claude/worktrees/sync-fork-main"
 		$(declare -f omp_build_install)
-		omp_build_install </dev/null
+		OMP_NATIVE_FROM_STUDIO=$shipped omp_build_install </dev/null
 	EOF
 	if ! grep -q '^installed .* = omp/' "$log"; then
 		echo "STUDIO NOT UPDATED (see output above); rerun: fork-sync.sh --install-only"
