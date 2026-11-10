@@ -27,6 +27,93 @@ fork_check() {
 	bun run check:ts
 }
 
+# The native addon is the sync's only rustc work: about four minutes of every-core heat. Its Latch
+# queue runs that on the Studio instead, when a slot is free right now. Otherwise this Mac builds.
+NATIVE_MEMORY_MIB=12288
+NATIVE_CPU_CORES=8
+
+# Latch is the Studio's job queue (v0.18 on studio1). `latch schedule` is foreground: it admits the
+# job when the machine and the reservations allow it, runs the command, and exits with its status.
+# It is submitted in batch mode, because builds may overlap ordinary work; isolated waits for a
+# quiet window the sync does not need. Never pass --gpu there: the Studios idle at 2-6% with the
+# live server loaded, and Latch admits a GPU job only under 2%.
+#
+# Returns 1 without doing anything when no slot is free now (a queued job, an isolated task, or too
+# little memory headroom) or when the build fails, leaving the caller to build locally.
+
+# The ssh config for `studio1` probes the LAN and then dials the tailnet, and that probe fails
+# intermittently (mDNS), so address the first name that answers directly.
+studio_host() {
+	if [[ -n "${STUDIO_SSH_HOST:-}" ]]; then printf '%s\n' "$STUDIO_SSH_HOST"; return 0; fi
+	local h
+	for h in studio1.local studio studio1; do
+		if ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" true >/dev/null 2>&1; then
+			STUDIO_SSH_HOST="$h"
+			printf '%s\n' "$h"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Runs the script on stdin, or the command in "$@", on the Studio.
+studio_run() {
+	local h
+	h="$(studio_host)" || return 1
+	if [[ $# -gt 0 ]]; then
+		printf '%s\n' "$*" | ssh -o ConnectTimeout=10 -o BatchMode=yes "$h" 'bash -s'
+	else
+		ssh -o ConnectTimeout=10 -o BatchMode=yes "$h" 'bash -s'
+	fi
+}
+
+latch_studio_native_build() {
+	local slot
+	slot="$(studio_run 'export PATH="$HOME/.local/bin:$PATH"; latch view --json' 2>/dev/null)" || return 1
+	printf '%s' "$slot" | python3 -c '
+import json, sys
+view = json.load(sys.stdin)
+capacity = view.get("capacity", {})
+ok = not view.get("jobs") and not view.get("isolatedTaskRunning")
+ok = ok and capacity.get("memoryHeadroomMiB", 0) >= '"$NATIVE_MEMORY_MIB"'
+sys.exit(0 if ok else 1)' || {
+		echo "no Latch slot free on the Studio right now: building the native addon here"
+		return 1
+	}
+	echo "== build the native addon on the Studio through Latch =="
+	if ! studio_run <<-EOF
+		set -euo pipefail
+		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
+		dir="\$HOME/git/forks/omp"
+		[[ -d "\$dir/.git" ]] || git clone -q "$(git -C "$ROOT" remote get-url origin)" "\$dir"
+		# A worktree of its own: the install worktree may hold a build's generated declarations.
+		wt="\$dir/.claude/worktrees/latch-native-build"
+		git -C "\$dir" fetch -q origin main
+		[[ -d "\$wt" ]] || git -C "\$dir" worktree add -q --detach "\$wt" origin/main
+		cd "\$wt"
+		git checkout -q -f --detach origin/main
+		if ! bun install --frozen-lockfile >/dev/null 2>&1; then bun install >/dev/null; git checkout -- bun.lock; fi
+		latch schedule --name omp-native-build --mode batch --cpu $NATIVE_CPU_CORES --memory-mib $NATIVE_MEMORY_MIB \
+			--timeout 1800 -- /bin/bash -c 'exec bun run build:native'
+	EOF
+	then
+		echo "STUDIO NATIVE BUILD FAILED: building the native addon here"
+		return 1
+	fi
+	# The addon and its napi declarations are this commit's; gen-enums here rewrites the ESM
+	# loader from them, so no rustc runs on this Mac.
+	studio_run 'cd "$HOME/git/forks/omp/.claude/worktrees/latch-native-build" && tar -cf - packages/natives/native/pi_natives.darwin-arm64.node packages/natives/native/index.d.ts' \
+		| tar -xf - -C "$ROOT" || return 1
+	bun "$ROOT/packages/natives/scripts/gen-enums.ts" >/dev/null || return 1
+	# Same source, same napi: the tracked declarations and loader must come out identical.
+	if ! git -C "$ROOT" diff --quiet -- packages/natives/native/index.d.ts packages/natives/native/index.js; then
+		echo "STUDIO NATIVE BUILD generated different declarations: restoring them and building here"
+		git -C "$ROOT" checkout -- packages/natives/native/index.d.ts packages/natives/native/index.js
+		return 1
+	fi
+	echo "native addon built on the Studio"
+}
+
 # Builds the native addon and the binary in the current checkout and swaps it onto PATH through a
 # new file: copying over the old inode leaves macOS holding its cached signature (Killed: 9).
 # Self-contained, because it is also shipped to the Studio with `declare -f`.
@@ -43,7 +130,9 @@ omp_build_install() {
 		bun install >/dev/null
 		git checkout -- bun.lock
 	fi
-	bun run build:native
+	if [[ "${OMP_NATIVE_FROM_STUDIO:-0}" != 1 ]]; then
+		bun run build:native
+	fi
 	bun --cwd=packages/coding-agent run build
 	dest="$(command -v omp || printf '%s' "$HOME/.local/bin/omp")"
 	if [[ -L "$dest" ]]; then echo "ERROR: $dest is a symlink (dev link?); install packages/coding-agent/dist/omp by hand" >&2; return 1; fi
@@ -57,7 +146,13 @@ omp_build_install() {
 # Rebuilds here, then on the Studio through studio-sh (LAN or tailnet). Tailscale SSH always
 # exits 0, so the Studio's success is its "installed" line. Returns 3 if either side failed.
 fork_install() {
-	omp_build_install || return 3
+	local native_from_studio=0
+	# The native addon is built on the Studio through its Latch queue when a slot is free now;
+	# this Mac's own rustc then stays cold. --no-studio means no Studio at all.
+	if ! has_arg --no-studio && latch_studio_native_build; then
+		native_from_studio=1
+	fi
+	OMP_NATIVE_FROM_STUDIO=$native_from_studio omp_build_install || return 3
 	has_arg --no-studio && return 0
 	echo "== rebuild and install omp on the Studio =="
 	local log url
@@ -73,7 +168,7 @@ fork_install() {
 		wt="\$dir/.claude/worktrees/sync-fork-main"
 		[[ -d "\$wt" ]] || git worktree add -q --detach "\$wt" origin/main
 		cd "\$wt"
-		git checkout -q --detach origin/main
+		git checkout -q -f --detach origin/main
 		$(declare -f omp_build_install)
 		omp_build_install </dev/null
 	EOF
