@@ -31,12 +31,19 @@ fork_check() {
 # queue runs that on the Studio instead, when a slot is free right now. Otherwise this Mac builds.
 NATIVE_MEMORY_MIB=12288
 NATIVE_CPU_CORES=8
+NATIVE_ADMISSION_SECONDS=150
 
 # Latch is the Studio's job queue (v0.18 on studio1). `latch schedule` is foreground: it admits the
 # job when the machine and the reservations allow it, runs the command, and exits with its status.
 # It is submitted in batch mode, because builds may overlap ordinary work; isolated waits for a
 # quiet window the sync does not need. Never pass --gpu there: the Studios idle at 2-6% with the
 # live server loaded, and Latch admits a GPU job only under 2%.
+#
+# `--timeout` is the admission deadline, not a build limit: Latch gives up while the job is still
+# waiting for a slot and returns that as a failure, which is the local fallback. Keep it short
+# (NATIVE_ADMISSION_SECONDS). A free Studio admits in about 7 s (cooldown plus the temperature
+# guard's five one-second samples), and the reservation below is the only thing the deadline can
+# enforce: a job that is admitted runs to completion.
 #
 # Returns 1 without doing anything when no slot is free now (a queued job, an isolated task, or too
 # little memory headroom) or when the build fails, leaving the caller to build locally.
@@ -87,6 +94,7 @@ view = json.load(sys.stdin)
 capacity = view.get("capacity", {})
 ok = not view.get("jobs") and not view.get("isolatedTaskRunning")
 ok = ok and capacity.get("memoryHeadroomMiB", 0) >= '"$NATIVE_MEMORY_MIB"'
+ok = ok and capacity.get("unreservedCPUCores", 0) >= '"$NATIVE_CPU_CORES"'
 sys.exit(0 if ok else 1)' || {
 		echo "no Latch slot free on the Studio right now: building the native addon here"
 		return 1
@@ -105,7 +113,7 @@ sys.exit(0 if ok else 1)' || {
 		git checkout -q -f --detach origin/main
 		if ! bun install --frozen-lockfile >/dev/null 2>&1; then bun install >/dev/null; git checkout -- bun.lock; fi
 		latch schedule --name omp-native-build --mode batch --cpu $NATIVE_CPU_CORES --memory-mib $NATIVE_MEMORY_MIB \
-			--timeout 1800 -- /bin/bash -c 'exec bun run build:native'
+			--timeout $NATIVE_ADMISSION_SECONDS -- /bin/bash -c 'exec bun run build:native'
 	EOF
 	then
 		echo "STUDIO NATIVE BUILD FAILED: building the native addon here"
