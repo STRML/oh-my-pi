@@ -1001,9 +1001,16 @@ async fn create_session_for_run(
 		.map(|(key, value)| (BString::from(key), BString::from(value)))
 		.collect();
 	let initial = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
-	let cwd = requested_cwd(&slot, &initial, startup_cwd)
-		.await?
-		.unwrap_or(initial);
+	// A restored image brings its own working directory and `Session::restore`
+	// ignores `SessionConfig::cwd`, so a requested startup cwd is left to the
+	// first command's `requested_cwd` chdir; setting the core's cwd here would
+	// make that comparison see the request as already applied.
+	let cwd = match config.seed {
+		Some(_) => initial,
+		None => requested_cwd(&slot, &initial, startup_cwd)
+			.await?
+			.unwrap_or(initial),
+	};
 	// The pi utilities (and their `PI_DISABLE_*` gates), the process
 	// builtins, `nohup`, `timeout` and the `git` layers are the session's
 	// commands (`crate::tools`), configured from this environment; `exec`
