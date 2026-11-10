@@ -93,8 +93,12 @@ import json, sys
 view = json.load(sys.stdin)
 capacity = view.get("capacity", {})
 ok = not view.get("jobs") and not view.get("isolatedTaskRunning")
-ok = ok and capacity.get("memoryHeadroomMiB", 0) >= '"$NATIVE_MEMORY_MIB"'
+ok = ok and view.get("processLatch", "free") == "free"
 ok = ok and capacity.get("unreservedCPUCores", 0) >= '"$NATIVE_CPU_CORES"'
+# The memory figure is present only in some snapshots; when it is missing, admission decides
+# inside the deadline.
+headroom = capacity.get("memoryHeadroomMiB")
+ok = ok and (headroom is None or headroom >= '"$NATIVE_MEMORY_MIB"')
 sys.exit(0 if ok else 1)' || {
 		echo "no Latch slot free on the Studio right now: building the native addon here"
 		return 1
