@@ -143,8 +143,8 @@ omp_build_install() {
 	echo "installed $dest = $want"
 }
 
-# Rebuilds here, then on the Studio through studio-sh (LAN or tailnet). Tailscale SSH always
-# exits 0, so the Studio's success is its "installed" line. Returns 3 if either side failed.
+# Rebuilds here, then on the Studio over ssh (LAN, else tailnet), whose success is its
+# "installed" line. Returns 3 if either side failed.
 fork_install() {
 	local native_from_studio=0
 	# The native addon is built on the Studio through its Latch queue when a slot is free now;
@@ -158,7 +158,7 @@ fork_install() {
 	local log url
 	url="$(git -C "$ROOT" remote get-url origin)"
 	log="$(mktemp)"
-	studio-sh <<-EOF 2>&1 | tee "$log" || true
+	studio_run <<-EOF 2>&1 | tee "$log" || true
 		set -euo pipefail
 		export PATH="\$HOME/.local/bin:\$HOME/.bun/bin:\$HOME/.cargo/bin:/opt/homebrew/bin:\$PATH"
 		dir="\$HOME/git/forks/omp"
