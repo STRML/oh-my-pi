@@ -53,6 +53,7 @@ function makeComponent(
 				fetchUsageReports: async () => reports,
 				modelRegistry: {
 					isUsingOAuth: () => false,
+					isUsingSubscription: () => false,
 					authStorage: {
 						oauth: {
 							identity: (provider: string) =>
