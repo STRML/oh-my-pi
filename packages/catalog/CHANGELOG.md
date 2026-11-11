@@ -49,6 +49,9 @@
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+### Changed
+
+- Re-enabled the built-in `google-antigravity` provider (dropping the `disabled` auth rule) so Antigravity models resolve and login again; the transport now rewrites the system-prompt literals Cloud Code Assist answers with a false 429.
 
 ## [18.18.6] - 2026-11-09
 

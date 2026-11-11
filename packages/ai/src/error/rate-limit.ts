@@ -60,10 +60,16 @@ const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b
 // quota exhaustion, not per-minute rate limiting.
 const CLINE_PASS_QUOTA_PATTERN = /clinepass limit|free limit reached on model/i;
 // gRPC/Connect end-streams carry the status as its name (`resource_exhausted`),
-// while HTTP bodies use the phrase ("resource exhausted"). Strip either form
-// before classifying explicit details; an otherwise opaque status is transient
-// model capacity, while quota/rate-limit/server wording remains authoritative.
-const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/gi;
+// while HTTP bodies use the phrase ("resource exhausted", or Google's
+// "Resource has been exhausted (e.g. check quota)."). Strip either form, plus
+// Google's own fixed parenthetical, before classifying explicit details; an
+// otherwise opaque status is transient model capacity, while quota/rate-limit
+// /server wording remains authoritative.
+const RESOURCE_EXHAUSTED_PATTERN =
+	/resource[\s._-]+(?:has[\s._-]+been[\s._-]+)?exhausted(?:\s*\(e\.g\. check quota\))?/gi;
+// The same body with its "(e.g. check quota)" tail: Google's detail-free
+// throttle/exhaustion 429, which carries no signal either way.
+const DETAIL_FREE_CCA_429_PATTERN = /resource[\s._-]+(?:has[\s._-]+been[\s._-]+)?exhausted\s*\(e\.g\. check quota\)/i;
 const CONCURRENT_LIMIT_PATTERN =
 	// Require an actual cap signal near "concurrent". "Too many concurrent
 	// requests" is itself a cap signal; bare feature rejections such as
@@ -541,6 +547,14 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 	// keeps its usage-limit verdict.
 	if (TPM_RPM_THROTTLE_PATTERN.test(errorMessage) && parseRateLimitReason(errorMessage) === "RATE_LIMIT_EXCEEDED") {
 		return false;
+	}
+	// Google's detail-free Cloud Code Assist throttle body reads exactly like
+	// real exhaustion; only its "(e.g. check quota)" parenthetical is unique.
+	// Defer to the classifier there so a throttle does not rotate the credential
+	// and write the 30-minute QUOTA_EXHAUSTED block (#11689, #11809).
+	if (DETAIL_FREE_CCA_429_PATTERN.test(errorMessage)) {
+		const reason = parseRateLimitReason(errorMessage);
+		return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
 	}
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||

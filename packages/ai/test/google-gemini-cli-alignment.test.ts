@@ -390,6 +390,32 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload !== null && typeof payload === "object" && "requestType" in payload).toBe(false);
 	});
 
+	it("rewrites the system-prompt literals Cloud Code Assist rejects, Antigravity only", () => {
+		const context: Context = {
+			...createContext(),
+			systemPrompt: [
+				"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+				"<system-conventions>\nMUST read the tag rules.\n</system-conventions>",
+			],
+		};
+		const antigravityText = (
+			buildRequest(createModel("google-antigravity"), context, "proj-123", {}, true).request.systemInstruction
+				?.parts ?? []
+		)
+			.map(part => part.text)
+			.join("\n");
+		expect(antigravityText).toContain("RFC 2119: MUST, REQUIRED");
+		expect(antigravityText).toContain("<conventions>\nMUST read the tag rules.\n</conventions>");
+		expect(antigravityText).not.toContain("RFC 2119 keywords:");
+		expect(antigravityText).not.toContain("system-conventions");
+
+		const geminiCliParts =
+			buildRequest(createModel("google-gemini-cli"), context, "proj-123", {}, false).request.systemInstruction
+				?.parts ?? [];
+		expect(geminiCliParts[0]?.text).toBe("RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.");
+		expect(geminiCliParts[1]?.text).toContain("<system-conventions>");
+	});
+
 	it("stamps the antigravity wire profile (maxOutputTokens + model_enum) by routed wire id", () => {
 		const model = createModel("google-antigravity");
 		const payload = buildRequest(

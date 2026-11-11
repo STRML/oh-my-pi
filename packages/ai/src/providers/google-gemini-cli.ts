@@ -1291,6 +1291,29 @@ function buildAntigravityRequestEnvelope(
 	return { sessionId, requestId, labels };
 }
 
+/**
+ * Cloud Code Assist answers a fixed-string prompt fingerprint with a
+ * contentless 429 `RESOURCE_EXHAUSTED`, which omp would otherwise read as quota
+ * exhaustion (#11699, #12029, #18706). Each entry below is a literal that has
+ * drawn that 429; the replacement keeps the instruction intact. Only the
+ * Antigravity transport rewrites — every other transport sends the prompt
+ * verbatim.
+ */
+const ANTIGRAVITY_PROMPT_FINGERPRINTS: ReadonlyArray<readonly [RegExp, string]> = [
+	// Shipped by #13379, which was itself a reword around the previous literal.
+	[/RFC 2119 keywords:/g, "RFC 2119:"],
+	// Legacy tag name, still carried by the seance agent prompt.
+	[/<(\/?)system-conventions>/g, "<$1conventions>"],
+];
+
+function neutralizeAntigravitySystemPromptFingerprint(text: string): string {
+	let neutralized = text;
+	for (const [pattern, replacement] of ANTIGRAVITY_PROMPT_FINGERPRINTS) {
+		neutralized = neutralized.replace(pattern, replacement);
+	}
+	return neutralized;
+}
+
 export function buildRequest(
 	model: Model<"google-gemini-cli">,
 	context: Context,
@@ -1353,7 +1376,9 @@ export function buildRequest(
 	if (systemPrompts.length > 0) {
 		request.systemInstruction = {
 			...(isAntigravity ? { role: "user" } : {}),
-			parts: systemPrompts.map(text => ({ text })),
+			parts: systemPrompts.map(text => ({
+				text: isAntigravity ? neutralizeAntigravitySystemPromptFingerprint(text) : text,
+			})),
 		};
 	}
 

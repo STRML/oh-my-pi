@@ -35,6 +35,11 @@
 
 - Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
 
+### Fixed
+
+- Antigravity requests rewrite the system-prompt literals that Cloud Code Assist answers with a false `429 RESOURCE_EXHAUSTED` (`RFC 2119 keywords:` and the legacy `<system-conventions>` tag); other transports send the prompt verbatim.
+- A detail-free Cloud Code Assist `Resource has been exhausted (e.g. check quota).` 429 now classifies as transient model capacity, so it retries on the same credential instead of writing the 30-minute quota block that failed every later turn locally.
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
