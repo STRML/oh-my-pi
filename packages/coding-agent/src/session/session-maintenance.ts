@@ -3336,7 +3336,7 @@ export class SessionMaintenance {
 			signal?.aborted ||
 			this.#host.isDisposed() ||
 			this.isCompacting ||
-			this.#host.isGeneratingHandoff() ||
+			this.#host.isSessionTransitioning() ||
 			!context?.willContinue
 		)
 			return false;
