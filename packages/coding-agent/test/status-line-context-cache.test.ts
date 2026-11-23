@@ -23,6 +23,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { cfgCompactionThresholdPercent } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { getSessionAccentAnsi } from "@oh-my-pi/pi-tui/theme/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
 import {
@@ -474,11 +475,12 @@ describe("StatusLineComponent context breakdown", () => {
 		const pathStart = wide.indexOf("📁");
 		const naturalPath = wide.slice(pathStart, wide.indexOf("▶", pathStart)).trimEnd();
 
-		// Sweep through widths where the path itself fits beside the gauge but the
-		// model/cost segments do not: the folder must keep its full width and the
-		// overflow must land on line 2 instead of being absorbed by the path.
+		// Start where the path itself fits beside the gauge plus one separator, so
+		// the sweep works from any checkout length, then run into widths that
+		// force the model/cost segments to overflow.
+		const firstWidth = visibleWidth(naturalPath) + 16;
 		let sawOverflow = false;
-		for (let width = 32; width <= 80; width += 2) {
+		for (let width = firstWidth; width <= firstWidth + 48; width += 2) {
 			const lines = comp
 				.getTopBorder(width)
 				.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
