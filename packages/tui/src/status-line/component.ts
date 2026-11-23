@@ -3529,44 +3529,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				rightWidths.pop();
 				rightWidth = right.length > 0 ? rightWidth - removedWidth - rightSepWidth - 2 : 0;
 			}
-			// Shrink path before dropping left segments — path is the only elastic segment
-			let pathWasShrunk = false;
-			const pathIdx = leftSegIds.indexOf("path");
-			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
-				const overflow = totalWidth() - topFillWidth;
-				const currentPathVW = leftWidths[pathIdx];
-				const minPathVW = 8; // icon + ellipsis + a few chars
-				const shrinkable = currentPathVW - minPathVW;
-				if (shrinkable > 0) {
-					const shrinkBy = Math.min(shrinkable, overflow);
-					const currentMaxLen = ctx.options.path?.maxLength ?? 40;
-					let newMaxLen = Math.max(4, Math.min(currentMaxLen, currentPathVW) - shrinkBy);
-					const pathCtx = (maxLen: number): SegmentContext => ({
-						...ctx,
-						options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
-					});
-					let reRendered = renderSegment("path", pathCtx(newMaxLen));
-					if (reRendered.visible && reRendered.content) {
-						let pathWidth = visibleWidth(reRendered.content);
-						// maxLength governs path text, not icon prefix; iterate to compensate
-						for (let i = 0; i < 8; i++) {
-							const saved = currentPathVW - pathWidth;
-							if (saved >= shrinkBy) break;
-							const nextMaxLen = Math.max(4, newMaxLen - (shrinkBy - saved));
-							if (nextMaxLen >= newMaxLen) break; // no progress or hit floor
-							newMaxLen = nextMaxLen;
-							const adjusted = renderSegment("path", pathCtx(newMaxLen));
-							if (!adjusted.visible || !adjusted.content) break;
-							reRendered = adjusted;
-							pathWidth = visibleWidth(adjusted.content);
-						}
-						left[pathIdx] = reRendered.content;
-						leftWidth += pathWidth - currentPathVW;
-						leftWidths[pathIdx] = pathWidth;
-						pathWasShrunk = true;
-					}
-				}
-			}
 			const leftOverflowDropIndex = (): number => {
 				// Preserve the current working directory as long as possible. The
 				// previous right-to-left pop could collapse a normal-width bar to
@@ -3578,7 +3540,50 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				return left.length - 1;
 			};
 
+			// Overflow the segments to the right of the path before compressing it.
+			// Shrinking first cut the folder to its floor even when dropping one
+			// trailing segment (cost, usage) freed more room than the row needed.
+			let pathSqueezed = false;
 			while (totalWidth() > topFillWidth && left.length > 0) {
+				if (left.length === 1 && !pathSqueezed) {
+					pathSqueezed = true;
+					const pathIdx = leftSegIds.indexOf("path");
+					if (pathIdx >= 0) {
+						const overflow = totalWidth() - topFillWidth;
+						const currentPathVW = leftWidths[pathIdx];
+						const minPathVW = 8; // icon + ellipsis + a few chars
+						const shrinkable = currentPathVW - minPathVW;
+						if (shrinkable > 0) {
+							const shrinkBy = Math.min(shrinkable, overflow);
+							const currentMaxLen = ctx.options.path?.maxLength ?? 40;
+							let newMaxLen = Math.max(4, Math.min(currentMaxLen, currentPathVW) - shrinkBy);
+							const pathCtx = (maxLen: number): SegmentContext => ({
+								...ctx,
+								options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
+							});
+							let reRendered = renderSegment("path", pathCtx(newMaxLen));
+							if (reRendered.visible && reRendered.content) {
+								let pathWidth = visibleWidth(reRendered.content);
+								// maxLength governs path text, not icon prefix; iterate to compensate
+								for (let i = 0; i < 8; i++) {
+									const saved = currentPathVW - pathWidth;
+									if (saved >= shrinkBy) break;
+									const nextMaxLen = Math.max(4, newMaxLen - (shrinkBy - saved));
+									if (nextMaxLen >= newMaxLen) break; // no progress or hit floor
+									newMaxLen = nextMaxLen;
+									const adjusted = renderSegment("path", pathCtx(newMaxLen));
+									if (!adjusted.visible || !adjusted.content) break;
+									reRendered = adjusted;
+									pathWidth = visibleWidth(adjusted.content);
+								}
+								left[pathIdx] = reRendered.content;
+								leftWidth += pathWidth - currentPathVW;
+								leftWidths[pathIdx] = pathWidth;
+							}
+						}
+						if (totalWidth() <= topFillWidth) break;
+					}
+				}
 				const dropIdx = leftOverflowDropIndex();
 				const dropped = left[dropIdx];
 				// Segments shed from line 1 move to the overflow row instead of
@@ -3589,32 +3594,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				leftWidths.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = left.length > 0 ? leftWidth - removedWidth - leftSepWidth - 2 : 0;
-			}
-			// The pre-drop shrink can leave the path at its 8-column floor while
-			// the capped gauge and the segments dropped to line 2 free most of
-			// the row. Hand that room back so a short path is not truncated next
-			// to empty border rule.
-			const expandedPathIdx = leftSegIds.indexOf("path");
-			if (embedContext && pathWasShrunk && expandedPathIdx >= 0) {
-				const spare = topFillWidth - leftWidth - rightWidth - CONTEXT_GAUGE_MAX_CELLS;
-				const currentVW = leftWidths[expandedPathIdx];
-				const naturalMax = ctx.options.path?.maxLength ?? 40;
-				if (spare > 0 && currentVW > 0) {
-					for (let maxLen = naturalMax; maxLen >= 4; maxLen--) {
-						const wider = renderSegment("path", {
-							...ctx,
-							options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
-						});
-						if (!wider.visible || !wider.content) continue;
-						const widerVW = visibleWidth(wider.content);
-						if (widerVW > currentVW && widerVW - currentVW <= spare) {
-							left[expandedPathIdx] = wider.content;
-							leftWidth += widerVW - currentVW;
-							leftWidths[expandedPathIdx] = widerVW;
-							break;
-						}
-					}
-				}
 			}
 		}
 

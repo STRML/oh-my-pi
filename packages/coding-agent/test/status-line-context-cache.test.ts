@@ -452,7 +452,46 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(gauge.length).toBe(10);
 	});
 
-	it("re-expands the path after overflow drops the segments that filled the row", () => {
+	it("never truncates the folder to absorb a row that is barely too wide", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 50_000, contextWindow: 1_000_000, percent: 5 },
+		});
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "path", "cost", "context_pct"],
+			rightSegments: [],
+			separator: "powerline",
+			sessionAccent: false,
+			contextLine: "embedded",
+		});
+
+		const wide = comp
+			.getTopBorder(200)
+			.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
+			.split("\n")[0]!;
+		const pathStart = wide.indexOf("📁");
+		const naturalPath = wide.slice(pathStart, wide.indexOf("▶", pathStart)).trimEnd();
+
+		// Sweep through widths where the path itself fits beside the gauge but the
+		// model/cost segments do not: the folder must keep its full width and the
+		// overflow must land on line 2 instead of being absorbed by the path.
+		let sawOverflow = false;
+		for (let width = 32; width <= 80; width += 2) {
+			const lines = comp
+				.getTopBorder(width)
+				.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
+				.split("\n");
+			if (lines.length > 1) sawOverflow = true;
+			const pathLines = lines.filter(line => line.includes("📁"));
+			expect(pathLines.length).toBe(1);
+			expect(pathLines[0]).toContain(naturalPath);
+		}
+		expect(sawOverflow).toBe(true);
+	});
+
+	it("drops a long model segment rather than truncating the path", () => {
 		const { session } = makeSession({
 			messages: [userMessage("hi"), assistantMessage("done")],
 			usage: { tokens: 50_000, contextWindow: 1_000_000, percent: 5 },
@@ -477,7 +516,7 @@ describe("StatusLineComponent context breakdown", () => {
 		const naturalPath = wide.slice(pathStart, wide.indexOf("▶", pathStart)).trimEnd();
 
 		// The long model segment has to move to the overflow line at 40 columns;
-		// the freed room belongs to the path, not to the gauge or empty rule.
+		// the path keeps its width instead of shrinking to its floor.
 		const narrow = comp
 			.getTopBorder(40)
 			.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
