@@ -3530,6 +3530,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				rightWidth = right.length > 0 ? rightWidth - removedWidth - rightSepWidth - 2 : 0;
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
+			let pathWasShrunk = false;
 			const pathIdx = leftSegIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
@@ -3562,6 +3563,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 						left[pathIdx] = reRendered.content;
 						leftWidth += pathWidth - currentPathVW;
 						leftWidths[pathIdx] = pathWidth;
+						pathWasShrunk = true;
 					}
 				}
 			}
@@ -3587,6 +3589,32 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				leftWidths.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = left.length > 0 ? leftWidth - removedWidth - leftSepWidth - 2 : 0;
+			}
+			// The pre-drop shrink can leave the path at its 8-column floor while
+			// the capped gauge and the segments dropped to line 2 free most of
+			// the row. Hand that room back so a short path is not truncated next
+			// to empty border rule.
+			const expandedPathIdx = leftSegIds.indexOf("path");
+			if (embedContext && pathWasShrunk && expandedPathIdx >= 0) {
+				const spare = topFillWidth - leftWidth - rightWidth - CONTEXT_GAUGE_MAX_CELLS;
+				const currentVW = leftWidths[expandedPathIdx];
+				const naturalMax = ctx.options.path?.maxLength ?? 40;
+				if (spare > 0 && currentVW > 0) {
+					for (let maxLen = naturalMax; maxLen >= 4; maxLen--) {
+						const wider = renderSegment("path", {
+							...ctx,
+							options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
+						});
+						if (!wider.visible || !wider.content) continue;
+						const widerVW = visibleWidth(wider.content);
+						if (widerVW > currentVW && widerVW - currentVW <= spare) {
+							left[expandedPathIdx] = wider.content;
+							leftWidth += widerVW - currentVW;
+							leftWidths[expandedPathIdx] = widerVW;
+							break;
+						}
+					}
+				}
 			}
 		}
 

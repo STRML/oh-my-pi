@@ -63,9 +63,11 @@ function makeSession(opts: {
 	sessionName?: string | null;
 	/** Model input modalities; gates snapcompact availability in boundary math. */
 	modelInput?: string[];
+	/** Model id rendered by the model segment; defaults to `test-model`. */
+	modelId?: string;
 }): Fake {
 	const contextWindow = opts.contextWindow ?? 200_000;
-	const model = { id: "test-model", contextWindow, input: opts.modelInput ?? ["text"] };
+	const model = { id: opts.modelId ?? "test-model", contextWindow, input: opts.modelInput ?? ["text"] };
 	let usage: ContextUsage | undefined = "usage" in opts ? opts.usage : { tokens: 1234, contextWindow, percent: 0.6 };
 	let calls = 0;
 	let revision = 0;
@@ -448,6 +450,40 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(gauge).toContain("21%");
 		expect(gauge).toContain("1M");
 		expect(gauge.length).toBe(10);
+	});
+
+	it("re-expands the path after overflow drops the segments that filled the row", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 50_000, contextWindow: 1_000_000, percent: 5 },
+			modelId: "a-very-long-model-name-x",
+		});
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "path", "context_pct"],
+			rightSegments: [],
+			separator: "powerline",
+			sessionAccent: false,
+			contextLine: "embedded",
+		});
+
+		// Unconstrained render: the path occupies its natural width.
+		const wide = comp
+			.getTopBorder(200)
+			.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
+			.split("\n")[0]!;
+		const pathStart = wide.indexOf("📁");
+		const naturalPath = wide.slice(pathStart, wide.indexOf("▶", pathStart)).trimEnd();
+
+		// The long model segment has to move to the overflow line at 40 columns;
+		// the freed room belongs to the path, not to the gauge or empty rule.
+		const narrow = comp
+			.getTopBorder(40)
+			.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
+			.split("\n");
+		expect(narrow[0]).toContain(naturalPath);
+		expect(narrow[1]).toContain("a-very-long-model-name-x");
 	});
 
 	it("keeps the embedded labels when a long session title consumes the status line", () => {
