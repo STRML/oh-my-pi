@@ -517,10 +517,11 @@ describe("StatusLineComponent context breakdown", () => {
 		const pathStart = wide.indexOf("📁");
 		const naturalPath = wide.slice(pathStart, wide.indexOf("▶", pathStart)).trimEnd();
 
-		// The long model segment has to move to the overflow line at 40 columns;
-		// the path keeps its width instead of shrinking to its floor.
+		// Wide enough for the path plus the gauge and one separator, too narrow for
+		// the long model: the model must move to the overflow line while the path
+		// keeps its width instead of shrinking to its floor.
 		const narrow = comp
-			.getTopBorder(40)
+			.getTopBorder(visibleWidth(naturalPath) + 16)
 			.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
 			.split("\n");
 		expect(narrow[0]).toContain(naturalPath);
@@ -536,7 +537,7 @@ describe("StatusLineComponent context breakdown", () => {
 		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		comp.updateSettings({
 			preset: "custom",
-			leftSegments: ["pi", "model", "path", "context_pct"],
+			leftSegments: ["pi", "model", "context_pct"],
 			rightSegments: ["session_name"],
 			separator: "powerline-thin",
 			sessionAccent: false,
