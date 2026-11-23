@@ -201,6 +201,24 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					label: "premium requests",
 					session: { cost: 0, premiumRequests: 2, advisorCost: 0 },
 				},
+				{
+					label: "advisor roster spanning two providers",
+					session: { cost: 0.42, premiumRequests: 0, advisorCost: 12.4 },
+					context: {
+						advisorUsage: {
+							fiveHour: { percent: 13, resetMinutes: 42 },
+							sevenDay: { percent: 93, resetHours: 24 },
+							providers: [
+								{
+									provider: "anthropic-sigint",
+									fiveHour: { percent: 13, resetMinutes: 42 },
+									sevenDay: { percent: 13, resetHours: 132 },
+								},
+								{ provider: "openai-codex", sevenDay: { percent: 93, resetHours: 24 } },
+							],
+						},
+					},
+				},
 			];
 		case "context_pct":
 			return [

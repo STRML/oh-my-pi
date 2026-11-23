@@ -1,5 +1,6 @@
 import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "../theme";
+import type { StatusAdvisorProviderUsage, StatusAdvisorUsage } from "./types";
 
 export { normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 
@@ -17,14 +18,11 @@ export interface BillingSummaryOptions {
 		readonly usingSubscription: boolean;
 	};
 	/**
-	 * Provider-reported subscription windows for the advisor's own account.
+	 * Provider-reported subscription windows for the advisors' own accounts.
 	 * When either window is present the advisor slot shows the real quota
 	 * instead of the token-imputed dollar amount.
 	 */
-	readonly advisorUsage?: {
-		readonly fiveHour?: { readonly percent: number; readonly resetMinutes?: number };
-		readonly sevenDay?: { readonly percent: number; readonly resetHours?: number };
-	};
+	readonly advisorUsage?: StatusAdvisorUsage;
 }
 
 /** Percent display: muted until 50%, then warning, then error at 80%. */
@@ -72,6 +70,43 @@ export function formatQuotaWindow(options: QuotaWindowOptions): string {
 	const resetText =
 		options.reset !== undefined ? theme.fg("muted", ` (${formatUsageReset(options.reset, options.resetUnit)})`) : "";
 	return `${options.label} ${pctText}${resetText}`;
+}
+
+/** Short tag for a provider in the advisor quota groups (`anthropic-sigint` → `sigint`). */
+export function advisorProviderLabel(provider: string): string {
+	if (provider === "openai-codex") return "codex";
+	if (provider === "anthropic") return "claude";
+	if (provider.startsWith("anthropic-")) return provider.slice("anthropic-".length);
+	if (provider.startsWith("openai-")) return provider.slice("openai-".length);
+	return provider;
+}
+
+/** `5h N% (30m) · 7d N% (5d 21h)` for one advisor provider. */
+function formatAdvisorWindows(windows: Pick<StatusAdvisorUsage, "fiveHour" | "sevenDay">, uiTheme: Theme): string {
+	const rendered: string[] = [];
+	if (windows.fiveHour) {
+		rendered.push(
+			formatQuotaWindow({
+				label: "5h",
+				percent: windows.fiveHour.percent,
+				reset: windows.fiveHour.resetMinutes,
+				resetUnit: "m",
+				integer: "round",
+			}),
+		);
+	}
+	if (windows.sevenDay) {
+		rendered.push(
+			formatQuotaWindow({
+				label: "7d",
+				percent: windows.sevenDay.percent,
+				reset: windows.sevenDay.resetHours,
+				resetUnit: "h",
+				integer: "round",
+			}),
+		);
+	}
+	return rendered.join(uiTheme.sep.dot);
 }
 
 /** `showUnit: false` omits the `$`/subscription symbol when the summary already printed it. */
@@ -122,7 +157,10 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	// provider-reported usage windows. When the advisor's provider reports them,
 	// they replace the dollar amount entirely (so non-quota advisors keep their
 	// only cost signal).
-	const advisorWindows = advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay) ? advisorUsage : undefined;
+	const advisorWindows =
+		advisorUsage && (advisorUsage.fiveHour || advisorUsage.sevenDay || (advisorUsage.providers?.length ?? 0) > 0)
+			? advisorUsage
+			: undefined;
 	if (
 		!options.cost &&
 		!subagentCost &&
@@ -152,30 +190,19 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premiumRequests) parts.push(`★ ${formatNumber(premiumRequests)}`);
 	if (advisorWindows) {
-		const windows: string[] = [];
-		if (advisorWindows.fiveHour) {
-			windows.push(
-				formatQuotaWindow({
-					label: "5h",
-					percent: advisorWindows.fiveHour.percent,
-					reset: advisorWindows.fiveHour.resetMinutes,
-					resetUnit: "m",
-					integer: "round",
-				}),
+		const prefix = parts.length > 0 ? "+ " : "";
+		const providerGroups: StatusAdvisorProviderUsage[] = (advisorWindows.providers ?? []).filter(
+			group => group.fiveHour || group.sevenDay,
+		);
+		if (providerGroups.length > 1) {
+			const groups = providerGroups.map(
+				group =>
+					`${uiTheme.fg("muted", advisorProviderLabel(group.provider))} ${formatAdvisorWindows(group, uiTheme)}`,
 			);
+			parts.push(`${prefix}${groups.join(uiTheme.sep.dot)} (adv)`);
+		} else {
+			parts.push(`${prefix}${formatAdvisorWindows(advisorWindows, uiTheme)} (adv)`);
 		}
-		if (advisorWindows.sevenDay) {
-			windows.push(
-				formatQuotaWindow({
-					label: "7d",
-					percent: advisorWindows.sevenDay.percent,
-					reset: advisorWindows.sevenDay.resetHours,
-					resetUnit: "h",
-					integer: "round",
-				}),
-			);
-		}
-		parts.push(`${parts.length > 0 ? "+ " : ""}${windows.join(uiTheme.sep.dot)} (adv)`);
 	} else if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
 		const advisorUnit: BillingUnit = options.advisor.usingSubscription ? "subscription" : "metered";

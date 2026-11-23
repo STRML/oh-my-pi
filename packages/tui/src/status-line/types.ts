@@ -35,6 +35,21 @@ export interface CollabStatus {
 	stateOverride?: CollabSessionState | null;
 }
 
+/** Quota windows for one advisor provider; a roster can span two subscriptions. */
+export interface StatusAdvisorProviderUsage {
+	readonly provider: string;
+	readonly fiveHour?: { readonly percent: number; readonly resetMinutes?: number };
+	readonly sevenDay?: { readonly percent: number; readonly resetHours?: number };
+}
+
+/** Provider-reported subscription windows for the advisors' own accounts. */
+export interface StatusAdvisorUsage {
+	readonly fiveHour?: { readonly percent: number; readonly resetMinutes?: number };
+	readonly sevenDay?: { readonly percent: number; readonly resetHours?: number };
+	/** One entry per distinct advisor provider, in roster order. */
+	readonly providers?: readonly StatusAdvisorProviderUsage[];
+}
+
 export interface StatusLineSegmentOptions {
 	pi?: { showProfile?: boolean };
 	model?: { showThinkingLevel?: boolean };
@@ -214,10 +229,7 @@ export interface SegmentContext {
 	promptCache?: PromptCacheStatus;
 	/** Provider-reported subscription windows for the advisor's own account,
 	 *  keyed to the advisor model's provider/identity (not the primary's). */
-	advisorUsage: {
-		fiveHour?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-	} | null;
+	advisorUsage: StatusAdvisorUsage | null;
 }
 
 /** How close an account's saved resets are to expiring, when it is worth a warning. */

@@ -987,6 +987,42 @@ describe("advisor usage in the cost segment", () => {
 		expect(content).not.toContain("$");
 	});
 
+	it("labels each provider's windows when the advisor roster spans two subscriptions", async () => {
+		const content = await renderCost({
+			reports: [
+				{
+					provider: "anthropic-sigint",
+					limits: [
+						{
+							scope: { windowId: "7d" },
+							window: { resetsAt: now + 132 * 3_600_000 },
+							amount: { usedFraction: 0.13 },
+						},
+					],
+				},
+				{
+					provider: "openai-codex",
+					limits: [
+						{
+							scope: { windowId: "7d" },
+							window: { resetsAt: now + 24 * 3_600_000 },
+							amount: { usedFraction: 0.93 },
+						},
+					],
+				},
+			],
+			advisorCost: 250.86,
+			advisorAccounts: [{ provider: "anthropic-sigint" }, { provider: "openai-codex" }],
+		});
+
+		expect(content).toContain("sigint 7d 13%");
+		expect(content).toContain("(5d 12h)");
+		expect(content).toContain("codex 7d 93%");
+		expect(content).toContain("(1d)");
+		expect(content).toContain("(adv)");
+		expect(content).not.toContain("$");
+	});
+
 	it("still shows advisor limits when the imputed cost is zero", async () => {
 		const content = await renderCost({
 			reports: [

@@ -58,6 +58,8 @@ import type {
 	EffectiveStatusLineSettings,
 	SegmentView,
 	SeparatorDef,
+	StatusAdvisorProviderUsage,
+	StatusAdvisorUsage,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSeparatorStyle,
@@ -2607,9 +2609,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * often runs on a different provider/account than the primary model, so the
 	 * match is keyed to each live advisor's own provider + OAuth identity (the
 	 * same derivation the runtime uses to pick the advisor's API key). The
-	 * rendered percent is the worst across the roster — one shared quota pool,
-	 * and the operative number for status. Untiered windows win over tiered
-	 * within a provider, mirroring {@link #normalizeUsageReports}.
+	 * windows are grouped per provider (one entry per distinct advisor provider,
+	 * in roster order), since a roster can span two subscriptions with separate
+	 * quotas; the flat `fiveHour`/`sevenDay` pair stays the worst across all of
+	 * them for callers that render a single pair. Untiered windows win over
+	 * tiered within a provider, mirroring {@link #normalizeUsageReports}.
 	 *
 	 * Identity comes from the host, never from pi-tui: `activeAccount` is bound
 	 * to the session generic here, so an advisor's own `providerSessionId` is not
@@ -2622,17 +2626,24 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		reports: unknown,
 		accounts: readonly { provider: string; providerSessionId?: string }[],
 		session: TSession,
-	): {
-		fiveHour?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-	} | null {
+	): StatusAdvisorUsage | null {
 		if (!Array.isArray(reports) || accounts.length === 0) return null;
 		const now = Date.now();
-		const fiveHour: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
-		const sevenDay: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
-		let fiveHourUntiered = false;
-		let sevenDayUntiered = false;
-		const revise = (bucket: typeof fiveHour, percent: number, resetsAt: number | undefined): void => {
+		type Window = { percent: number; resetMinutes?: number; resetHours?: number };
+		const byProvider = new Map<
+			string,
+			{ fiveHour: Window; sevenDay: Window; fiveHourUntiered: boolean; sevenDayUntiered: boolean }
+		>();
+		for (const account of accounts) {
+			if (byProvider.has(account.provider)) continue;
+			byProvider.set(account.provider, {
+				fiveHour: { percent: -1 },
+				sevenDay: { percent: -1 },
+				fiveHourUntiered: false,
+				sevenDayUntiered: false,
+			});
+		}
+		const revise = (bucket: Window, percent: number, resetsAt: number | undefined): void => {
 			if (percent <= bucket.percent) return;
 			bucket.percent = percent;
 			if (typeof resetsAt === "number") {
@@ -2642,46 +2653,69 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		};
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
-			const provider = (report as { provider?: unknown }).provider;
-			const limits = (report as { limits?: unknown }).limits;
-			if (!Array.isArray(limits) || typeof provider !== "string") continue;
-			if (!accounts.some(a => a.provider === provider)) continue;
+			if (!("provider" in report) || typeof report.provider !== "string") continue;
+			if (!("limits" in report) || !Array.isArray(report.limits)) continue;
+			const provider = report.provider;
+			const limits = report.limits;
+			const buckets = byProvider.get(provider);
+			if (!buckets) continue;
 			const usageReport = report as UsageReport;
-			for (const account of accounts.filter(a => a.provider === provider)) {
-				const identity = this.host.activeAccount(session, account.provider);
-				for (const limit of limits) {
-					if (!limit || typeof limit !== "object") continue;
-					if (identity && !this.host.limitMatchesActiveAccount(usageReport, limit as UsageLimit, identity))
-						continue;
-					const l = limit as {
-						scope?: { windowId?: string; tier?: string };
-						window?: { resetsAt?: number; durationMs?: number };
-						amount?: { usedFraction?: number };
-					};
-					const windowClass = this.#advisorUsageWindowClass(l);
-					if (!windowClass) continue;
-					const fraction = l.amount?.usedFraction;
-					if (typeof fraction !== "number") continue;
-					const untiered = !l.scope?.tier;
-					if (windowClass === "5h") {
-						if (untiered) fiveHourUntiered = true;
-						if (fiveHourUntiered && !untiered) continue;
-						revise(fiveHour, fraction * 100, l.window?.resetsAt);
-					} else {
-						if (untiered) sevenDayUntiered = true;
-						if (sevenDayUntiered && !untiered) continue;
-						revise(sevenDay, fraction * 100, l.window?.resetsAt);
-					}
+			const identity = this.host.activeAccount(session, provider);
+			for (const limit of limits) {
+				if (!limit || typeof limit !== "object") continue;
+				if (identity && !this.host.limitMatchesActiveAccount(usageReport, limit as UsageLimit, identity)) continue;
+				const l = limit as {
+					scope?: { windowId?: string; tier?: string };
+					window?: { resetsAt?: number; durationMs?: number };
+					amount?: { usedFraction?: number };
+				};
+				const windowClass = this.#advisorUsageWindowClass(l);
+				if (!windowClass) continue;
+				const fraction = l.amount?.usedFraction;
+				if (typeof fraction !== "number") continue;
+				const untiered = !l.scope?.tier;
+				if (windowClass === "5h") {
+					if (untiered) buckets.fiveHourUntiered = true;
+					if (buckets.fiveHourUntiered && !untiered) continue;
+					revise(buckets.fiveHour, fraction * 100, l.window?.resetsAt);
+				} else {
+					if (untiered) buckets.sevenDayUntiered = true;
+					if (buckets.sevenDayUntiered && !untiered) continue;
+					revise(buckets.sevenDay, fraction * 100, l.window?.resetsAt);
 				}
 			}
 		}
+		const providers: StatusAdvisorProviderUsage[] = [];
+		const worst: { fiveHour: Window; sevenDay: Window } = { fiveHour: { percent: -1 }, sevenDay: { percent: -1 } };
+		for (const [provider, buckets] of byProvider) {
+			const entry: {
+				provider: string;
+				fiveHour?: { percent: number; resetMinutes?: number };
+				sevenDay?: { percent: number; resetHours?: number };
+			} = { provider };
+			if (buckets.fiveHour.percent >= 0) {
+				entry.fiveHour = { percent: buckets.fiveHour.percent, resetMinutes: buckets.fiveHour.resetMinutes };
+				if (buckets.fiveHour.percent > worst.fiveHour.percent) worst.fiveHour = { ...buckets.fiveHour };
+			}
+			if (buckets.sevenDay.percent >= 0) {
+				entry.sevenDay = { percent: buckets.sevenDay.percent, resetHours: buckets.sevenDay.resetHours };
+				if (buckets.sevenDay.percent > worst.sevenDay.percent) worst.sevenDay = { ...buckets.sevenDay };
+			}
+			if (entry.fiveHour || entry.sevenDay) providers.push(entry);
+		}
+		if (providers.length === 0) return null;
 		const result: {
 			fiveHour?: { percent: number; resetMinutes?: number };
 			sevenDay?: { percent: number; resetHours?: number };
-		} = {};
-		if (fiveHour.percent >= 0) result.fiveHour = { percent: fiveHour.percent, resetMinutes: fiveHour.resetMinutes };
-		if (sevenDay.percent >= 0) result.sevenDay = { percent: sevenDay.percent, resetHours: sevenDay.resetHours };
-		return result.fiveHour || result.sevenDay ? result : null;
+			providers?: StatusAdvisorProviderUsage[];
+		} = { providers };
+		if (worst.fiveHour.percent >= 0) {
+			result.fiveHour = { percent: worst.fiveHour.percent, resetMinutes: worst.fiveHour.resetMinutes };
+		}
+		if (worst.sevenDay.percent >= 0) {
+			result.sevenDay = { percent: worst.sevenDay.percent, resetHours: worst.sevenDay.resetHours };
+		}
+		return result;
 	}
 
 	/**
