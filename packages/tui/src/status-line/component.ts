@@ -69,6 +69,8 @@ import type {
 
 /** Sparkline cells the ANSI jobs segment draws after the freshest widget's headline. */
 const JOBS_SEGMENT_SPARK_CELLS = 8;
+/** Context hairline width: a readout, not the composer row's flexible space. */
+const CONTEXT_METER_MAX_WIDTH = "10ch";
 
 /** What a click on a native status segment asks omp to open. */
 export type StatusLineNativeAction =
@@ -4143,6 +4145,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				role: "omp.composer.context",
 				value: used,
 				style: "bar",
+				// The hairline is a readout, not the row's flexible space: cap it so the
+				// path and facts keep their width on narrow terminals.
+				max: { w: CONTEXT_METER_MAX_WIDTH },
 				thresholds: getContextMeterThresholds(window),
 				...(used !== null && speculationAt !== null && used > speculationAt
 					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }

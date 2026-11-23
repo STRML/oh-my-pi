@@ -653,7 +653,12 @@ describe("native composer without a status strip", () => {
 			const [first] = (described.c ?? []).filter(isNode);
 			expect(first).toMatchObject({
 				k: "meter",
-				p: { role: "omp.composer.context", style: "bar", actions: { click: "status.context" } },
+				p: {
+					role: "omp.composer.context",
+					style: "bar",
+					max: { w: "10ch" },
+					actions: { click: "status.context" },
+				},
 			});
 			const bar = byRole(described, "omp.composer.bar")!;
 			expect(
