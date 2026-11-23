@@ -71,6 +71,8 @@ import type {
 const JOBS_SEGMENT_SPARK_CELLS = 8;
 /** Context hairline width: a readout, not the composer row's flexible space. */
 const CONTEXT_METER_MAX_WIDTH = "10ch";
+/** ANSI box layout: the embedded context gauge is capped to this many cells. */
+const CONTEXT_GAUGE_MAX_CELLS = 10;
 
 /** What a click on a native status segment asks omp to open. */
 export type StatusLineNativeAction =
@@ -642,8 +644,12 @@ function formatEmbeddedContextPercent(percent: number): string {
 
 /** Gap width the embedded gauge needs for its labels; an unknown percent (`null`) shows the window label alone. */
 function embeddedContextGaugeMinWidth(percent: number | null, contextWindow: number): number {
-	const percentWidth = percent === null ? 0 : formatEmbeddedContextPercent(percent).length + 2;
-	return percentWidth + formatNumber(contextWindow).length + 2;
+	const windowWidth = formatNumber(contextWindow).length;
+	if (percent === null) return windowWidth + 2;
+	const percentWidth = formatEmbeddedContextPercent(percent).length;
+	// The normal layout keeps a leading rule before the percent label; an
+	// overflow percent is anchored to the right edge past the window label.
+	return percentWidth + windowWidth + (percent > 100 ? 2 : 3);
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -3678,6 +3684,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
 		}
 
+		// The gauge is a readout, not the row's flexible space: draw it in the
+		// rightmost cells of the gap and leave the rest as plain border rule, so
+		// the path and segments keep their width on wide terminals.
+		const width = Math.min(gapWidth, CONTEXT_GAUGE_MAX_CELLS);
+		const unusedColor = theme.getFgAnsi("border");
+		const lead = gapWidth > width ? `${unusedColor}${horizontal.repeat(gapWidth - width)}` : "";
+
 		// Unknown usage against a known window (startup prepaint) draws the fresh-session
 		// gauge: one lit cell and the window label, no percent.
 		const clampedPct = pct === null ? 0 : Math.min(100, Math.max(0, pct));
@@ -3685,7 +3698,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		let windowLabel = "";
 		let percentStart = -1;
 		let windowStart = -1;
-		let scaleWidth = gapWidth;
+		let scaleWidth = width;
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
@@ -3693,14 +3706,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (embedContext) {
 			const candidatePercent = pct === null ? "" : formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
+			if (width >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
-					percentStart = gapWidth - percentLabel.length;
+					percentStart = width - percentLabel.length;
 					windowStart = percentStart - 1 - windowLabel.length;
 				} else {
-					windowStart = gapWidth - windowLabel.length - 1;
+					windowStart = width - windowLabel.length - 1;
 				}
 				scaleWidth = windowStart;
 			}
@@ -3709,13 +3722,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// At least one accent cell: a fresh session still shows the session-accent
 		// line starting at the left instead of a fully dim bar.
 		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
-		const unusedColor = theme.getFgAnsi("border");
 
 		// Boundary markers are only meaningful when auto-compaction can fire and
 		// the line is long enough for the markers to read as positions.
 		let speculationIdx = -1;
 		let thresholdIdx = -1;
-		if ((mode === "annotated" || mode === "embedded") && ctx.autoCompactEnabled && gapWidth >= 8) {
+		if ((mode === "annotated" || mode === "embedded") && ctx.autoCompactEnabled && width >= 8) {
 			const boundaries = this.#compactionBoundaries(ctx.contextWindow);
 			if (boundaries) {
 				const cellFor = (percent: number) =>
@@ -3770,11 +3782,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		let out = "\x1b[49m";
 		let activeColor = "";
 		let i = 0;
-		while (i < gapWidth) {
+		while (i < width) {
 			let color: string;
 			let text: string;
 			if (i >= percentStart && i < percentEnd) {
-				const end = Math.min(percentEnd, gapWidth);
+				const end = Math.min(percentEnd, width);
 				color = percentOverflow ? overflowColor : usedColor;
 				text = percentLabel.slice(i - percentStart, end - percentStart);
 				i = end;
@@ -3788,7 +3800,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				i++;
 			} else {
 				const inWindow = i >= windowStart && i < windowEnd;
-				let end = Math.min(inWindow ? windowEnd : i < usedCount ? usedCount : gapWidth, gapWidth);
+				let end = Math.min(inWindow ? windowEnd : i < usedCount ? usedCount : width, width);
 				if (percentStart > i && percentStart < end) end = percentStart;
 				if (thresholdIdx > i && thresholdIdx < end) end = thresholdIdx;
 				if (speculationIdx > i && speculationIdx < end) end = speculationIdx;
@@ -3808,7 +3820,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			}
 			out += text;
 		}
-		return `${out}\x1b[39m`;
+		return `${lead}${out}\x1b[39m`;
 	}
 
 	/** Auto-compaction boundary percents, or null when unavailable (disabled, no window). */

@@ -378,15 +378,13 @@ describe("StatusLineComponent context breakdown", () => {
 			const border = comp.getTopBorder(120);
 			const plain = border.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 			const percentIndex = plain.indexOf("8%");
-			const speculationIndex = plain.indexOf("╎");
-			const compactionIndex = plain.indexOf("┃");
 			const windowIndex = plain.indexOf("1M");
 			expect(border.width).toBe(120);
 			expect(plain).not.toContain("8.0%/1M");
 			expect(percentIndex).toBeGreaterThanOrEqual(0);
-			expect(speculationIndex).toBeGreaterThan(percentIndex);
-			expect(compactionIndex).toBeGreaterThan(speculationIndex);
-			expect(windowIndex).toBeGreaterThan(compactionIndex);
+			// The gauge is capped to 10 cells, so boundary ticks can share a cell
+			// and the threshold wins it; the labels keep their order.
+			expect(windowIndex).toBeGreaterThan(percentIndex);
 			expect(plain.indexOf("1M", windowIndex + 1)).toBe(-1);
 		} finally {
 			cfgStatusLineContextLine.clearOverride(settings);
@@ -426,7 +424,33 @@ describe("StatusLineComponent context breakdown", () => {
 		}
 	});
 
-	it("reserves embedded context labels when a long session title consumes the status line", () => {
+	it("caps the embedded gauge at 10 cells and leaves the rest of the gap as border rule", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 210_000, contextWindow: 1_000_000, percent: 21 },
+		});
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "path", "context_pct"],
+			rightSegments: [],
+			separator: "none",
+			sessionAccent: false,
+			contextLine: "embedded",
+		});
+
+		const border = comp.getTopBorder(120);
+		const content = border.content;
+		// The gauge is the only part that resets the background, so the tail after
+		// its last background reset is exactly the capped readout.
+		const gauge = content.slice(content.lastIndexOf("\x1b[49m")).replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(border.width).toBe(120);
+		expect(gauge).toContain("21%");
+		expect(gauge).toContain("1M");
+		expect(gauge.length).toBe(10);
+	});
+
+	it("keeps the embedded labels when a long session title consumes the status line", () => {
 		const { session } = makeSession({
 			messages: [userMessage("hi"), assistantMessage("done")],
 			usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
